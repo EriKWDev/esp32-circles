@@ -1,0 +1,87 @@
+name: ESP-IDF examples
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/esp-idf-examples.yml"
+      - "components/**"
+      - "config/**"
+      - "examples/esp-idf/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/esp-idf-examples.yml"
+      - "components/**"
+      - "config/**"
+      - "examples/esp-idf/**"
+  workflow_dispatch:
+    inputs:
+      example:
+        description: "changed, all, or one example directory name"
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: esp-idf-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.examples.outputs.matrix }}
+      has_examples: ${{ steps.examples.outputs.has_examples }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: examples
+        env:
+          SELECTION: ${{ github.event.inputs.example || 'changed' }}
+        run: python .github/scripts/discover_esp_idf_examples.py --selection "$SELECTION"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.has_examples == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: ${{ fromJSON(needs.discover.outputs.matrix).include }}
+        idf:
+          - v5.5.5
+          - v6.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ${{ matrix.project.name }} with ESP-IDF ${{ matrix.idf }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          path: ${{ matrix.project.example }}
+          target: esp32c6
+          esp_idf_version: ${{ matrix.idf }}
+      - id: package
+        name: Package flash bundle
+        env:
+          PROJECT_PATH: ${{ matrix.project.example }}
+          PROJECT_NAME: ${{ matrix.project.name }}
+          IDF_VERSION: ${{ matrix.idf }}
+          OUTPUT_DIR: ${{ runner.temp }}/release-artifacts
+        run: >-
+          python .github/scripts/package_esp_idf.py
+          --project "$PROJECT_PATH"
+          --build-dir "$PROJECT_PATH/build"
+          --name "$PROJECT_NAME"
+          --framework-version "$IDF_VERSION"
+          --output-dir "$OUTPUT_DIR"
+      - name: Upload flash bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project.name }}-esp-idf-${{ matrix.idf }}
+          path: ${{ steps.package.outputs.artifact_path }}
+          if-no-files-found: error

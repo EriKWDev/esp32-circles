@@ -1,0 +1,65 @@
+name: Bug report
+description: Report a reproducible example, firmware, or board-support defect
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, device certificates, or private network details.
+  - type: input
+    id: board_revision
+    attributes:
+      label: Board revision
+      description: Printed PCB or product revision, if available
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source commit and path
+      description: Commit SHA plus the example or firmware directory
+    validations:
+      required: true
+  - type: input
+    id: framework
+    attributes:
+      label: Framework version
+      description: Exact ESP-IDF or Arduino-ESP32 version
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste complete text logs; remove secrets first
+      render: text
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Validation surface
+      options:
+        - Physical hardware
+        - CI compilation only
+        - Local compilation only
+    validations:
+      required: true

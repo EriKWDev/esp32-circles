@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused repository, example, or firmware improvement
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What product or development problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and hardware impact
+      description: Identify affected frameworks, examples, pins, peripherals, and flash layout
+    validations:
+      required: true
