@@ -6,18 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 from pathlib import Path, PurePosixPath
+
+from ci_routing_adapter import RoutingSelectionError, routing_report
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 EXAMPLES_ROOT = PurePosixPath("examples/arduino/examples")
-GLOBAL_PREFIXES = (
-    ".github/scripts/",
-    ".github/workflows/arduino-examples.yml",
-    "config/",
-    "examples/arduino/libraries/",
-)
 
 
 def examples() -> list[dict[str, str]]:
@@ -42,18 +37,6 @@ def event_base() -> str | None:
     return None
 
 
-def changed_paths(base: str | None, head: str) -> list[str] | None:
-    base = base or event_base()
-    if not base:
-        return None
-    output = subprocess.check_output(
-        ["git", "diff", "--name-only", f"{base}...{head}"],
-        cwd=REPOSITORY,
-        text=True,
-    )
-    return [PurePosixPath(line.strip()).as_posix() for line in output.splitlines() if line.strip()]
-
-
 def select(selection: str, base: str | None, head: str) -> list[dict[str, str]]:
     available = examples()
     if selection == "all":
@@ -65,18 +48,18 @@ def select(selection: str, base: str | None, head: str) -> list[dict[str, str]]:
             raise SystemExit(f"Unknown Arduino example: {selection}")
         return chosen
 
-    paths = changed_paths(base, head)
-    if paths is None:
-        return available
-    if any(path.startswith(GLOBAL_PREFIXES) for path in paths):
-        return available
-    selected_names = {
-        PurePosixPath(path).parts[3]
-        for path in paths
-        if len(PurePosixPath(path).parts) > 3
-        and PurePosixPath(path).parts[:3] == EXAMPLES_ROOT.parts
-    }
-    return [entry for entry in available if entry["name"] in selected_names]
+    base = base or event_base()
+    if not base:
+        raise SystemExit(
+            "Changed Arduino selection requires a complete base revision; "
+            "use --base, a pull request event, or --selection all."
+        )
+    try:
+        sketch_files = routing_report(base, head)["arduino"]["selected"]
+    except RoutingSelectionError as exc:
+        raise SystemExit(f"Arduino routing failed: {exc}") from exc
+    selected_roots = {PurePosixPath(path).parent.as_posix() for path in sketch_files}
+    return [entry for entry in available if entry["example"] in selected_roots]
 
 
 def emit(selected: list[dict[str, str]]) -> None:

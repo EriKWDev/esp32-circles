@@ -2,19 +2,9 @@ name: Arduino examples
 
 on:
   pull_request:
-    paths:
-      - ".github/scripts/**"
-      - ".github/workflows/arduino-examples.yml"
-      - "config/**"
-      - "examples/arduino/**"
   push:
     branches:
       - main
-    paths:
-      - ".github/scripts/**"
-      - ".github/workflows/arduino-examples.yml"
-      - "config/**"
-      - "examples/arduino/**"
   workflow_dispatch:
     inputs:
       example:
@@ -94,3 +84,27 @@ jobs:
           name: ${{ matrix.project.name }}-arduino-${{ matrix.core }}
           path: ${{ steps.package.outputs.artifact_path }}
           if-no-files-found: error
+
+  result:
+    name: Arduino matrix result
+    if: always()
+    needs:
+      - discover
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selected matrix to pass
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          HAS_EXAMPLES: ${{ needs.discover.outputs.has_examples }}
+        run: |
+          if [[ "$DISCOVER_RESULT" != "success" ]]; then
+            echo "Arduino discovery failed: $DISCOVER_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$HAS_EXAMPLES" == "true" && "$BUILD_RESULT" != "success" ]]; then
+            echo "Selected Arduino matrix did not pass: $BUILD_RESULT" >&2
+            exit 1
+          fi
+          echo "Arduino routing completed (selected=$HAS_EXAMPLES, build=$BUILD_RESULT)."

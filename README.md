@@ -1,32 +1,56 @@
-# ESP32-C6-Touch-AMOLED-2.16
+<div align="center">
+<h1>ESP32-C6-Touch-AMOLED-2.16</h1>
+<strong>Examples, reusable components, firmware references, and recovery resources for the Waveshare ESP32-C6 touch AMOLED board</strong>
 
-[![ESP-IDF examples](https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/esp-idf-examples.yml/badge.svg)](https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/esp-idf-examples.yml)
-[![Arduino examples](https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/arduino-examples.yml/badge.svg)](https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/arduino-examples.yml)
+<p><a href="README_ZH.md">简体中文</a></p>
+<p>
+  <a href="https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/esp-idf-examples.yml"><img alt="ESP-IDF examples" src="https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/esp-idf-examples.yml/badge.svg"></a>
+  <a href="https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/arduino-examples.yml"><img alt="Arduino examples" src="https://github.com/waveshareteam/ESP32-C6-Touch-AMOLED-2.16/actions/workflows/arduino-examples.yml/badge.svg"></a>
+  <a href="LICENSE.txt"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+</p>
+<img src="https://www.waveshare.com/img/devkit/ESP32-C6-Touch-AMOLED-2.16/ESP32-C6-Touch-AMOLED-2.16-details-1.jpg" alt="ESP32-C6-Touch-AMOLED-2.16 product" width="760">
+<p>
+  <a href="https://docs.waveshare.com/ESP32-C6-Touch-AMOLED-2.16">🌐 Product</a> ·
+  <a href="docs/PROJECT_STRUCTURE.md">📚 Documentation</a> ·
+  <a href="firmware/README.md">📦 Firmware</a> ·
+  <a href="examples/esp-idf/README.md">🧩 ESP-IDF</a> ·
+  <a href="examples/arduino/README.md">🔧 Arduino</a>
+</p>
+</div>
 
-Examples, reusable board components, source firmware, and recovery images for the
-Waveshare ESP32-C6-Touch-AMOLED-2.16.
+---
 
-- [English product wiki](https://www.waveshare.com/wiki/ESP32-C6-Touch-AMOLED-2.16)
-- [中文产品 Wiki](https://www.waveshare.net/wiki/ESP32-C6-Touch-AMOLED-2.16)
+## ✨ Overview
 
-## Repository layout
+This repository contains nine first-party ESP-IDF projects, nine first-party
+Arduino sketches, reusable board components, a preserved XiaoZhi source snapshot,
+and prebuilt recovery images for the Waveshare ESP32-C6-Touch-AMOLED-2.16.
+
+The examples target ESP32-C6 with 16 MB flash. The current project configurations
+do not claim PSRAM support. Compilation in GitHub Actions proves software build
+compatibility only; see [hardware validation](docs/HARDWARE_VALIDATION.md) before
+making claims about a physical board.
+
+## 🗂️ Repository structure
 
 | Path | Purpose |
 | --- | --- |
-| `examples/esp-idf/` | First-party ESP-IDF examples |
-| `examples/arduino/examples/` | First-party Arduino sketches |
-| `examples/arduino/libraries/` | Libraries pinned for the Arduino examples |
+| `examples/esp-idf/` | Independent first-party ESP-IDF projects |
+| `examples/arduino/examples/` | Independent first-party Arduino sketches |
+| `examples/arduino/libraries/` | Pinned libraries used by Arduino examples |
 | `components/` | Reusable local ESP-IDF components |
-| `firmware/xiaozhi/` | Source tree for the XiaoZhi firmware variant |
-| `firmware/factory_firmware/` | Prebuilt recovery images |
-| `docs/` | Structure, CI, migration, firmware, and validation notes |
+| `firmware/xiaozhi/` | Preserved upstream XiaoZhi source snapshot |
+| `firmware/factory_firmware/` | Immutable prebuilt recovery images |
+| `docs/` | CI, firmware, migration, structure, and validation notes |
 
-See [Project structure](docs/PROJECT_STRUCTURE.md) for ownership boundaries and
-[Migration guide](docs/MIGRATION.md) for the old-to-new path map.
+Read [Project structure](docs/PROJECT_STRUCTURE.md) for ownership boundaries and
+[Repository migration](docs/MIGRATION.md) for the old-to-new path map.
 
-## ESP-IDF examples
+## 🧪 Examples
 
-Each directory in `examples/esp-idf/` is an independent ESP-IDF project:
+### ESP-IDF
+
+Each directory under `examples/esp-idf/` is an independent project:
 
 ```sh
 cd examples/esp-idf/01_AXP2101_Test
@@ -35,29 +59,39 @@ idf.py build
 idf.py flash monitor
 ```
 
-The CI workflow is the compatibility source of truth and builds every example
-against the maintained ESP-IDF 5.5 and 6.0 lines.
+GitHub Actions validates every project against the exact maintained ESP-IDF 5.5
+and 6.0 versions pinned in the workflow. For scope and artifact details, see
+[Continuous integration](docs/CI.md).
 
-## Arduino examples
+### Arduino
 
-Open the `.ino` file inside an example directory. Use the ESP32-C6 board profile,
-16 MB flash, QIO mode, and the 3 MB application/9 MB FAT partition scheme shown
-below. The CI workflow pins the exact Arduino-ESP32 core used for validation.
+Open the `.ino` file inside an example directory. Select ESP32-C6, 16 MB flash,
+QIO mode, and the 3 MB application/9 MB FAT partition scheme shown below. The
+workflow pins the exact Arduino-ESP32 core used for validation.
 
 ![Arduino IDE Tools configuration](docs/assets/arduino-tools-configuration.png)
 
-LVGL 8 and LVGL 9 are intentionally kept in separate directories. Use LVGL 8
-only with `08_LVGL_V8_Test`; `07_Audio_Test` and `09_LVGL_V9_Test` use LVGL 9.
+LVGL 8 and LVGL 9 deliberately use separate library roots. Use LVGL 8 only with
+`08_LVGL_V8_Test`; `07_Audio_Test` and `09_LVGL_V9_Test` use LVGL 9.
 
-## Firmware
+## 📦 Firmware
 
-Recovery images and the preserved XiaoZhi source snapshot are documented in
-[Firmware](firmware/README.md). The contents under `firmware/` are kept as
-supplied and are excluded from repository CI. Example workflows still upload
-reproducible ZIP bundles with binaries, flash addresses, and flash helpers.
+The repository keeps the XiaoZhi source snapshot and the factory/recovery images
+as provenance-preserved inputs. They are outside the default example-build and
+packaging workflows. Read [Firmware](firmware/README.md) before flashing or
+changing either tree.
 
-## Contributing
+Successful example jobs publish reproducible ZIP bundles containing binaries,
+flash offsets, a manifest, and platform-specific flash helpers. Those generated
+bundles are CI outputs and are never committed.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing board pins, dependencies,
-CI matrices, or release artifacts. Compilation proves software compatibility;
-hardware behavior still requires on-device validation.
+## 🤝 Support and contributing
+
+Start with the [official product documentation](https://docs.waveshare.com/ESP32-C6-Touch-AMOLED-2.16)
+and [Support](SUPPORT.md). Report reproducible repository defects through GitHub
+Issues, without credentials or private device and network data.
+
+Before proposing a change, read [Contributing](CONTRIBUTING.md),
+[Security policy](SECURITY.md), and [Third-party software](THIRD_PARTY.md).
+Hardware-affecting changes require a board revision, source evidence, and an
+on-device result in addition to green CI.

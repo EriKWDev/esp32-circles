@@ -1,0 +1,108 @@
+name: Repository policy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: policy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Documentation and routing policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: revisions
+        name: Resolve the complete diff base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          base="$PR_BASE"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$PUSH_BASE"
+          fi
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          git cat-file -e "${base}^{commit}"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Run repository policy tests
+        run: python -m unittest discover -s .github/scripts/tests -p "test_*.py" -v
+
+      - name: Audit first-party Markdown
+        env:
+          BASE_SHA: ${{ steps.revisions.outputs.base }}
+        run: >-
+          python .github/scripts/repository_audit/audit_markdown.py .
+          --base "$BASE_SHA"
+          --config .github/policy/markdown-audit.json
+          --strict
+
+      - name: Audit changed-file routing
+        env:
+          BASE_SHA: ${{ steps.revisions.outputs.base }}
+        run: |
+          report="$RUNNER_TEMP/ci-routing.json"
+          set +e
+          python .github/scripts/repository_audit/audit_ci_routing.py . \
+            --base "$BASE_SHA" \
+            --routing-config .github/policy/ci-routing.json \
+            --ownership-config .github/policy/markdown-audit.json \
+            --strict-unknown \
+            --format json > "$report"
+          status=$?
+          set -e
+          if [[ ! -s "$report" ]]; then
+            if (( status == 0 )); then
+              echo "Routing audit succeeded without producing a report" >&2
+              exit 2
+            fi
+            exit "$status"
+          fi
+          if ! python - "$report" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          scope = report["scope"]
+          print(
+              "routing: "
+              f"files={scope['changed_files']} "
+              f"docs_only={scope['docs_only']} "
+              f"firmware={scope['firmware_touched']} "
+              f"release_review={scope['release_review_required']}"
+          )
+          for framework in ("esp_idf", "arduino"):
+              data = report[framework]
+              print(
+                  f"{framework}: mode={data['mode']} "
+                  f"selected={len(data['selected'])}/{len(data['available'])}"
+              )
+          if report["unknown_paths"]:
+              print("unknown paths:", *report["unknown_paths"], sep="\n  ")
+          PY
+          then
+            echo "Routing audit produced an invalid JSON report:" >&2
+            cat "$report" >&2
+            exit 2
+          fi
+          exit "$status"
+
+      - name: Check patch whitespace
+        env:
+          BASE_SHA: ${{ steps.revisions.outputs.base }}
+        run: git diff --check "$BASE_SHA"...HEAD

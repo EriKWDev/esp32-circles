@@ -1,0 +1,39 @@
+{
+  "build_override_patterns": [],
+  "documentation_patterns": [],
+  "documentation_asset_patterns": ["Tools Configuration.png"],
+  "ignore_build_patterns": [
+    ".gitignore",
+    ".github/policy/**",
+    ".github/scripts/repository_audit/**",
+    ".github/scripts/tests/**",
+    ".github/workflows/repository-policy.yml",
+    "CHANGELOG*",
+    "THIRD_PARTY*",
+    "releases/**"
+  ],
+  "firmware_patterns": [
+    "02_Example/XiaoZhi-v2.2.5/**",
+    "03_Firmware/**"
+  ],
+  "esp_idf_shared_patterns": [
+    "components/**",
+    "examples/esp-idf/**",
+    "02_Example/ESP-IDF-v5.5.3/**"
+  ],
+  "arduino_shared_patterns": [
+    "examples/arduino/examples/**",
+    "01_Arduino_Libraries/**",
+    "02_Example/Arduino-v3.3.3/**"
+  ],
+  "esp_idf_global_patterns": [
+    ".github/scripts/discover_esp_idf_examples.py",
+    ".github/scripts/package_esp_idf.py"
+  ],
+  "arduino_global_patterns": [
+    ".github/scripts/build_arduino.sh",
+    ".github/scripts/discover_arduino_examples.py",
+    ".github/scripts/package_arduino.py"
+  ],
+  "global_build_patterns": [".github/scripts/ci_routing_adapter.py"]
+}

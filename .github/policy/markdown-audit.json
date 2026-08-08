@@ -1,0 +1,51 @@
+{
+  "classification_rules": [
+    {
+      "category": "first_party_wrapper",
+      "patterns": ["components/xpowers/**"]
+    },
+    {
+      "category": "embedded_upstream",
+      "patterns": [
+        "firmware/xiaozhi/**",
+        "examples/arduino/libraries/**",
+        "examples/arduino/examples/07_Audio_Test/src/esp_codec_dev/**",
+        "examples/arduino/examples/07_Audio_Test/src/codec_board/**",
+        "examples/esp-idf/07_Audio_Test/components/ExternLib/codec_board/**"
+      ]
+    }
+  ],
+  "exclude_patterns": [
+    "firmware/xiaozhi/**",
+    "examples/arduino/libraries/**",
+    "examples/arduino/examples/07_Audio_Test/src/esp_codec_dev/**",
+    "examples/arduino/examples/07_Audio_Test/src/codec_board/**",
+    "examples/esp-idf/07_Audio_Test/components/ExternLib/codec_board/**"
+  ],
+  "pair_exempt_patterns": [".github/pull_request_template.md"],
+  "language_link_exempt_patterns": [],
+  "relative_link_ignore_patterns": [],
+  "docs_only_allowed_patterns": ["docs/assets/**"],
+  "sensitive_allow_regexes": [],
+  "bilingual_pairs": [],
+  "bilingual_directory_mappings": [],
+  "homepage_h3_emoji_allow_patterns": [],
+  "homepage_pairs": [
+    {
+      "english": "README.md",
+      "chinese": "README_ZH.md",
+      "profile": "single-product",
+      "required_components": [],
+      "required_quick_links": [
+        "product",
+        "documentation",
+        "firmware",
+        "esp_idf",
+        "arduino"
+      ],
+      "required_badges": ["build", "license"],
+      "required_h2_icons": ["✨", "🗂️", "🧪", "📦", "🤝"],
+      "h3_emoji_allow_patterns": []
+    }
+  ]
+}

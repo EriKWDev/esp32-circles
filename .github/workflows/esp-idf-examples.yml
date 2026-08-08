@@ -2,21 +2,9 @@ name: ESP-IDF examples
 
 on:
   pull_request:
-    paths:
-      - ".github/scripts/**"
-      - ".github/workflows/esp-idf-examples.yml"
-      - "components/**"
-      - "config/**"
-      - "examples/esp-idf/**"
   push:
     branches:
       - main
-    paths:
-      - ".github/scripts/**"
-      - ".github/workflows/esp-idf-examples.yml"
-      - "components/**"
-      - "config/**"
-      - "examples/esp-idf/**"
   workflow_dispatch:
     inputs:
       example:
@@ -85,3 +73,27 @@ jobs:
           name: ${{ matrix.project.name }}-esp-idf-${{ matrix.idf }}
           path: ${{ steps.package.outputs.artifact_path }}
           if-no-files-found: error
+
+  result:
+    name: ESP-IDF matrix result
+    if: always()
+    needs:
+      - discover
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selected matrix to pass
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          HAS_EXAMPLES: ${{ needs.discover.outputs.has_examples }}
+        run: |
+          if [[ "$DISCOVER_RESULT" != "success" ]]; then
+            echo "ESP-IDF discovery failed: $DISCOVER_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$HAS_EXAMPLES" == "true" && "$BUILD_RESULT" != "success" ]]; then
+            echo "Selected ESP-IDF matrix did not pass: $BUILD_RESULT" >&2
+            exit 1
+          fi
+          echo "ESP-IDF routing completed (selected=$HAS_EXAMPLES, build=$BUILD_RESULT)."

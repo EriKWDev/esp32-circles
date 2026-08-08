@@ -1,5 +1,7 @@
 # Third-party software
 
+[简体中文](THIRD_PARTY_ZH.md)
+
 This repository includes third-party source snapshots and components. Their
 licenses remain authoritative within their respective directories.
 
@@ -14,4 +16,6 @@ licenses remain authoritative within their respective directories.
 
 Managed ESP-IDF dependencies are resolved from each project's
 `idf_component.yml`; consult the generated dependency metadata and upstream
-component records for their exact versions and licenses.
+component records for their exact versions and licenses. Do not infer that a
+similarly named registry component is a drop-in replacement without API,
+license, target, and hardware validation evidence.
