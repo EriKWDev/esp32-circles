@@ -26,7 +26,7 @@ jobs:
       matrix: ${{ steps.examples.outputs.matrix }}
       has_examples: ${{ steps.examples.outputs.has_examples }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: examples
@@ -45,7 +45,7 @@ jobs:
         core:
           - 3.3.11
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: arduino/setup-arduino-cli@v2
       - name: Install Arduino-ESP32 ${{ matrix.core }}
         env:
@@ -79,7 +79,7 @@ jobs:
           --core-version "$CORE_VERSION"
           --output-dir "$OUTPUT_DIR"
       - name: Upload flash bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.project.name }}-arduino-${{ matrix.core }}
           path: ${{ steps.package.outputs.artifact_path }}

@@ -26,7 +26,7 @@ jobs:
       matrix: ${{ steps.examples.outputs.matrix }}
       has_examples: ${{ steps.examples.outputs.has_examples }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: examples
@@ -46,7 +46,7 @@ jobs:
           - v5.5.5
           - v6.0.2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build ${{ matrix.project.name }} with ESP-IDF ${{ matrix.idf }}
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -68,7 +68,7 @@ jobs:
           --framework-version "$IDF_VERSION"
           --output-dir "$OUTPUT_DIR"
       - name: Upload flash bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.project.name }}-esp-idf-${{ matrix.idf }}
           path: ${{ steps.package.outputs.artifact_path }}

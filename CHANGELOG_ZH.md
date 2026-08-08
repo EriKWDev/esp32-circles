@@ -6,6 +6,7 @@
 
 - 统一 ESP-IDF、Arduino、固件、组件、文档和 CI 的目录结构。
 - 增加固定精确版本的 ESP-IDF 与 Arduino CI 矩阵，以及可复现烧录包。
+- 把 GitHub 维护的 checkout 和 artifact Action 更新到当前使用 Node.js 24 的主版本。
 - 增加可识别重命名、缺失上下文时关闭构建的变更路由和稳定的工作流结果任务。
 - 增加仓库策略检查，覆盖双语 Markdown、本地链接、公开文本隐私、纯文档范围和
   CI 路由。

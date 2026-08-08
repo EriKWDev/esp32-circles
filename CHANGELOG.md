@@ -7,6 +7,8 @@
 - Normalize ESP-IDF, Arduino, firmware, component, documentation, and CI roots.
 - Add exact-version ESP-IDF and Arduino CI matrices with reproducible flash
   bundles.
+- Refresh GitHub-maintained checkout and artifact actions to their current
+  Node.js 24 major versions.
 - Add rename-aware, fail-closed change routing and a stable workflow result job.
 - Add repository policy checks for bilingual Markdown, local links, public-text
   privacy, docs-only scope, and CI routing.
