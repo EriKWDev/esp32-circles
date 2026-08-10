@@ -20,4 +20,3 @@ const char *Axp2101_ChargerStatusText(uint8_t charger_status);
 
 void Axp2101_SetAldo2(uint8_t vol);
 void Axp2101_SetAldo3(uint8_t vol);
-

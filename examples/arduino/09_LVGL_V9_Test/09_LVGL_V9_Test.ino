@@ -26,7 +26,7 @@ void setup() {
 uint8_t back = 100;
 
 void loop() {
-#if (Brightness_Test_EN == 1) 
+#if (Brightness_Test_EN == 1)
   if (display_ready && c6_amoled::lvglLock()) {
     c6_amoled::setBacklight(back);
     c6_amoled::lvglUnlock();

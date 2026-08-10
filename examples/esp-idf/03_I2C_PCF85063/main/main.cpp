@@ -12,8 +12,8 @@
 #include "pcf85063a.h"
 
 I2cMasterBus I2cMasterBus_(BSP_I2C_SCL,BSP_I2C_SDA,BSP_I2C_NUM);
-static pcf85063a_dev_t pcf85063; 
-static char LvglDataBuff[40] = {""}; 	
+static pcf85063a_dev_t pcf85063;
+static char LvglDataBuff[40] = {""};
 
 static esp_err_t status_ui_panel_power_reset(void *) {
     Axp2101_SetAldo3(1);

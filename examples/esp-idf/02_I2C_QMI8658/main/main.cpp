@@ -12,8 +12,8 @@
 #include "qmi8658.h"
 
 I2cMasterBus I2cMasterBus_(BSP_I2C_SCL,BSP_I2C_SDA,BSP_I2C_NUM);
-static qmi8658_dev_t qmi8658;       	
-static char LvglDataBuff[40] = {""}; 	
+static qmi8658_dev_t qmi8658;
+static char LvglDataBuff[40] = {""};
 
 static esp_err_t status_ui_panel_power_reset(void *) {
     Axp2101_SetAldo3(1);
@@ -92,9 +92,9 @@ extern "C" void app_main(void) {
         qmi8658_set_accel_odr(&qmi8658, QMI8658_ACCEL_ODR_1000HZ);
         qmi8658_set_gyro_range(&qmi8658, QMI8658_GYRO_RANGE_512DPS);
         qmi8658_set_gyro_odr(&qmi8658, QMI8658_GYRO_ODR_1000HZ);
-        qmi8658_set_accel_unit_mps2(&qmi8658, true); 
-        qmi8658_set_gyro_unit_rads(&qmi8658, true);  
-        qmi8658_set_display_precision(&qmi8658, 4);  
+        qmi8658_set_accel_unit_mps2(&qmi8658, true);
+        qmi8658_set_gyro_unit_rads(&qmi8658, true);
+        qmi8658_set_display_precision(&qmi8658, 4);
 		xTaskCreatePinnedToCore(QMI8658_Task, "QMI8658_Task", 3 * 1024, NULL, 3, NULL,0);
     }
 }
