@@ -46,7 +46,7 @@ class RoutingFixture(unittest.TestCase):
                 'CONFIG_IDF_TARGET="esp32c6"\n',
             )
         for name in ("Blink", "Sensor"):
-            self._write(f"examples/arduino/examples/{name}/{name}.ino", "void setup() {}\nvoid loop() {}\n")
+            self._write(f"examples/arduino/{name}/{name}.ino", "void setup() {}\nvoid loop() {}\n")
         self._write("examples/arduino/libraries/Upstream/README.md", "# Upstream\n")
         self._write("components/xpowers/source.cpp", "int shared;\n")
 
@@ -72,7 +72,7 @@ class RoutingFixture(unittest.TestCase):
         report = self.route(
             Change("M", "README.md"),
             Change("M", "examples/esp-idf/alpha/README.md"),
-            Change("M", "examples/arduino/examples/Blink/README.md"),
+            Change("M", "examples/arduino/Blink/README.md"),
             Change("M", "examples/arduino/libraries/Upstream/README.md"),
         )
         self.assertTrue(report["scope"]["docs_only"])
@@ -82,13 +82,13 @@ class RoutingFixture(unittest.TestCase):
     def test_direct_sources_select_only_the_affected_entries(self) -> None:
         report = self.route(
             Change("M", "examples/esp-idf/alpha/main/main.c"),
-            Change("M", "examples/arduino/examples/Blink/Blink.ino"),
+            Change("M", "examples/arduino/Blink/Blink.ino"),
         )
         self.assertEqual(report["esp_idf"]["mode"], "selected")
         self.assertEqual(report["esp_idf"]["selected"], ["examples/esp-idf/alpha"])
         self.assertEqual(
             report["arduino"]["selected"],
-            ["examples/arduino/examples/Blink/Blink.ino"],
+            ["examples/arduino/Blink/Blink.ino"],
         )
 
     def test_shared_and_workflow_inputs_expand_the_matrix(self) -> None:
@@ -123,7 +123,7 @@ class RoutingFixture(unittest.TestCase):
             Change(
                 "R",
                 "docs/retired-example.md",
-                "examples/arduino/examples/Removed/Removed.ino",
+                "examples/arduino/Removed/Removed.ino",
             )
         )
         self.assertEqual(renamed["arduino"]["mode"], "all")
@@ -182,6 +182,18 @@ class RoutingFixture(unittest.TestCase):
 
 
 class RepositoryDiscoveryTest(unittest.TestCase):
+    def test_common_bsp_source_selects_all_nine_arduino_sketches(self) -> None:
+        report = route_changes(
+            REPOSITORY,
+            [Change("M", "examples/arduino/libraries/C6_AMOLED_BSP/src/C6AmoledBsp.cpp")],
+            load_routing_config(POLICY_ROOT / "ci-routing.json"),
+            load_config(POLICY_ROOT / "markdown-audit.json"),
+            max_files=1_000,
+            max_text_files=1_000,
+        )
+        self.assertEqual(report["arduino"]["mode"], "all")
+        self.assertEqual(len(report["arduino"]["selected"]), 9)
+
     def test_product_discoverers_find_only_the_nine_first_party_entries(self) -> None:
         scripts = REPOSITORY / ".github" / "scripts"
         for script in ("discover_esp_idf_examples.py", "discover_arduino_examples.py"):

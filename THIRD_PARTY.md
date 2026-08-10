@@ -5,6 +5,10 @@
 This repository includes third-party source snapshots and components. Their
 licenses remain authoritative within their respective directories.
 
+`examples/arduino/libraries/C6_AMOLED_BSP` is a first-party board wrapper, not
+third-party software. It centralizes the C6 pins, I2C, AXP2101, SH8601, touch,
+and LVGL 8/9 integration used by the direct Arduino-root sketches.
+
 | Software | Location | Version or source | License location |
 | --- | --- | --- | --- |
 | XPowersLib | `examples/arduino/libraries/XPowersLib` | 0.3.3, Lewis He | `examples/arduino/libraries/XPowersLib/LICENSE` |

@@ -14,13 +14,14 @@ libraries_dir="$(mktemp -d)"
 trap 'rm -rf "$libraries_dir"' EXIT
 
 cp -R examples/arduino/libraries/XPowersLib "$libraries_dir/XPowersLib"
+cp -R examples/arduino/libraries/C6_AMOLED_BSP "$libraries_dir/C6_AMOLED_BSP"
 
 case "$sketch_name" in
   08_LVGL_V8_Test)
     cp -R examples/arduino/libraries/lvgl8/lvgl "$libraries_dir/lvgl"
     cp examples/arduino/libraries/lvgl8/lv_conf.h "$libraries_dir/lv_conf.h"
     ;;
-  07_Audio_Test|09_LVGL_V9_Test)
+  01_AXP2101_Test|02_I2C_QMI8658|03_I2C_PCF85063|04_SD_Card|05_WIFI_STA|06_WIFI_AP|07_Audio_Test|09_LVGL_V9_Test)
     cp -R examples/arduino/libraries/lvgl9/lvgl "$libraries_dir/lvgl"
     cp examples/arduino/libraries/lvgl9/lv_conf.h "$libraries_dir/lv_conf.h"
     ;;

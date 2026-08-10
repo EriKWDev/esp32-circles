@@ -12,7 +12,7 @@ from ci_routing_adapter import RoutingSelectionError, routing_report
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-EXAMPLES_ROOT = PurePosixPath("examples/arduino/examples")
+EXAMPLES_ROOT = PurePosixPath("examples/arduino")
 
 
 def examples() -> list[dict[str, str]]:

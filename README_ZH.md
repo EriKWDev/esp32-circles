@@ -35,8 +35,8 @@ GitHub Actions 编译只能证明软件构建兼容性；如需对实体开发�
 | 路径 | 用途 |
 | --- | --- |
 | `examples/esp-idf/` | 相互独立的第一方 ESP-IDF 工程 |
-| `examples/arduino/examples/` | 相互独立的第一方 Arduino 草图 |
-| `examples/arduino/libraries/` | Arduino 示例使用的固定版本库 |
+| `examples/arduino/<name>/` | 直接位于 Arduino 根目录下的 9 个相互独立的第一方草图 |
+| `examples/arduino/libraries/` | 固定依赖库和第一方 `C6_AMOLED_BSP` 开发板共享库 |
 | `components/` | 可复用的本地 ESP-IDF 组件 |
 | `firmware/xiaozhi/` | 保留的上游 XiaoZhi 源码快照 |
 | `firmware/factory_firmware/` | 不可变的预编译恢复镜像 |
@@ -71,6 +71,8 @@ Arduino-ESP32 Core 精确版本。
 
 LVGL 8 与 LVGL 9 有意使用不同的库目录。仅 `08_LVGL_V8_Test` 使用 LVGL 8；
 `07_Audio_Test` 和 `09_LVGL_V9_Test` 使用 LVGL 9。
+`libraries/C6_AMOLED_BSP` 集中维护 C6 引脚、I2C、AXP2101、SH8601、触控和
+LVGL 8/9 的开发板集成。CI 仍只为每个草图暂存其固定依赖。
 
 ## 📦 固件
 

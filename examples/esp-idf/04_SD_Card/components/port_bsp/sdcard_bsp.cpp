@@ -42,7 +42,15 @@ SdName_(SdName)
     bus_cfg.quadwp_io_num = -1;
     bus_cfg.quadhd_io_num = -1;
     bus_cfg.max_transfer_sz = 4000;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(spi_bus_initialize(spihost, &bus_cfg, SDSPI_DEFAULT_DMA));
+    esp_err_t bus_err = spi_bus_initialize(spihost, &bus_cfg, SDSPI_DEFAULT_DMA);
+    if (bus_err != ESP_OK && bus_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "SD SPI bus init failed: %s", esp_err_to_name(bus_err));
+        is_SdcardInitOK = 0;
+        return;
+    }
+    if (bus_err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "Reusing SPI bus initialized by status UI");
+    }
 
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
@@ -64,6 +72,32 @@ SdName_(SdName)
 
 CustomSDPort::~CustomSDPort() {
 
+}
+
+esp_err_t CustomSDPort::SDPort_GetSnapshot(sdcard_snapshot_t *snapshot) const {
+    if (snapshot == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    *snapshot = {};
+    snapshot->mounted = is_SdcardInitOK != 0;
+    snapshot->card_present = sdCardHead != NULL;
+    if (sdCardHead == NULL) {
+        snprintf(snapshot->card_type, sizeof(snapshot->card_type), "unavailable");
+        return ESP_OK;
+    }
+
+    snapshot->capacity_bytes = sdCardHead->capacity * (uint64_t)sdCardHead->sector_size;
+    if (sdCardHead->is_sdio && sdCardHead->is_mem) {
+        snprintf(snapshot->card_type, sizeof(snapshot->card_type), "SD combo");
+    } else if (sdCardHead->is_sdio) {
+        snprintf(snapshot->card_type, sizeof(snapshot->card_type), "SDIO");
+    } else if (sdCardHead->is_mem) {
+        snprintf(snapshot->card_type, sizeof(snapshot->card_type), "memory card");
+    } else {
+        snprintf(snapshot->card_type, sizeof(snapshot->card_type), "unknown");
+    }
+    return ESP_OK;
 }
 
 int CustomSDPort::SDPort_WriteFile(const char *path, const void *data, size_t data_len) {

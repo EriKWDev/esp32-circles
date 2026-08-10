@@ -6,6 +6,11 @@ Each child directory is a self-contained ESP-IDF project targeting ESP32-C6.
 Projects use managed components for suitable upstream drivers and the shared
 repository component in `components/xpowers` for common PMU code.
 
+Examples 01–06 now publish their PMIC, sensor, SD-card, or Wi-Fi state to the
+on-device status screen while retaining their existing serial logs. Screen
+initialization is optional for the SD-card and Wi-Fi examples, so a display
+initialization failure does not stop their core demonstration flow.
+
 Build one project from its own directory:
 
 ```sh

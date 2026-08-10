@@ -16,7 +16,7 @@
 
 #define BSP_LCD_H_RES           (480)
 #define BSP_LCD_V_RES           (480)
-#define BSP_LCD_CS              (GPIO_NUM_5)
+#define BSP_LCD_CS              (GPIO_NUM_15)
 #define BSP_LCD_PCLK            (GPIO_NUM_0)
 #define BSP_LCD_DATA0           (GPIO_NUM_1)
 #define BSP_LCD_DATA1           (GPIO_NUM_2)
@@ -28,7 +28,7 @@
 #define BSP_LCD_BACKLIGHT       (GPIO_NUM_NC)
 #define BSP_LCD_RST             (GPIO_NUM_NC)
 #define BSP_LCD_TOUCH_RST       (GPIO_NUM_11)
-#define BSP_LCD_TOUCH_INT       (GPIO_NUM_15)
+#define BSP_LCD_TOUCH_INT       (GPIO_NUM_5)
 
 
 #define BSP_SD_MOSI             (GPIO_NUM_1)

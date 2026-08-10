@@ -8,7 +8,7 @@ examples.
 | Previous path | Current path |
 | --- | --- |
 | `01_Arduino_Libraries/` | `examples/arduino/libraries/` |
-| `02_Example/Arduino-v3.3.3/` | `examples/arduino/examples/` |
+| `02_Example/Arduino-v3.3.3/` | `examples/arduino/` (nine direct sketch directories) |
 | `02_Example/ESP-IDF-v5.5.3/` | `examples/esp-idf/` |
 | `02_Example/XiaoZhi-v2.2.5/` | `firmware/xiaozhi/` |
 | `03_Firmware/` | `firmware/factory_firmware/` |
@@ -23,6 +23,10 @@ Build scripts and documentation must use current paths. CI routing retains the
 legacy path map so the large migration diff can be classified without treating
 old product files as unknown inputs. Deleted or renamed example paths still
 trigger validation of the affected framework.
+
+The product-maintained `libraries/C6_AMOLED_BSP` centralizes C6 pins, I2C,
+AXP2101, SH8601, touch, and LVGL 8/9 integration. CI continues to stage only
+the fixed dependencies required by each sketch.
 
 Generated release archives belong under `release-artifacts/` and are not source
 files. The preserved XiaoZhi tree and factory binaries keep their separate

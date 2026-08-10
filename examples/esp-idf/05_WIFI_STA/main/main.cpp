@@ -9,6 +9,7 @@
 
 #include "i2c_bsp.h"
 #include "power_bsp.h"
+#include "status_ui.h"
 #include "user_config.h"
 
 #define APP_NAME "WIFI STA & AP"
@@ -19,6 +20,28 @@ esp_event_handler_instance_t ip_event_instance;
 
 static char wifi_ip[16] = {0}; 
 static char wifi_mac[6] = {0}; 
+static const char *const kStaSsid = "ESP32";
+
+static esp_err_t status_ui_panel_power_reset(void *) {
+    Axp2101_SetAldo3(1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    Axp2101_SetAldo3(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    Axp2101_SetAldo3(1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
+
+static void publish_sta_status(status_ui_level_t level, const char *state) {
+    status_ui_snapshot_t ui = {};
+    ui.level = level;
+    snprintf(ui.title, sizeof(ui.title), "Wi-Fi Station");
+    snprintf(ui.lines[0], sizeof(ui.lines[0]), "Wi-Fi init: ready");
+    snprintf(ui.lines[1], sizeof(ui.lines[1]), "State: %s", state);
+    snprintf(ui.lines[2], sizeof(ui.lines[2]), "SSID: %s", kStaSsid);
+    snprintf(ui.lines[3], sizeof(ui.lines[3]), "IPv4: %s", wifi_ip[0] ? wifi_ip : "not assigned");
+    status_ui_publish(&ui);
+}
 
 void fac_wifi_default_init(void) {
     esp_err_t ret = nvs_flash_init();
@@ -34,9 +57,10 @@ void fac_wifi_default_init(void) {
 }
 
 void FactoryWifiTestStartCallback(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-    if (event_id == WIFI_EVENT_STA_START) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-    } else if (event_id == IP_EVENT_STA_GOT_IP) {
+        publish_sta_status(STATUS_UI_LEVEL_WARNING, "connecting");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         auto *got_ip_event = (ip_event_got_ip_t *) event_data;
         uint32_t ip_addr = got_ip_event->ip_info.ip.addr;
         snprintf(wifi_ip, sizeof(wifi_ip), "%u.%u.%u.%u",
@@ -45,15 +69,17 @@ void FactoryWifiTestStartCallback(void *arg, esp_event_base_t event_base, int32_
                 (uint8_t)(ip_addr >> 16),
                 (uint8_t)(ip_addr >> 24));
         ESP_LOGW(APP_NAME,"STA IP:%s",wifi_ip);
-    } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        publish_sta_status(STATUS_UI_LEVEL_OK, "connected");
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_ip[0] = '\0';
         ESP_LOGW(APP_NAME,"STA Mode Device disconnected");
-    } else if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+        publish_sta_status(STATUS_UI_LEVEL_WARNING, "disconnected");
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *) event_data;
         for (uint8_t i = 0; i < 6; i++)
         wifi_mac[i] = event->mac[i];
 		ESP_LOGW(APP_NAME,"AP MAC:%02X:%02X:%02X:%02X:%02X:%02X",wifi_mac[0],wifi_mac[1],wifi_mac[2],wifi_mac[3],wifi_mac[4],wifi_mac[5]);
-    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         ESP_LOGW(APP_NAME,"AP Mode Device disconnected");
     }
 }
@@ -65,7 +91,7 @@ void fac_wifi_mode_init(bool sta_mode) {
     esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &FactoryWifiTestStartCallback, NULL, &ip_event_instance);
     if(sta_mode) {
         wifi_config_t sta_config = {};
-        strcpy((char*)sta_config.sta.ssid, "ESP32_STA");
+        strcpy((char*)sta_config.sta.ssid, kStaSsid);
         strcpy((char*)sta_config.sta.password, "12345678");
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
@@ -84,7 +110,15 @@ void fac_wifi_mode_init(bool sta_mode) {
 }
 
 extern "C" void app_main(void) {
-	Custom_PmicPortInit(&I2cMasterBus_,0x34);
-	fac_wifi_default_init();
-	fac_wifi_mode_init(1);
+    Custom_PmicPortInit(&I2cMasterBus_, 0x34);
+    status_ui_config_t ui_config = {};
+    ui_config.panel_power_reset = status_ui_panel_power_reset;
+    ui_config.panel_power_reset_context = NULL;
+    const esp_err_t ui_err = status_ui_init(&ui_config);
+    if (ui_err != ESP_OK) {
+        ESP_LOGE("main", "Status UI unavailable: %s", esp_err_to_name(ui_err));
+    }
+    publish_sta_status(STATUS_UI_LEVEL_INFO, "init");
+    fac_wifi_default_init();
+    fac_wifi_mode_init(1);
 }

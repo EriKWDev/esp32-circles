@@ -18,8 +18,9 @@
 | 路径 | 维护方式 | 说明 |
 | --- | --- | --- |
 | `examples/esp-idf/<name>` | 独立工程 | 必须能在不依赖其他示例的情况下配置和构建 |
-| `examples/arduino/examples/<name>` | 独立草图 | CI 只注入该草图所需的固定库 |
-| `examples/arduino/libraries` | Arduino 依赖快照 | LVGL 主版本保持隔离 |
+| `examples/arduino/<name>` | 独立草图 | 9 个第一方草图直接位于 Arduino 根目录；CI 只暂存该草图所需的固定依赖 |
+| `examples/arduino/libraries/C6_AMOLED_BSP` | 第一方开发板包装 | 集中维护 C6 引脚、I2C、AXP2101、SH8601、触控和 LVGL 8/9 集成 |
+| `examples/arduino/libraries` | Arduino 依赖快照 | 上游库继续随仓库保存，LVGL 主版本保持隔离 |
 | `components/xpowers` | 共享本地组件 | 仅含通用源码，不含开发板专用电源策略 |
 | `examples/esp-idf/*/components/pmicpower` | 示例策略包装 | 启动延时和外设策略保留在本地 |
 | `firmware/xiaozhi` | 保留的上游源码 | 不由仓库 CI 修改或验证 |
@@ -36,8 +37,8 @@
 
 此前每个 ESP-IDF 示例都复制了 XPowers 源码。相同核心现已放入
 `components/xpowers`；各示例继续保留自己的 `power_bsp.cpp`，因为这些包装表达
-示例专用行为。嵌入的 Arduino 库和 XiaoZhi 快照继续作为保留来源的上游内容，
-不应被顺带当作第一方代码进行整理。
+示例专用行为。除产品维护的 `C6_AMOLED_BSP` 包装外，嵌入的 Arduino 库和 XiaoZhi
+快照继续作为保留来源的上游内容，不应被顺带当作第一方代码进行整理。
 
 ## 验证边界
 

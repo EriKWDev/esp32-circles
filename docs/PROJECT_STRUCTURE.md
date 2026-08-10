@@ -19,8 +19,9 @@ firmware source and do not describe this product.
 | Path | Maintained as | Notes |
 | --- | --- | --- |
 | `examples/esp-idf/<name>` | Independent project | Must configure and build without another example |
-| `examples/arduino/examples/<name>` | Independent sketch | CI injects only the pinned libraries it needs |
-| `examples/arduino/libraries` | Arduino dependency snapshot | LVGL major versions remain isolated |
+| `examples/arduino/<name>` | Independent sketch | Nine first-party sketches are direct Arduino-root children; CI stages only their fixed dependencies |
+| `examples/arduino/libraries/C6_AMOLED_BSP` | First-party board wrapper | Centralizes C6 pins, I2C, AXP2101, SH8601, touch, and LVGL 8/9 integration |
+| `examples/arduino/libraries` | Arduino dependency snapshot | Upstream libraries remain bundled and LVGL major versions remain isolated |
 | `components/xpowers` | Shared local component | Common source only; no board-specific power policy |
 | `examples/esp-idf/*/components/pmicpower` | Example policy wrapper | Startup delays and peripheral policy remain local |
 | `firmware/xiaozhi` | Preserved upstream source | Not modified or validated by repository CI |
@@ -40,7 +41,8 @@ The XPowers source was duplicated across all ESP-IDF examples. The identical
 core is now in `components/xpowers`; each example keeps its own `power_bsp.cpp`
 because those wrappers express example-specific behavior. Bundled Arduino
 libraries and the XiaoZhi snapshot remain provenance-preserved upstream content,
-not first-party code to normalize opportunistically.
+except for the product-maintained `C6_AMOLED_BSP` wrapper; neither category is
+normalized opportunistically.
 
 ## Validation boundary
 

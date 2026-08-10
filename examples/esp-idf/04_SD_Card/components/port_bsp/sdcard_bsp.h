@@ -1,10 +1,19 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <esp_err.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 #include <driver/sdmmc_host.h>
 
-//#include "display_bsp.h"
+typedef struct {
+    bool mounted;
+    bool card_present;
+    uint64_t capacity_bytes;
+    char card_type[16];
+} sdcard_snapshot_t;
 
 class CustomSDPort
 {
@@ -19,6 +28,7 @@ public:
     ~CustomSDPort();
 
     int SDPort_GetStatus() {return is_SdcardInitOK;}
+    esp_err_t SDPort_GetSnapshot(sdcard_snapshot_t *snapshot) const;
     int SDPort_WriteFile(const char *path, const void *data, size_t data_len);
     int SDPort_ReadFile(const char *path, uint8_t *buffer, size_t *outLen);
     int SDPort_ReadOffset(const char *path, void *buffer, size_t len, size_t offset);

@@ -4,6 +4,10 @@
 
 本仓库包含第三方源码快照和组件。各自目录中的许可证仍为适用条款的权威来源。
 
+`examples/arduino/libraries/C6_AMOLED_BSP` 是第一方开发板包装，并非第三方软件。
+它集中维护直接位于 Arduino 根目录的草图所使用的 C6 引脚、I2C、AXP2101、SH8601、
+触控和 LVGL 8/9 集成。
+
 | 软件 | 位置 | 版本或来源 | 许可证位置 |
 | --- | --- | --- | --- |
 | XPowersLib | `examples/arduino/libraries/XPowersLib` | 0.3.3，Lewis He | `examples/arduino/libraries/XPowersLib/LICENSE` |

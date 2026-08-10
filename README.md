@@ -36,8 +36,8 @@ making claims about a physical board.
 | Path | Purpose |
 | --- | --- |
 | `examples/esp-idf/` | Independent first-party ESP-IDF projects |
-| `examples/arduino/examples/` | Independent first-party Arduino sketches |
-| `examples/arduino/libraries/` | Pinned libraries used by Arduino examples |
+| `examples/arduino/<name>/` | Nine independent first-party Arduino sketches, directly under the Arduino root |
+| `examples/arduino/libraries/` | Pinned dependencies and the first-party `C6_AMOLED_BSP` shared board library |
 | `components/` | Reusable local ESP-IDF components |
 | `firmware/xiaozhi/` | Preserved upstream XiaoZhi source snapshot |
 | `firmware/factory_firmware/` | Immutable prebuilt recovery images |
@@ -73,6 +73,8 @@ workflow pins the exact Arduino-ESP32 core used for validation.
 
 LVGL 8 and LVGL 9 deliberately use separate library roots. Use LVGL 8 only with
 `08_LVGL_V8_Test`; `07_Audio_Test` and `09_LVGL_V9_Test` use LVGL 9.
+`libraries/C6_AMOLED_BSP` centralizes the C6 pins, I2C, AXP2101, SH8601, touch,
+and LVGL 8/9 board integration. CI stages only each sketch's fixed dependencies.
 
 ## 📦 Firmware
 

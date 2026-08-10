@@ -22,7 +22,8 @@
     "02_Example/ESP-IDF-v5.5.3/**"
   ],
   "arduino_shared_patterns": [
-    "examples/arduino/examples/**",
+    "examples/arduino/**",
+    "examples/arduino/libraries/**",
     "01_Arduino_Libraries/**",
     "02_Example/Arduino-v3.3.3/**"
   ],
