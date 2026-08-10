@@ -6,7 +6,7 @@ This repository is a mixed board-support repository:
 
 1. independent ESP-IDF examples;
 2. independent Arduino sketches with pinned local libraries;
-3. reusable board components mixed with example-specific policy wrappers;
+3. a shared managed BSP with product-level application adapters;
 4. a feature-rich preserved source firmware tree;
 5. recovery binaries with different provenance from source-built artifacts.
 
@@ -22,8 +22,8 @@ firmware source and do not describe this product.
 | `examples/arduino/<name>` | Independent sketch | Nine first-party sketches are direct Arduino-root children; CI stages only their fixed dependencies |
 | `examples/arduino/libraries/C6_AMOLED_BSP` | First-party board wrapper | Centralizes C6 pins, I2C, AXP2101, SH8601, touch, and LVGL 8/9 integration |
 | `examples/arduino/libraries` | Arduino dependency snapshot | Upstream libraries remain bundled and LVGL major versions remain isolated |
-| `components/xpowers` | Shared local component | Common source only; no board-specific power policy |
-| `examples/esp-idf/*/components/pmicpower` | Example policy wrapper | Startup delays and peripheral policy remain local |
+| `examples/esp-idf/common/components/status_ui` | Product application component | Renders example status using the managed BSP display lifecycle |
+| ESP-IDF project manifests | Managed board dependency | All nine projects pin one reviewed `esp32_c6_touch_amoled_2_16` BSP commit during validation |
 | `firmware/xiaozhi` | Preserved upstream source | Not modified or validated by repository CI |
 | `firmware/factory_firmware` | Immutable recovery input | Not generated or validated by source CI |
 | `.github/policy` | First-party policy | Routing and Markdown ownership declarations |
@@ -37,12 +37,16 @@ bus components when an authoritative compatible upstream component exists. Keep
 local code when it is board-specific or when API, license, target, ownership, or
 hardware-equivalence evidence is incomplete.
 
-The XPowers source was duplicated across all ESP-IDF examples. The identical
-core is now in `components/xpowers`; each example keeps its own `power_bsp.cpp`
-because those wrappers express example-specific behavior. Bundled Arduino
-libraries and the XiaoZhi snapshot remain provenance-preserved upstream content,
-except for the product-maintained `C6_AMOLED_BSP` wrapper; neither category is
-normalized opportunistically.
+The ESP-IDF examples consume the board-level I2C, PMU, display, touch, storage,
+and audio APIs from the Waveshare BSP repository. During review, each independent
+project pins the same exact commit from BSP PR #185. After the BSP is merged,
+published, and both repositories pass CI, those pins can be replaced with the
+released registry version. Sensor-specific application code and the shared
+status page remain in this product repository.
+
+Bundled Arduino libraries and the XiaoZhi snapshot remain provenance-preserved
+upstream content, except for the product-maintained `C6_AMOLED_BSP` Arduino
+wrapper; neither category is normalized opportunistically.
 
 ## Validation boundary
 

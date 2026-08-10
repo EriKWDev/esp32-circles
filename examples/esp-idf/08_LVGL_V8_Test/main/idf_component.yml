@@ -1,9 +1,9 @@
 ## IDF Component Manager Manifest File
 dependencies:
-  espressif/esp_lcd_sh8601: ^1.0.0
-  ## Required IDF version
   idf:
     version: ">=5.5.0"
   lvgl/lvgl: ^8.4.0
-  waveshare/esp_lcd_touch_cst9217: ^1.0.4
-  espressif/esp_lvgl_adapter: ^0.3.0
+  waveshare/esp32_c6_touch_amoled_2_16:
+    git: https://github.com/waveshareteam/Waveshare-ESP32-components.git
+    path: bsp/esp32_c6_touch_amoled_2_16
+    version: "71e8161bf79fa0dd67710c0576c9093c951101e4"

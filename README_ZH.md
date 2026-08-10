@@ -23,7 +23,7 @@
 ## ✨ 概述
 
 本仓库包含微雪 ESP32-C6-Touch-AMOLED-2.16 的 9 个第一方 ESP-IDF 工程、
-9 个第一方 Arduino 草图、可复用开发板组件、保留的 XiaoZhi 源码快照和
+9 个第一方 Arduino 草图、托管开发板集成、保留的 XiaoZhi 源码快照和
 预编译恢复镜像。
 
 示例面向带 16 MB Flash 的 ESP32-C6。当前工程配置不声明支持 PSRAM。
@@ -37,7 +37,7 @@ GitHub Actions 编译只能证明软件构建兼容性；如需对实体开发�
 | `examples/esp-idf/` | 相互独立的第一方 ESP-IDF 工程 |
 | `examples/arduino/<name>/` | 直接位于 Arduino 根目录下的 9 个相互独立的第一方草图 |
 | `examples/arduino/libraries/` | 固定依赖库和第一方 `C6_AMOLED_BSP` 开发板共享库 |
-| `components/` | 可复用的本地 ESP-IDF 组件 |
+| `examples/esp-idf/common/components/` | 由部分 ESP-IDF 示例共享的产品级组件 |
 | `firmware/xiaozhi/` | 保留的上游 XiaoZhi 源码快照 |
 | `firmware/factory_firmware/` | 不可变的预编译恢复镜像 |
 | `docs/` | CI、固件、迁移、结构和验证说明 |
@@ -60,6 +60,9 @@ idf.py flash monitor
 
 GitHub Actions 会使用工作流中精确固定的 ESP-IDF 5.5 和 6.0 版本验证全部
 工程。CI 范围和产物格式见[持续集成](docs/CI_ZH.md)。
+
+全部 9 个工程都使用共享的微雪 ESP32-C6-Touch-AMOLED-2.16 BSP。BSP 评审期间，
+工程清单固定其 PR 精确提交；只有两个仓库都通过 CI 后，依赖才会切换到正式注册表版本。
 
 ### Arduino
 

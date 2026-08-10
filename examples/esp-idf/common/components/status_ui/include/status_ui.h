@@ -26,19 +26,10 @@ typedef struct {
     char lines[STATUS_UI_LINE_COUNT][STATUS_UI_LINE_MAX_LEN];
 } status_ui_snapshot_t;
 
-typedef esp_err_t (*status_ui_panel_power_reset_cb_t)(void *context);
-
-typedef struct {
-    status_ui_panel_power_reset_cb_t panel_power_reset;
-    void *panel_power_reset_context;
-} status_ui_config_t;
-
 /**
- * Initializes the SH8601 panel and starts the private UI update task.
- * The caller supplies the board-specific panel power/reset sequence so this
- * component has no dependency on a board PMIC component.
+ * Starts the managed board display and the private UI update task.
  */
-esp_err_t status_ui_init(const status_ui_config_t *config);
+esp_err_t status_ui_init(void);
 
 /**
  * Replaces the pending snapshot without blocking the caller.

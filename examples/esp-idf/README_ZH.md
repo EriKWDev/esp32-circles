@@ -2,11 +2,15 @@
 
 [English](README.md)
 
-每个子目录都是面向 ESP32-C6 的独立 ESP-IDF 工程。工程对适合的上游驱动使用
-托管组件，并通过仓库共享组件 `components/xpowers` 复用通用 PMU 代码。
+每个子目录都是面向 ESP32-C6 的独立 ESP-IDF 工程。板级 I2C、PMU、显示、触控、
+存储和音频支持来自 `waveshare/esp32_c6_touch_amoled_2_16` BSP。BSP 评审期间，
+全部工程固定到
+[Waveshare-ESP32-components PR #185](https://github.com/waveshareteam/Waveshare-ESP32-components/pull/185)
+中的同一精确提交。只有 BSP 与本产品矩阵都通过 CI 后，依赖才会切换到正式注册表版本。
 
-01–06 示例会显式加载 `common/components/status_ui`。其 LVGL v9 依赖与 07–09
-示例隔离，后者保留各自的 LVGL 主版本。
+01–06 示例会显式加载产品级 `common/components/status_ui`。其 LVGL v9 依赖与
+07–09 示例隔离，后者保留各自的 LVGL 主版本。状态页属于应用 UI，硬件初始化仍由
+BSP 负责。
 
 01–06 示例现已将 PMIC、传感器、SD 卡或 Wi-Fi 状态发布到设备屏幕，同时保留原有
 串口日志。对于 SD 卡和 Wi-Fi 示例，屏幕初始化是可选的；即使显示初始化失败，核心

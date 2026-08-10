@@ -23,7 +23,7 @@
 ## ✨ Overview
 
 This repository contains nine first-party ESP-IDF projects, nine first-party
-Arduino sketches, reusable board components, a preserved XiaoZhi source snapshot,
+Arduino sketches, managed board integration, a preserved XiaoZhi source snapshot,
 and prebuilt recovery images for the Waveshare ESP32-C6-Touch-AMOLED-2.16.
 
 The examples target ESP32-C6 with 16 MB flash. The current project configurations
@@ -38,7 +38,7 @@ making claims about a physical board.
 | `examples/esp-idf/` | Independent first-party ESP-IDF projects |
 | `examples/arduino/<name>/` | Nine independent first-party Arduino sketches, directly under the Arduino root |
 | `examples/arduino/libraries/` | Pinned dependencies and the first-party `C6_AMOLED_BSP` shared board library |
-| `components/` | Reusable local ESP-IDF components |
+| `examples/esp-idf/common/components/` | Product-level components shared by selected ESP-IDF examples |
 | `firmware/xiaozhi/` | Preserved upstream XiaoZhi source snapshot |
 | `firmware/factory_firmware/` | Immutable prebuilt recovery images |
 | `docs/` | CI, firmware, migration, structure, and validation notes |
@@ -62,6 +62,10 @@ idf.py flash monitor
 GitHub Actions validates every project against the exact maintained ESP-IDF 5.5
 and 6.0 versions pinned in the workflow. For scope and artifact details, see
 [Continuous integration](docs/CI.md).
+
+All nine projects use the shared Waveshare ESP32-C6-Touch-AMOLED-2.16 BSP.
+While the BSP is under review, manifests pin its exact PR commit; the dependency
+will move to the formal registry version only after both repositories pass CI.
 
 ### Arduino
 

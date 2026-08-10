@@ -3,7 +3,6 @@
     {
       "category": "first_party_wrapper",
       "patterns": [
-        "components/xpowers/**",
         "examples/arduino/libraries/C6_AMOLED_BSP/**"
       ]
     },
@@ -13,8 +12,7 @@
         "firmware/xiaozhi/**",
         "examples/arduino/libraries/**",
         "examples/arduino/07_Audio_Test/src/esp_codec_dev/**",
-        "examples/arduino/07_Audio_Test/src/codec_board/**",
-        "examples/esp-idf/07_Audio_Test/components/ExternLib/codec_board/**"
+        "examples/arduino/07_Audio_Test/src/codec_board/**"
       ]
     }
   ],
@@ -22,8 +20,7 @@
     "firmware/xiaozhi/**",
     "examples/arduino/libraries/**",
     "examples/arduino/07_Audio_Test/src/esp_codec_dev/**",
-    "examples/arduino/07_Audio_Test/src/codec_board/**",
-    "examples/esp-idf/07_Audio_Test/components/ExternLib/codec_board/**"
+    "examples/arduino/07_Audio_Test/src/codec_board/**"
   ],
   "pair_exempt_patterns": [".github/pull_request_template.md"],
   "language_link_exempt_patterns": [],

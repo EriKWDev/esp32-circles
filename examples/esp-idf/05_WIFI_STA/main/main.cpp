@@ -7,30 +7,17 @@
 #include <esp_wifi.h>
 #include <nvs_flash.h>
 
-#include "i2c_bsp.h"
-#include "power_bsp.h"
+#include "bsp/esp-bsp.h"
 #include "status_ui.h"
-#include "user_config.h"
 
 #define APP_NAME "WIFI STA & AP"
 
-I2cMasterBus I2cMasterBus_(BSP_I2C_SCL,BSP_I2C_SDA,BSP_I2C_NUM);
 esp_event_handler_instance_t wifi_event_instance;
 esp_event_handler_instance_t ip_event_instance;
 
 static char wifi_ip[16] = {0}; 
 static char wifi_mac[6] = {0}; 
 static const char *const kStaSsid = "ESP32";
-
-static esp_err_t status_ui_panel_power_reset(void *) {
-    Axp2101_SetAldo3(1);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    Axp2101_SetAldo3(0);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    Axp2101_SetAldo3(1);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    return ESP_OK;
-}
 
 static void publish_sta_status(status_ui_level_t level, const char *state) {
     status_ui_snapshot_t ui = {};
@@ -110,11 +97,8 @@ void fac_wifi_mode_init(bool sta_mode) {
 }
 
 extern "C" void app_main(void) {
-    Custom_PmicPortInit(&I2cMasterBus_, 0x34);
-    status_ui_config_t ui_config = {};
-    ui_config.panel_power_reset = status_ui_panel_power_reset;
-    ui_config.panel_power_reset_context = NULL;
-    const esp_err_t ui_err = status_ui_init(&ui_config);
+    ESP_ERROR_CHECK(bsp_pmu_init());
+    const esp_err_t ui_err = status_ui_init();
     if (ui_err != ESP_OK) {
         ESP_LOGE("main", "Status UI unavailable: %s", esp_err_to_name(ui_err));
     }

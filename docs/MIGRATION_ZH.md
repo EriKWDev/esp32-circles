@@ -13,9 +13,11 @@
 | `03_Firmware/` | `firmware/factory_firmware/` |
 | `Tools Configuration.png` | `docs/assets/arduino-tools-configuration.png` |
 
-ESP-IDF 工程现在通过 `EXTRA_COMPONENT_DIRS` 加入仓库级 `components/` 目录。
-各工程的 PMIC 包装组件依赖共享 `xpowers`，不再编译同一核心的私有副本；示例专用
-`power_bsp.cpp` 策略仍保留在本地。
+ESP-IDF 工程现在使用共享的 `waveshare/esp32_c6_touch_amoled_2_16` BSP，不再编译
+各自的 I2C、PMU、显示、触控、存储和音频开发板包装。验证期间，每个工程清单都固定
+到 BSP PR #185 的精确提交。只有该 PR 合并、BSP 正式发布且两个 CI 矩阵都通过后，
+Git 依赖才会替换为正式注册表版本。产品应用逻辑、托管传感器依赖和共享状态 UI
+继续保留在本仓库。
 
 构建脚本和文档必须使用当前路径。CI 路由保留旧路径映射，使大规模迁移差异可以
 正确分类，不会把旧产品文件视为未知输入。删除或重命名示例路径仍会触发对应框架

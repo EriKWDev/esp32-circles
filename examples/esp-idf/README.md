@@ -3,11 +3,17 @@
 [简体中文](README_ZH.md)
 
 Each child directory is a self-contained ESP-IDF project targeting ESP32-C6.
-Projects use managed components for suitable upstream drivers and the shared
-repository component in `components/xpowers` for common PMU code.
+Board-level I2C, PMU, display, touch, storage, and audio support comes from the
+`waveshare/esp32_c6_touch_amoled_2_16` BSP. During BSP review, every project
+pins the same exact commit from
+[Waveshare-ESP32-components PR #185](https://github.com/waveshareteam/Waveshare-ESP32-components/pull/185).
+The dependency will move to a released registry version only after that BSP and
+this product matrix have both passed CI.
 
-Examples 01–06 explicitly load `common/components/status_ui`. Its LVGL v9
-dependency is isolated from examples 07–09, which retain their own LVGL major.
+Examples 01–06 explicitly load the product-level
+`common/components/status_ui`. Its LVGL v9 dependency is isolated from examples
+07–09, which retain their own LVGL major. The status page is application UI;
+hardware initialization remains owned by the BSP.
 
 Examples 01–06 now publish their PMIC, sensor, SD-card, or Wi-Fi state to the
 on-device status screen while retaining their existing serial logs. Screen

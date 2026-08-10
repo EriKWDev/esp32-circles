@@ -14,10 +14,13 @@ examples.
 | `03_Firmware/` | `firmware/factory_firmware/` |
 | `Tools Configuration.png` | `docs/assets/arduino-tools-configuration.png` |
 
-ESP-IDF projects now add the repository-level `components/` directory through
-`EXTRA_COMPONENT_DIRS`. Their PMIC wrappers require the shared `xpowers`
-component instead of compiling private copies of the same core, while
-example-specific `power_bsp.cpp` policy remains local.
+The ESP-IDF projects now consume the shared
+`waveshare/esp32_c6_touch_amoled_2_16` BSP instead of compiling private I2C,
+PMU, display, touch, storage, and audio board wrappers. During validation, each
+project manifest pins the exact commit from BSP PR #185. Once that PR is merged,
+the BSP is published, and both CI matrices pass, the Git dependency will be
+replaced with the formal registry release. Product application logic, managed
+sensor dependencies, and the shared status UI remain local.
 
 Build scripts and documentation must use current paths. CI routing retains the
 legacy path map so the large migration diff can be classified without treating

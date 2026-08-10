@@ -16,7 +16,8 @@
   offsets or names, stale ESP-IDF metadata paths, and unsafe shell filenames.
 - Add first-party English and Simplified Chinese documentation with a symmetric
   product homepage.
-- Deduplicate the ESP-IDF XPowers core while retaining per-example PMIC policy.
+- Migrate all ESP-IDF examples from duplicated board wrappers to the shared
+  ESP32-C6-Touch-AMOLED-2.16 BSP, pinned to its review commit until release.
 
 ## 1.0.0 - 2026-03-30
 

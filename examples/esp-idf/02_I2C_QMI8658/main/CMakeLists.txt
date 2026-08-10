@@ -1,4 +1,4 @@
 idf_component_register(
     SRCS "main.cpp"
-    REQUIRES status_ui port_bsp pmicpower
+    REQUIRES status_ui
     INCLUDE_DIRS ".")

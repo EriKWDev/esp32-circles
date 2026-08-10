@@ -12,7 +12,6 @@ and LVGL 8/9 integration used by the direct Arduino-root sketches.
 | Software | Location | Version or source | License location |
 | --- | --- | --- | --- |
 | XPowersLib | `examples/arduino/libraries/XPowersLib` | 0.3.3, Lewis He | `examples/arduino/libraries/XPowersLib/LICENSE` |
-| XPowersLib core | `components/xpowers` | Derived from the same 0.3.3 snapshot | `components/xpowers/LICENSE` |
 | LVGL | `examples/arduino/libraries/lvgl8/lvgl` | 8.4.0 | `examples/arduino/libraries/lvgl8/lvgl/LICENCE.txt` |
 | LVGL | `examples/arduino/libraries/lvgl9/lvgl` | 9.3.0 | `examples/arduino/libraries/lvgl9/lvgl/LICENCE.txt` |
 | XiaoZhi | `firmware/xiaozhi` | Repository snapshot labeled 2.2.5 | `firmware/xiaozhi/LICENSE` |
@@ -23,3 +22,8 @@ Managed ESP-IDF dependencies are resolved from each project's
 component records for their exact versions and licenses. Do not infer that a
 similarly named registry component is a drop-in replacement without API,
 license, target, and hardware validation evidence.
+
+During BSP review, `waveshare/esp32_c6_touch_amoled_2_16` is fetched from the
+Waveshare components repository at one exact PR commit. Its upstream component
+manifest and license are authoritative until the dependency moves to the formal
+registry release.
