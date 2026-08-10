@@ -3,3 +3,4 @@ list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../../components"
 list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../common/components")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(02_I2C_QMI8658)
+include("${CMAKE_CURRENT_LIST_DIR}/../common/status_ui_idf_compat.cmake")
