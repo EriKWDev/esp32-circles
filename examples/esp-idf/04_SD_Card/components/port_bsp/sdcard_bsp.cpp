@@ -87,7 +87,7 @@ esp_err_t CustomSDPort::SDPort_GetSnapshot(sdcard_snapshot_t *snapshot) const {
         return ESP_OK;
     }
 
-    snapshot->capacity_bytes = sdCardHead->capacity * (uint64_t)sdCardHead->sector_size;
+    snapshot->capacity_bytes = sdCardHead->csd.capacity * (uint64_t)sdCardHead->csd.sector_size;
     if (sdCardHead->is_sdio && sdCardHead->is_mem) {
         snprintf(snapshot->card_type, sizeof(snapshot->card_type), "SD combo");
     } else if (sdCardHead->is_sdio) {

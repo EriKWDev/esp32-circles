@@ -13,7 +13,7 @@ static void publish_status() {
     snprintf(status.lines[1], sizeof(status.lines[1]), "Mount: failed");
   } else {
     sdmmc_card_t *card = sd_card->SDPort_GetCardHead();
-    uint64_t capacity = static_cast<uint64_t>(card->capacity) * card->sector_size;
+    uint64_t capacity = static_cast<uint64_t>(card->csd.capacity) * card->csd.sector_size;
     snprintf(status.lines[1], sizeof(status.lines[1]), "Mount: ready");
     snprintf(status.lines[2], sizeof(status.lines[2]), "Type: %s", card->csd.csd_ver == 2 ? "SDHC/SDXC" : "SDSC");
     snprintf(status.lines[3], sizeof(status.lines[3]), "Capacity: %llu MB", capacity / (1024 * 1024));
