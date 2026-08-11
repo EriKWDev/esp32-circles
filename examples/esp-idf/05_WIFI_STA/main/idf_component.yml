@@ -5,4 +5,4 @@ dependencies:
   waveshare/esp32_c6_touch_amoled_2_16:
     git: https://github.com/waveshareteam/Waveshare-ESP32-components.git
     path: bsp/esp32_c6_touch_amoled_2_16
-    version: "71e8161bf79fa0dd67710c0576c9093c951101e4"
+    version: "6dfe9e55d7ebbb6dc0de0176feb063bc9b04c69d"
