@@ -46,6 +46,8 @@ jobs:
           - 3.3.11
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: arduino/setup-arduino-cli@v2
       - name: Install Arduino-ESP32 ${{ matrix.core }}
         env:
@@ -70,6 +72,7 @@ jobs:
           PROJECT_PATH: ${{ matrix.project.example }}
           PROJECT_NAME: ${{ matrix.project.name }}
           CORE_VERSION: ${{ matrix.core }}
+          PACKAGE_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           OUTPUT_DIR: ${{ runner.temp }}/release-artifacts
         run: >-
           python .github/scripts/package_arduino.py

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -67,7 +68,7 @@ class PackagingTest(unittest.TestCase):
             bootloader={"file": "bootloader/bootloader.bin"},
         )
         github_output = self.output / "github-output.txt"
-        env = dict(os.environ, GITHUB_SHA="deadbeef", GITHUB_OUTPUT=str(github_output))
+        env = dict(os.environ, GITHUB_SHA="deadbeef", PACKAGE_GIT_SHA="package-sha", GITHUB_OUTPUT=str(github_output))
         result = self.run_script(
             "package_esp_idf.py",
             "--project",
@@ -99,7 +100,18 @@ class PackagingTest(unittest.TestCase):
             )
             self.assertEqual(metadata["bootloader"]["file"], "bin/bootloader.bin")
             manifest = json.loads(bundle.read(f"{prefix}/manifest.json"))
-            self.assertEqual(manifest["git_sha"], "deadbeef")
+            self.assertEqual(manifest["git_sha"], "package-sha")
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["board"], "ESP32-C6-Touch-AMOLED-2.16")
+            self.assertEqual(manifest["chip"], "esp32c6")
+            self.assertEqual(manifest["source_project"], "example")
+            self.assertEqual(manifest["flash"], {"baud": 921600})
+            for entry in manifest["files"]:
+                payload = bundle.read(f"{prefix}/{entry['archive_path']}")
+                self.assertEqual(entry["file"], entry["archive_path"])
+                self.assertEqual(entry["address"], entry["offset"])
+                self.assertEqual(entry["size"], len(payload))
+                self.assertEqual(entry["sha256"], hashlib.sha256(payload).hexdigest())
             shell_info = bundle.getinfo(f"{prefix}/flash.sh")
             self.assertTrue((shell_info.external_attr >> 16) & 0o111)
             for member in bundle.infolist():
@@ -266,7 +278,19 @@ class PackagingTest(unittest.TestCase):
             self.assertFalse(any(".." in Path(name).parts for name in names))
             manifest = json.loads(bundle.read(f"{prefix}/manifest.json"))
             self.assertEqual(manifest["sketch"], "example")
+            self.assertEqual(manifest["git_sha"], "unknown")
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["board"], "ESP32-C6-Touch-AMOLED-2.16")
+            self.assertEqual(manifest["chip"], "esp32c6")
+            self.assertEqual(manifest["source_project"], "example")
+            self.assertEqual(manifest["flash"], {"baud": 921600})
             self.assertEqual(len(manifest["files"]), 4)
+            for entry in manifest["files"]:
+                payload = bundle.read(f"{prefix}/{entry['archive_path']}")
+                self.assertEqual(entry["file"], entry["archive_path"])
+                self.assertEqual(entry["address"], entry["offset"])
+                self.assertEqual(entry["size"], len(payload))
+                self.assertEqual(entry["sha256"], hashlib.sha256(payload).hexdigest())
             batch = bundle.read(f"{prefix}/flash.bat").decode("utf-8")
             self.assertIn('0x10000 "bin\\Example.ino.bin"', batch)
             shell = bundle.read(f"{prefix}/flash.sh").decode("utf-8")

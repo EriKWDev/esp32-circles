@@ -194,6 +194,22 @@ class RepositoryDiscoveryTest(unittest.TestCase):
         self.assertEqual(report["arduino"]["mode"], "all")
         self.assertEqual(len(report["arduino"]["selected"]), 9)
 
+    def test_guided_flasher_inputs_select_all_examples(self) -> None:
+        for path in ("Flash-CI-Firmware.cmd", "scripts/Flash-CI-Firmware.ps1"):
+            with self.subTest(path=path):
+                report = route_changes(
+                    REPOSITORY,
+                    [Change("M", path)],
+                    load_routing_config(POLICY_ROOT / "ci-routing.json"),
+                    load_config(POLICY_ROOT / "markdown-audit.json"),
+                    max_files=1_000,
+                    max_text_files=1_000,
+                )
+                self.assertEqual(report["esp_idf"]["mode"], "all")
+                self.assertEqual(len(report["esp_idf"]["selected"]), 9)
+                self.assertEqual(report["arduino"]["mode"], "all")
+                self.assertEqual(len(report["arduino"]["selected"]), 9)
+
     def test_product_discoverers_find_only_the_nine_first_party_entries(self) -> None:
         scripts = REPOSITORY / ".github" / "scripts"
         for script in ("discover_esp_idf_examples.py", "discover_arduino_examples.py"):

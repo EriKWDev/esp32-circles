@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -102,7 +103,7 @@ def main() -> None:
         binary_dir = bundle / "bin"
         binary_dir.mkdir(parents=True)
         destination_names: set[str] = set()
-        packaged: list[dict[str, str]] = []
+        packaged: list[dict[str, object]] = []
         for address, source in files:
             safe_component(source.name, "Arduino output filename")
             if source.name in destination_names:
@@ -110,16 +111,31 @@ def main() -> None:
             destination_names.add(source.name)
             destination = binary_dir / source.name
             shutil.copy2(source, destination)
-            packaged.append({"address": address, "file": destination.relative_to(bundle).as_posix()})
+            bundled_path = destination.relative_to(bundle).as_posix()
+            packaged.append(
+                {
+                    "address": address,
+                    "file": bundled_path,
+                    "archive_path": bundled_path,
+                    "offset": address,
+                    "size": destination.stat().st_size,
+                    "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                }
+            )
 
         manifest = {
+            "schema_version": 1,
+            "board": "ESP32-C6-Touch-AMOLED-2.16",
+            "chip": "esp32c6",
             "name": name,
             "framework": "arduino-esp32",
             "framework_version": core_version,
             "target": "esp32c6",
             "sketch": sketch.relative_to(repository).as_posix(),
-            "git_sha": os.environ.get("GITHUB_SHA", "unknown"),
+            "source_project": sketch.relative_to(repository).as_posix(),
+            "git_sha": os.environ.get("PACKAGE_GIT_SHA") or os.environ.get("GITHUB_SHA", "unknown"),
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "flash": {"baud": 921600},
             "files": packaged,
         }
         (bundle / "manifest.json").write_text(

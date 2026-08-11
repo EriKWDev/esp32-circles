@@ -36,5 +36,9 @@
     ".github/scripts/discover_arduino_examples.py",
     ".github/scripts/package_arduino.py"
   ],
-  "global_build_patterns": [".github/scripts/ci_routing_adapter.py"]
+  "global_build_patterns": [
+    ".github/scripts/ci_routing_adapter.py",
+    "Flash-CI-Firmware.cmd",
+    "scripts/Flash-CI-Firmware.ps1"
+  ]
 }

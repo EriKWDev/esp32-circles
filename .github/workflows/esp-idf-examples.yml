@@ -47,6 +47,8 @@ jobs:
           - v6.0.2
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build ${{ matrix.project.name }} with ESP-IDF ${{ matrix.idf }}
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -59,6 +61,7 @@ jobs:
           PROJECT_PATH: ${{ matrix.project.example }}
           PROJECT_NAME: ${{ matrix.project.name }}
           IDF_VERSION: ${{ matrix.idf }}
+          PACKAGE_GIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           OUTPUT_DIR: ${{ runner.temp }}/release-artifacts
         run: >-
           python .github/scripts/package_esp_idf.py

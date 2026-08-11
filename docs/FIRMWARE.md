@@ -29,3 +29,21 @@ Use recovery images only with the offsets and procedure in the
 A successful build of current XiaoZhi source would not certify that a historical
 binary is reproducible from it. CI artifacts cover the example projects, not the
 preserved firmware paths.
+
+## Guided CI artifact flashing
+
+`Flash-CI-Firmware.cmd` starts a Windows GUI for testing the 27 example bundles
+from a clean, non-detached branch with exactly one open, non-draft pull request.
+It only accepts successful workflow artifacts whose SHA matches local `HEAD`.
+Install Git, authenticated GitHub CLI (`gh auth login`), Python with `esptool`,
+and a USB serial driver first. Run `Flash-CI-Firmware.cmd -ListOnly` to inspect
+the planned order, or `Flash-CI-Firmware.cmd -SelfTest` to check the local
+contract without a device, authentication, or GUI. Use `-Port COMx` when the
+tool cannot identify exactly one ESP32-C6 USB VID/PID device.
+
+The GUI verifies each archive manifest, bundled file hash and size, and flash
+range before it invokes `python -m esptool ... write_flash`. It never erases the
+flash. After a verified write, test the board and select **Mark PASS and flash
+next**; progress is stored per final SHA outside the repository. Example CI
+artifacts are diagnostic test builds, not replacements for factory recovery
+images or a factory flashing procedure.

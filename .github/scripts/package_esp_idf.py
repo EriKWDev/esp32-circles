@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -144,13 +145,22 @@ def main() -> None:
             destination_names.add(source.name)
             resolved.append((parsed_address, normalized_address, source))
 
-        packaged: list[dict[str, str]] = []
+        packaged: list[dict[str, object]] = []
         metadata_replacements: dict[str, str] = {}
         for _, address, source in sorted(resolved, key=lambda item: item[0]):
             destination = binary_dir / source.name
             shutil.copy2(source, destination)
             bundled_path = destination.relative_to(bundle).as_posix()
-            packaged.append({"address": address, "file": bundled_path})
+            packaged.append(
+                {
+                    "address": address,
+                    "file": bundled_path,
+                    "archive_path": bundled_path,
+                    "offset": address,
+                    "size": destination.stat().st_size,
+                    "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                }
+            )
             original_path = flash_files[address]
             metadata_replacements[original_path] = bundled_path
 
@@ -163,13 +173,18 @@ def main() -> None:
             json.dumps(portable_flash_metadata, indent=2) + "\n", encoding="utf-8"
         )
         manifest = {
+            "schema_version": 1,
+            "board": "ESP32-C6-Touch-AMOLED-2.16",
+            "chip": "esp32c6",
             "name": name,
             "framework": "esp-idf",
             "framework_version": framework_version,
             "target": "esp32c6",
             "project": project.relative_to(repository).as_posix(),
-            "git_sha": os.environ.get("GITHUB_SHA", "unknown"),
+            "source_project": project.relative_to(repository).as_posix(),
+            "git_sha": os.environ.get("PACKAGE_GIT_SHA") or os.environ.get("GITHUB_SHA", "unknown"),
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "flash": {"baud": 921600},
             "files": packaged,
         }
         (bundle / "manifest.json").write_text(
