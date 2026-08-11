@@ -268,7 +268,10 @@ class PackagingTest(unittest.TestCase):
 
     def test_arduino_bundle_supports_external_build_and_output_directories(self) -> None:
         self.create_arduino_outputs()
-        result = self.run_script("package_arduino.py", *self.arduino_arguments())
+        env = dict(os.environ)
+        env.pop("PACKAGE_GIT_SHA", None)
+        env.pop("GITHUB_SHA", None)
+        result = self.run_script("package_arduino.py", *self.arduino_arguments(), env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         archive = self.output / "Example-arduino-3.3.11.zip"
         prefix = "Example-arduino-3.3.11"

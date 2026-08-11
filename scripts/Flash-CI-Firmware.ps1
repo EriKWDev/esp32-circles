@@ -58,7 +58,11 @@ if ($SelfTest) {
     if (-not $last.Completed -or @($last.ConfirmedIndexes).Count -ne $Items.Count) { throw 'SelfTest did not complete every item.' }
     $reset = Get-StateForFinalSha ([pscustomobject]@{ FinalSha = 'different'; CurrentIndex = 4; ConfirmedIndexes = @(1,2,3) }) 'expected' ''
     if ($reset.CurrentIndex -ne 1 -or @($reset.ConfirmedIndexes).Count -ne 0) { throw 'SelfTest did not reset state for a new SHA.' }
-    if ((Test-RelativePackagePath 'C:\package' '..\escape.bin') -or (Test-RelativePackagePath 'C:\package' 'C:\escape.bin') -or -not (Test-RelativePackagePath 'C:\package' 'bin\app.bin')) { throw 'SelfTest relative manifest path validation failed.' }
+    $packageRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'package'
+    $parentEscape = Join-Path '..' 'escape.bin'
+    $absoluteEscape = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) 'escape.bin'))
+    $insidePath = Join-Path 'bin' 'app.bin'
+    if ((Test-RelativePackagePath $packageRoot $parentEscape) -or (Test-RelativePackagePath $packageRoot $absoluteEscape) -or -not (Test-RelativePackagePath $packageRoot $insidePath)) { throw 'SelfTest relative manifest path validation failed.' }
     Write-Output 'SELF_TEST_OK startIndex=1 transitions=26 completed=27'
     return
 }
