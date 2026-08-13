@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "root": "firmware/factory_firmware",
+  "artifacts": [
+    {
+      "path": "firmware/factory_firmware/01_Fac-v1.0.0.bin",
+      "size": 15859712,
+      "sha256": "1dd2be304bec964831eec8484c67c97d7b56934343defc4ebcab63ed84d32c33"
+    },
+    {
+      "path": "firmware/factory_firmware/02_xiaozhi-v2.2.5.bin",
+      "size": 11075284,
+      "sha256": "7fddd220c86ad793f360ef88fec8454c2765cf9c596c76fbd0753d01889af169"
+    }
+  ]
+}

@@ -116,6 +116,57 @@ class RoutingFixture(unittest.TestCase):
             {"documentation", "firmware_source_or_config", "firmware_delivery_artifact"},
         )
 
+    def test_canonical_firmware_surfaces_are_classified_without_example_builds(self) -> None:
+        markdown = self.route(Change("M", "firmware/xiaozhi/README.md"))
+        source = self.route(Change("M", "firmware/xiaozhi/sdkconfig.defaults"))
+        binary = self.route(Change("M", "firmware/factory_firmware/01_Fac-v1.0.0.bin"))
+        for report in (markdown, source, binary):
+            self.assertTrue(report["scope"]["firmware_touched"])
+            self.assertFalse(report["scope"]["example_build_required"])
+            self.assertEqual(report["esp_idf"]["mode"], "none")
+            self.assertEqual(report["arduino"]["mode"], "none")
+            self.assertEqual(report["unknown_paths"], [])
+        self.assertTrue(markdown["scope"]["docs_only"])
+        self.assertFalse(markdown["scope"]["release_review_required"])
+        self.assertEqual(markdown["routes"][0]["kind"], "documentation")
+        self.assertFalse(source["scope"]["docs_only"])
+        self.assertFalse(source["scope"]["release_review_required"])
+        self.assertEqual(source["routes"][0]["kind"], "firmware_source_or_config")
+        self.assertFalse(binary["scope"]["docs_only"])
+        self.assertTrue(binary["scope"]["release_review_required"])
+        self.assertEqual(binary["routes"][0]["kind"], "firmware_delivery_artifact")
+
+    def test_canonical_firmware_rename_and_legacy_deletion_remain_firmware(self) -> None:
+        renamed = self.route(
+            Change(
+                "R",
+                "firmware/xiaozhi/main/main.c",
+                "02_Example/XiaoZhi-v2.2.5/main/main.c",
+            )
+        )
+        deleted = self.route(Change("D", "03_Firmware/retired.bin"))
+        for report in (renamed, deleted):
+            self.assertTrue(report["scope"]["firmware_touched"])
+            self.assertFalse(report["scope"]["example_build_required"])
+            self.assertEqual(report["esp_idf"]["mode"], "none")
+            self.assertEqual(report["arduino"]["mode"], "none")
+            self.assertEqual(report["unknown_paths"], [])
+        self.assertFalse(renamed["scope"]["release_review_required"])
+        self.assertEqual(renamed["scope"]["impact_paths"], 2)
+        self.assertTrue(deleted["scope"]["release_review_required"])
+
+    def test_policy_inputs_stay_in_the_visible_lightweight_gate_only(self) -> None:
+        report = self.route(
+            Change("M", ".github/policy/ci-routing.json"),
+            Change("M", ".github/policy/firmware-integrity.json"),
+            Change("M", ".github/scripts/repository_audit/check_firmware_integrity.py"),
+            Change("M", ".github/scripts/tests/test_firmware_integrity.py"),
+        )
+        self.assertFalse(report["scope"]["example_build_required"])
+        self.assertEqual(report["unknown_paths"], [])
+        self.assertEqual(report["esp_idf"]["mode"], "none")
+        self.assertEqual(report["arduino"]["mode"], "none")
+
     def test_deleted_or_renamed_example_routes_the_remaining_framework(self) -> None:
         deleted = self.route(Change("D", "examples/esp-idf/removed/main/main.c"))
         self.assertEqual(deleted["esp_idf"]["mode"], "all")
@@ -157,7 +208,7 @@ class RoutingFixture(unittest.TestCase):
         git("add", ".")
         git("commit", "-qm", "base")
         base = git("rev-parse", "HEAD")
-        self._write("examples/esp-idf/alpha/main/main.c", "void app_main(void) { int changed = 1; }\n")
+        self._write("firmware/xiaozhi/sdkconfig.defaults", 'CONFIG_IDF_TARGET="esp32c6"\n')
         git("add", ".")
         git("commit", "-qm", "change")
         command = [
@@ -177,7 +228,11 @@ class RoutingFixture(unittest.TestCase):
         result = subprocess.run(command, check=False, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
-        self.assertEqual(report["esp_idf"]["selected"], ["examples/esp-idf/alpha"])
+        self.assertTrue(report["scope"]["firmware_touched"])
+        self.assertFalse(report["scope"]["release_review_required"])
+        self.assertFalse(report["scope"]["example_build_required"])
+        self.assertEqual(report["unknown_paths"], [])
+        self.assertEqual(report["esp_idf"]["selected"], [])
         self.assertEqual(report["arduino"]["mode"], "none")
 
 

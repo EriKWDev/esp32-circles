@@ -42,6 +42,11 @@ jobs:
       - name: Run repository policy tests
         run: python -m unittest discover -s .github/scripts/tests -p "test_*.py" -v
 
+      - name: Verify immutable factory firmware
+        run: >-
+          python .github/scripts/repository_audit/check_firmware_integrity.py .
+          --manifest .github/policy/firmware-integrity.json
+
       - name: Audit first-party Markdown
         env:
           BASE_SHA: ${{ steps.revisions.outputs.base }}
