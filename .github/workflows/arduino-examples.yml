@@ -22,6 +22,7 @@ concurrency:
 jobs:
   discover:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       matrix: ${{ steps.examples.outputs.matrix }}
       has_examples: ${{ steps.examples.outputs.has_examples }}
@@ -38,6 +39,7 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_examples == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +97,7 @@ jobs:
       - discover
       - build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require the selected matrix to pass
         env:
