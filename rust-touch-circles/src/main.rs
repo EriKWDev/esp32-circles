@@ -48,24 +48,32 @@ struct Circle {
     y: i32,
     born_ticks: u32,
     full_radius_q4: u32,
-    color: (u8, u8, u8),
+    palette_index: u8,
     drawn_radius_q4: u32,
     drawn_alpha: u8,
 }
 
 const EMPTY: Circle = Circle {
-    live: false, x: 0, y: 0, born_ticks: 0, full_radius_q4: 0, color: (0, 0, 0),
-    drawn_radius_q4: 0, drawn_alpha: 0,
+    live: false, x: 0, y: 0, born_ticks: 0, full_radius_q4: 0,
+    palette_index: 0, drawn_radius_q4: 0, drawn_alpha: 0,
 };
 
 struct Scene {
     circles: [Circle; MAX_CIRCLES],
     next_color: usize,
     was_down: bool,
+    release_started_ticks: u32,
 }
 
 impl Scene {
-    fn new() -> Self { Self { circles: [EMPTY; MAX_CIRCLES], next_color: 0, was_down: false } }
+    fn new() -> Self {
+        Self {
+            circles: [EMPTY; MAX_CIRCLES],
+            next_color: 0,
+            was_down: false,
+            release_started_ticks: 0,
+        }
+    }
 
     fn press(&mut self, x: u16, y: u16, now_ticks: u32) {
         if self.was_down { return; }
@@ -79,7 +87,7 @@ impl Scene {
             *slot = Circle {
                 live: true, x, y, born_ticks: now_ticks,
                 full_radius_q4: far << 4,
-                color: PALETTE[self.next_color % PALETTE.len()],
+                palette_index: (self.next_color % PALETTE.len()) as u8,
                 drawn_radius_q4: 0,
                 drawn_alpha: 255,
             };
@@ -87,7 +95,25 @@ impl Scene {
         }
     }
 
-    fn release(&mut self) { self.was_down = false; }
+    fn observe_touch_line(&mut self, is_low: bool, now_ticks: u32) {
+        /*
+            NOTE: CST9217 GPIO5 is a report pulse, not a stable contact level.
+                  A press re-arms only after 160 ms without another report.
+                  This adds no latency to the initial press.
+        */
+        const RELEASE_TICKS: u32 = 16_000_000 * 160 / 1_000;
+
+        if is_low {
+            self.release_started_ticks = 0;
+        } else if self.was_down {
+            if self.release_started_ticks == 0 {
+                self.release_started_ticks = now_ticks;
+            } else if now_ticks.wrapping_sub(self.release_started_ticks) >= RELEASE_TICKS {
+                self.was_down = false;
+                self.release_started_ticks = 0;
+            }
+        }
+    }
 
     fn count(&self) -> u8 { self.circles.iter().filter(|c| c.live).count() as u8 }
 }
@@ -142,7 +168,8 @@ fn main() -> ! {
     delay.delay_millis(30);
     let touch_int = Input::new(p.GPIO5, InputConfig::default().with_pull(Pull::Up));
 
-    let tx = dma_tx_buffer!(STRIPE_BYTES).unwrap();
+    let transmit_buffer = dma_tx_buffer!(STRIPE_BYTES).unwrap();
+    let packing_buffer = dma_tx_buffer!(STRIPE_BYTES).unwrap();
     let spi = Spi::new(
         p.SPI2,
         SpiConfig::default().with_frequency(Rate::from_mhz(80)).with_mode(Mode::_0),
@@ -154,7 +181,7 @@ fn main() -> ! {
         .with_sio3(p.GPIO4)
         .with_cs(p.GPIO15)
         .with_dma(p.DMA_CH0);
-    let mut lcd = Lcd::new(spi, tx);
+    let mut lcd = Lcd::new(spi, transmit_buffer, packing_buffer);
 
     init_lcd(&mut lcd, &delay);
     let mut scene = Scene::new();
@@ -210,10 +237,9 @@ fn pmic_set_aldo3(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
 }
 
 fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &Input<'_>, scene: &mut Scene, now_ticks: u32) -> bool {
-    if touch_int.is_high() {
-        scene.release();
-        return false;
-    }
+    let touch_line_is_low = touch_int.is_low();
+    scene.observe_touch_line(touch_line_is_low, now_ticks);
+    if !touch_line_is_low { return false; }
     if scene.was_down { return false; }
     let mut d = [0u8; 10];
     if i2c.write_read(TOUCH_ADDR, &[0xd0, 0x00], &mut d).is_ok()
@@ -223,8 +249,6 @@ fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &Input<'_>, sce
         let raw_x = ((d[2] as u16) << 4) | ((d[3] as u16) & 0x0f);
         scene.press(480u16.saturating_sub(raw_x), y, now_ticks);
         return true;
-    } else {
-        scene.release();
     }
     false
 }
@@ -253,11 +277,12 @@ trait LcdBus {
 struct Lcd<'d> {
     spi: Option<SpiDma<'d, esp_hal::Blocking>>,
     tx: Option<DmaTxBuf>,
+    spare: Option<DmaTxBuf>,
 }
 
 impl<'d> Lcd<'d> {
-    fn new(spi: SpiDma<'d, esp_hal::Blocking>, tx: DmaTxBuf) -> Self {
-        Self { spi: Some(spi), tx: Some(tx) }
+    fn new(spi: SpiDma<'d, esp_hal::Blocking>, tx: DmaTxBuf, spare: DmaTxBuf) -> Self {
+        Self { spi: Some(spi), tx: Some(tx), spare: Some(spare) }
     }
 
     #[inline]
@@ -316,7 +341,7 @@ fn update_circles(
             c.drawn_radius_q4 = radius;
         }
         if radius >= c.full_radius_q4 && alpha != c.drawn_alpha {
-            let maps = fade_maps(c.color, c.drawn_alpha, alpha);
+            let maps = fade_maps(PALETTE[c.palette_index as usize], c.drawn_alpha, alpha);
             for ch in 0..3 {
                 for value in 0..16 {
                     combined[ch][value] = maps[ch][combined[ch][value] as usize];
@@ -327,7 +352,15 @@ fn update_circles(
         }
         if alpha == 0 { c.live = false; }
     }
-    if has_fade { Some(combined) } else { None }
+    if has_fade && !scene.circles.iter().any(|circle| circle.live) {
+        frame.fill(0);
+        dirty.fill(true);
+        None
+    } else if has_fade {
+        Some(combined)
+    } else {
+        None
+    }
 }
 
 fn draw_annulus(
@@ -358,8 +391,10 @@ fn draw_annulus(
             // middle is neither tested nor touched.
             let left_end = ((ol + 8) >> 4).clamp(x0, x1);
             let right_start = ((or - 8) >> 4).clamp(x0, x1);
-            draw_annulus_range(frame, dirty, c, y, x0, left_end, nl, nr, ol, or, true);
-            if right_start > left_end {
+            if right_start <= left_end + 1 {
+                draw_annulus_range(frame, dirty, c, y, x0, x1, nl, nr, ol, or, true);
+            } else {
+                draw_annulus_range(frame, dirty, c, y, x0, left_end, nl, nr, ol, or, true);
                 draw_annulus_range(frame, dirty, c, y, right_start, x1, nl, nr, ol, or, true);
             }
         }
@@ -371,34 +406,77 @@ fn draw_annulus_range(
     frame: &mut [u8; FRAME_BYTES], dirty: &mut [bool; TILE_COUNT], c: Circle,
     y: i32, x0: i32, x1: i32, nl: i32, nr: i32, ol: i32, or: i32, has_old: bool,
 ) {
-    for x in x0..=x1 {
+    let mut x = x0;
+    while x <= x1 {
         let px = x << 4;
         let new_inside = (px - nl).min(nr - px);
         let old_inside = if has_old { (px - ol).min(or - px) } else { -16 };
         let nc = (new_inside + 8).clamp(0, 16) as u16;
         let oc = (old_inside + 8).clamp(0, 16) as u16;
-        if nc <= oc { continue; }
+        if nc <= oc {
+            x += 1;
+            continue;
+        }
         // The framebuffer already contains coverage `oc`. Screen blending is
         // nonlinear, so adding (nc-oc) directly leaves a darker colored seam.
         // This LUT supplies the residual alpha that composes oc exactly to nc.
         let coverage = RESIDUAL_ALPHA[oc as usize * 17 + nc as usize] as u16;
-        if y < TILE_H as i32 && x < (TILE_W * 4) as i32 { continue; }
-        blend_pixel(frame, x as usize, y as usize, c.color, coverage);
+        if y < TILE_H as i32 && x < (TILE_W * 4) as i32 {
+            x += 1;
+            continue;
+        }
+
+        if coverage == 255 && x & 1 == 0 && x < x1 {
+            let next_px = (x + 1) << 4;
+            let next_new_inside = (next_px - nl).min(nr - next_px);
+            let next_old_inside = if has_old { (next_px - ol).min(or - next_px) } else { -16 };
+            let next_new_coverage = (next_new_inside + 8).clamp(0, 16) as usize;
+            let next_old_coverage = (next_old_inside + 8).clamp(0, 16) as usize;
+            let next_coverage = RESIDUAL_ALPHA[next_old_coverage * 17 + next_new_coverage];
+
+            if next_coverage == 255 {
+                blend_two_full_pixels(frame, x as usize, y as usize, c.palette_index as usize);
+                let dirty_row = y as usize / TILE_H * TILES_X;
+                dirty[dirty_row + x as usize / TILE_W] = true;
+                dirty[dirty_row + (x as usize + 1) / TILE_W] = true;
+                x += 2;
+                continue;
+            }
+        }
+
+        blend_pixel(frame, x as usize, y as usize, c.palette_index as usize, coverage);
         dirty[(y as usize / TILE_H) * TILES_X + x as usize / TILE_W] = true;
+        x += 1;
     }
 }
 
 #[inline(always)]
-fn blend_pixel(frame: &mut [u8], x: usize, y: usize, color: (u8, u8, u8), alpha: u16) {
+fn blend_two_full_pixels(frame: &mut [u8], x: usize, y: usize, palette_index: usize) {
+    let byte = (y * W + x) * 3 / 2;
+    let first = ((frame[byte] as usize) << 4) | (frame[byte + 1] as usize >> 4);
+    let second = (((frame[byte + 1] as usize) & 15) << 8) | frame[byte + 2] as usize;
+    let transform = &PALETTE_SCREEN_TRANSFORMS[palette_index];
+    let first = transform[first];
+    let second = transform[second];
+
+    frame[byte] = (first >> 4) as u8;
+    frame[byte + 1] = ((first as u8 & 15) << 4) | ((second >> 8) as u8 & 15);
+    frame[byte + 2] = second as u8;
+}
+
+#[inline(always)]
+fn blend_pixel(frame: &mut [u8], x: usize, y: usize, palette_index: usize, alpha: u16) {
     let pi = y * W + x;
     let old = get_rgb444(frame, pi);
-    let (sr, sg, sb) = if alpha >= 254 {
-        ((color.0 >> 4) as usize, (color.1 >> 4) as usize, (color.2 >> 4) as usize)
-    } else {
-        ((mul_255(color.0 as u16, alpha) >> 4) as usize,
-         (mul_255(color.1 as u16, alpha) >> 4) as usize,
-         (mul_255(color.2 as u16, alpha) >> 4) as usize)
-    };
+    if alpha >= 254 {
+        set_rgb444(frame, pi, PALETTE_SCREEN_TRANSFORMS[palette_index][old as usize]);
+        return;
+    }
+
+    let color = PALETTE[palette_index];
+    let sr = (mul_255(color.0 as u16, alpha) >> 4) as usize;
+    let sg = (mul_255(color.1 as u16, alpha) >> 4) as usize;
+    let sb = (mul_255(color.2 as u16, alpha) >> 4) as usize;
     let nr = SCREEN4[sr * 16 + ((old >> 8) & 15) as usize] as u16;
     let ng = SCREEN4[sg * 16 + ((old >> 4) & 15) as usize] as u16;
     let nb = SCREEN4[sb * 16 + (old & 15) as usize] as u16;
@@ -440,6 +518,32 @@ const fn make_screen4() -> [u8; 256] {
 }
 
 const SCREEN4: [u8; 256] = make_screen4();
+
+const fn make_palette_screen_transforms() -> [[u16; 4096]; PALETTE.len()] {
+    let mut transforms = [[0u16; 4096]; PALETTE.len()];
+    let mut palette_index = 0;
+
+    while palette_index < PALETTE.len() {
+        let color = PALETTE[palette_index];
+        let source_red = (color.0 >> 4) as usize;
+        let source_green = (color.1 >> 4) as usize;
+        let source_blue = (color.2 >> 4) as usize;
+        let mut destination = 0;
+
+        while destination < 4096 {
+            let red = SCREEN4[source_red * 16 + ((destination >> 8) & 15)] as u16;
+            let green = SCREEN4[source_green * 16 + ((destination >> 4) & 15)] as u16;
+            let blue = SCREEN4[source_blue * 16 + (destination & 15)] as u16;
+            transforms[palette_index][destination] = (red << 8) | (green << 4) | blue;
+            destination += 1;
+        }
+        palette_index += 1;
+    }
+
+    transforms
+}
+
+const PALETTE_SCREEN_TRANSFORMS: [[u16; 4096]; PALETTE.len()] = make_palette_screen_transforms();
 
 const fn make_residual_alpha() -> [u8; 17 * 17] {
     let mut t = [0u8; 17 * 17];
@@ -512,19 +616,26 @@ fn flush_dirty(
     // twice. The counter rectangle is deliberately excluded from scene fades.
     if let Some(maps) = fade {
         set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
-        for stripe in 0..H / STRIPE_ROWS {
-            pack_mapped_stripe(frame, stripe * STRIPE_ROWS, maps, lcd.buffer_mut());
-            lcd.send_prepared(0x32, if stripe == 0 { 0x2c } else { 0x3c }, DataMode::Quad, STRIPE_BYTES);
-        }
+        stream_full_screen(lcd, frame, Some(maps));
         dirty.fill(false);
         return;
     }
-    if dirty.iter().all(|&v| v) {
+    let dirty_tile_count = dirty.iter().filter(|&&is_dirty| is_dirty).count();
+    let dirty_run_count = count_dirty_runs(dirty);
+
+    /*
+        NOTE: A partial run costs two address-window DMA transactions plus its
+              pixel transaction. Once sparse traffic reaches this threshold,
+              one pipelined full-screen stream finishes sooner despite sending
+              unchanged pixels. This also bounds multi-circle frame time.
+    */
+    let partial_pixel_cost = dirty_tile_count * TILE_W * TILE_H;
+    let transaction_cost_in_pixels = dirty_run_count * 768;
+    let full_screen_is_cheaper = partial_pixel_cost + transaction_cost_in_pixels >= W * H;
+
+    if full_screen_is_cheaper {
         set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
-        for ty in 0..TILES_Y {
-            pack_rect(frame, 0, ty * TILE_H, W, lcd.buffer_mut());
-            lcd.send_prepared(0x32, if ty == 0 { 0x2c } else { 0x3c }, DataMode::Quad, STRIPE_BYTES);
-        }
+        stream_full_screen(lcd, frame, None);
         dirty.fill(false);
         return;
     }
@@ -544,6 +655,77 @@ fn flush_dirty(
         }
     }
     dirty.fill(false);
+}
+
+#[inline]
+fn count_dirty_runs(dirty_tiles: &[bool; TILE_COUNT]) -> usize {
+    let mut run_count = 0;
+
+    for tile_y in 0..TILES_Y {
+        let row = &dirty_tiles[tile_y * TILES_X..(tile_y + 1) * TILES_X];
+        let mut previous_was_dirty = false;
+
+        for &is_dirty in row {
+            if is_dirty && !previous_was_dirty { run_count += 1; }
+            previous_was_dirty = is_dirty;
+        }
+    }
+
+    run_count
+}
+
+fn stream_full_screen(
+    lcd: &mut Lcd<'_>,
+    frame: &mut [u8; FRAME_BYTES],
+    fade_maps: Option<&[[u8; 16]; 3]>,
+) {
+    let mut spi = lcd.spi.take().unwrap();
+    let mut transmitting = lcd.tx.take().unwrap();
+    let mut packing = lcd.spare.take().unwrap();
+
+    pack_screen_stripe(frame, 0, fade_maps, transmitting.as_mut_slice());
+
+    for stripe in 0..H / STRIPE_ROWS {
+        let command = if stripe == 0 { 0x2c } else { 0x3c };
+        let transfer = spi.half_duplex_write(
+            DataMode::Quad,
+            Command::_8Bit(0x32, DataMode::Single),
+            Address::_24Bit((command as u32) << 8, DataMode::Single),
+            0,
+            STRIPE_BYTES,
+            transmitting,
+        ).unwrap_or_else(|_| panic!());
+
+        if stripe + 1 < H / STRIPE_ROWS {
+            pack_screen_stripe(
+                frame,
+                (stripe + 1) * STRIPE_ROWS,
+                fade_maps,
+                packing.as_mut_slice(),
+            );
+        }
+
+        (spi, transmitting) = transfer.wait();
+        core::mem::swap(&mut transmitting, &mut packing);
+    }
+
+    lcd.spi = Some(spi);
+    lcd.tx = Some(packing);
+    lcd.spare = Some(transmitting);
+}
+
+#[inline]
+fn pack_screen_stripe(
+    frame: &mut [u8; FRAME_BYTES],
+    y0: usize,
+    fade_maps: Option<&[[u8; 16]; 3]>,
+    pixels: &mut [u8],
+) {
+    if let Some(maps) = fade_maps {
+        pack_mapped_stripe(frame, y0, maps, pixels);
+    } else {
+        pack_rect(frame, 0, y0, W, pixels);
+    }
 }
 
 #[inline(always)]
