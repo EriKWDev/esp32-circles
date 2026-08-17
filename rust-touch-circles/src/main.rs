@@ -25,7 +25,9 @@ const H: usize = 480;
 // Two 32-row buffers keep GDMA busy while the CPU packs the following stripe.
 const STRIPE_ROWS: usize = 32;
 const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
+const TILE_W: usize = 16;
 const TILE_H: usize = STRIPE_ROWS;
+const TILES_X: usize = W / TILE_W;
 const TILES_Y: usize = H / TILE_H;
 const MAX_CIRCLES: usize = 32;
 const TOUCH_ADDR: u8 = 0x5a;
@@ -44,10 +46,11 @@ struct Circle {
     born_ticks: u32,
     full_radius_q4: u32,
     palette_index: u8,
+    drawn_radius_q4: u32,
 }
 
 const EMPTY: Circle = Circle {
-    x: 0, y: 0, born_ticks: 0, full_radius_q4: 0, palette_index: 0,
+    x: 0, y: 0, born_ticks: 0, full_radius_q4: 0, palette_index: 0, drawn_radius_q4: 0,
 };
 
 struct Scene {
@@ -61,6 +64,7 @@ struct RenderCircle {
     center_x_q4: i32,
     center_y_q4: i32,
     radius_q4: u32,
+    previous_radius_q4: u32,
     radius_squared_q8: u32,
     rgb565_pair: u32,
 }
@@ -94,6 +98,7 @@ impl Scene {
                 x, y, born_ticks: now_ticks,
                 full_radius_q4: far << 4,
                 palette_index: (self.next_color % PALETTE.len()) as u8,
+                drawn_radius_q4: 0,
             };
             self.len += 1;
             self.next_color += 1;
@@ -134,7 +139,7 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u8) {
 
 fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; MAX_CIRCLES], usize) {
     const EMPTY_RENDER: RenderCircle = RenderCircle {
-        center_x_q4: 0, center_y_q4: 0, radius_q4: 0,
+        center_x_q4: 0, center_y_q4: 0, radius_q4: 0, previous_radius_q4: 0,
         radius_squared_q8: 0, rgb565_pair: 0,
     };
     let mut rendered = [EMPTY_RENDER; MAX_CIRCLES];
@@ -153,11 +158,14 @@ fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; 
         let rgb565 = rgb888_to_565(red, green, blue);
         let high = (rgb565 >> 8) as u8;
         let low = rgb565 as u8;
-        scene.circles[alive] = circle;
+        let mut updated_circle = circle;
+        updated_circle.drawn_radius_q4 = radius_q4;
+        scene.circles[alive] = updated_circle;
         rendered[alive] = RenderCircle {
             center_x_q4: circle.x << 4,
             center_y_q4: circle.y << 4,
             radius_q4,
+            previous_radius_q4: circle.drawn_radius_q4,
             radius_squared_q8: radius_q4 * radius_q4,
             rgb565_pair: u32::from_le_bytes([high, low, high, low]),
         };
@@ -226,13 +234,14 @@ fn main() -> ! {
     let mut next_frame = fast_ticks();
     let mut scene_was_visible = false;
     let mut hardware_fade_active = false;
+    let mut selective_scene_is_valid = true;
     #[cfg(feature = "profile")]
     let mut profile_frames = 0u32;
 
     // Establish a known black GRAM once. Subsequent growth is partial-update only.
     set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
     lcd.buffer_mut()[..STRIPE_BYTES].fill(0);
-    for stripe in 0..TILES_Y {
+    for stripe in 0..H / STRIPE_ROWS {
         lcd.send_prepared(0x32, if stripe == 0 { 0x2c } else { 0x3c }, DataMode::Quad, STRIPE_BYTES);
     }
     #[cfg(feature = "profile")]
@@ -273,10 +282,16 @@ fn main() -> ! {
         let (render_circles, render_count) = prepare_render_circles(&mut scene, now_ticks);
         if render_count != 0 || scene_was_visible {
             if hardware_fade_active && render_count == 0 { set_brightness(&mut lcd, 0); }
-            set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
             #[cfg(feature = "profile")]
             let frame_started = fast_ticks();
-            stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+            if selective_scene_is_valid && render_count == 1 {
+                if render_circles[0].radius_q4 > render_circles[0].previous_radius_q4 {
+                    stream_single_circle_tiles(&mut lcd, render_circles[0]);
+                }
+            } else {
+                set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+                stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+            }
             #[cfg(feature = "profile")]
             {
                 let elapsed_ticks = fast_ticks().wrapping_sub(frame_started);
@@ -288,6 +303,8 @@ fn main() -> ! {
             }
             if hardware_fade_active { set_brightness(&mut lcd, 255); }
         }
+        if render_count > 1 { selective_scene_is_valid = false; }
+        if render_count == 0 { selective_scene_is_valid = true; }
         hardware_fade_active = false;
         scene_was_visible = render_count != 0;
     }
@@ -403,7 +420,7 @@ fn set_brightness<S: LcdBus>(spi: &mut S, brightness: u8) {
 #[cfg(feature = "profile")]
 fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
     const EMPTY_RENDER: RenderCircle = RenderCircle {
-        center_x_q4: 0, center_y_q4: 0, radius_q4: 0,
+        center_x_q4: 0, center_y_q4: 0, radius_q4: 0, previous_radius_q4: 0,
         radius_squared_q8: 0, rgb565_pair: 0,
     };
     let mut circles = [EMPTY_RENDER; MAX_CIRCLES];
@@ -424,6 +441,7 @@ fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
                 center_x_q4: x << 4,
                 center_y_q4: y << 4,
                 radius_q4,
+                previous_radius_q4: 0,
                 radius_squared_q8: radius_q4 * radius_q4,
                 rgb565_pair: u32::from_le_bytes([high, low, high, low]),
             };
@@ -432,6 +450,20 @@ fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
         let started = fast_ticks();
         stream_opaque_scene(lcd, &circles[..count]);
         println!("benchmark circles={} frame_us={}", count, fast_ticks().wrapping_sub(started) / 16);
+    }
+    let mut previous = 0u32;
+    for &radius in &[48u32, 120, 240, 360] {
+        let radius_q4 = radius << 4;
+        let mut circle = circles[0];
+        circle.center_x_q4 = 240 << 4;
+        circle.center_y_q4 = 240 << 4;
+        circle.previous_radius_q4 = previous;
+        circle.radius_q4 = radius_q4;
+        circle.radius_squared_q8 = radius_q4 * radius_q4;
+        let started = fast_ticks();
+        stream_single_circle_tiles(lcd, circle);
+        println!("selective radius={} frame_us={}", radius, fast_ticks().wrapping_sub(started) / 16);
+        previous = radius_q4;
     }
     delay.delay_millis(2_000);
 }
@@ -447,6 +479,94 @@ fn fast_ticks() -> u32 {
     // ESP32-C6 SYSTIMER runs at 16 MHz. Animation lifetimes are under two
     // seconds, so wrapping low-32-bit subtraction is exact for our intervals.
     SystemTimer::unit_value(Unit::Unit0) as u32
+}
+
+fn stream_single_circle_tiles(lcd: &mut Lcd<'_>, circle: RenderCircle) {
+    let mut dirty_rows = [0u32; TILES_Y];
+    let outer_radius = circle.radius_q4 + 8;
+    let inner_radius = circle.previous_radius_q4.saturating_sub(8);
+    let outer_squared = outer_radius * outer_radius;
+    let inner_squared = inner_radius * inner_radius;
+    let center_x = circle.center_x_q4 >> 4;
+    let center_y = circle.center_y_q4 >> 4;
+    for tile_y in 0..TILES_Y {
+        let top = (tile_y * TILE_H) as i32;
+        let bottom = top + TILE_H as i32 - 1;
+        let near_y = if center_y < top { top - center_y } else if center_y > bottom { center_y - bottom } else { 0 };
+        let far_y = (center_y - top).unsigned_abs().max((center_y - bottom).unsigned_abs());
+        for tile_x in 0..TILES_X {
+            let left = (tile_x * TILE_W) as i32;
+            let right = left + TILE_W as i32 - 1;
+            let near_x = if center_x < left { left - center_x } else if center_x > right { center_x - right } else { 0 };
+            let far_x = (center_x - left).unsigned_abs().max((center_x - right).unsigned_abs());
+            let nx = (near_x as u32) << 4;
+            let ny = (near_y as u32) << 4;
+            let fx = far_x << 4;
+            let fy = far_y << 4;
+            if nx * nx + ny * ny <= outer_squared && fx * fx + fy * fy >= inner_squared {
+                dirty_rows[tile_y] |= 1 << tile_x;
+            }
+        }
+    }
+    let tile_count: usize = dirty_rows.iter().map(|row| row.count_ones() as usize).sum();
+    let run_count: usize = dirty_rows.iter().map(|row| (row & !(row << 1)).count_ones() as usize).sum();
+    if tile_count * TILE_W * TILE_H + run_count * 768 >= W * H {
+        set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+        stream_opaque_scene(lcd, core::slice::from_ref(&circle));
+        return;
+    }
+    for (tile_y, &row_mask) in dirty_rows.iter().enumerate() {
+        let mut remaining = row_mask;
+        while remaining != 0 {
+            let first_tile = remaining.trailing_zeros() as usize;
+            let shifted = remaining >> first_tile;
+            let tiles = (!shifted).trailing_zeros().min((TILES_X - first_tile) as u32) as usize;
+            let x0 = first_tile * TILE_W;
+            let width = tiles * TILE_W;
+            let y0 = tile_y * TILE_H;
+            set_window(lcd, x0 as u16, y0 as u16, (x0 + width - 1) as u16, (y0 + TILE_H - 1) as u16);
+            render_single_circle_rect(circle, x0, y0, width, TILE_H, lcd.buffer_mut());
+            lcd.send_prepared(0x32, 0x2c, DataMode::Quad, width * TILE_H * 2);
+            remaining &= !(((1u32 << tiles) - 1) << first_tile);
+        }
+    }
+}
+
+fn render_single_circle_rect(
+    circle: RenderCircle, x0: usize, y0: usize, width: usize, height: usize, pixels: &mut [u8],
+) {
+    let x1 = (x0 + width - 1) as i32;
+    for local_y in 0..height {
+        let y = (y0 + local_y) as i32;
+        let row = &mut pixels[local_y * width * 2..(local_y + 1) * width * 2];
+        row.fill(0);
+        let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
+        if dy_q4 > circle.radius_q4 + 8 { continue; }
+        let extent_q4 = isqrt(circle.radius_squared_q8.saturating_sub(dy_q4 * dy_q4)) as i32;
+        let left_q4 = circle.center_x_q4 - extent_q4;
+        let right_q4 = circle.center_x_q4 + extent_q4;
+        let inner_left = ((left_q4 + 23) >> 4).clamp(x0 as i32, x1 + 1);
+        let inner_right = ((right_q4 - 8) >> 4).clamp(x0 as i32 - 1, x1);
+        if inner_left <= inner_right {
+            fill_rgb565(row, (inner_left - x0 as i32) as i16, (inner_right - x0 as i32) as i16, circle.rgb565_pair);
+        }
+        let left_edge = inner_left - 1;
+        if left_edge >= x0 as i32 {
+            let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
+            if coverage > bayer4(left_edge as usize, y as usize) {
+                let local_x = (left_edge - x0 as i32) as i16;
+                fill_rgb565(row, local_x, local_x, circle.rgb565_pair);
+            }
+        }
+        let right_edge = inner_right + 1;
+        if right_edge <= x1 && right_edge != left_edge {
+            let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
+            if coverage > bayer4(right_edge as usize, y as usize) {
+                let local_x = (right_edge - x0 as i32) as i16;
+                fill_rgb565(row, local_x, local_x, circle.rgb565_pair);
+            }
+        }
+    }
 }
 
 fn stream_opaque_scene(lcd: &mut Lcd<'_>, circles: &[RenderCircle]) {

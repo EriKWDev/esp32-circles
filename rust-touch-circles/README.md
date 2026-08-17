@@ -35,9 +35,11 @@ BOOT, tap RESET, then release BOOT if automatic download mode does not engage.
 The 80 MHz four-bit display link has a theoretical full-frame floor of about
 11.5 ms (roughly 86.8 frames/s before command and packing overhead). The panel
 cannot accept RGB332 over its QSPI interface, so RGB565 is the minimum transfer
-format. The renderer uses a full-screen address window with ping-ponged DMA
-stripes, packed RGB444 retained state, row-mask dirty tracking, and an incremental
-scanline-span rasterizer. Up to 32 fixed-capacity circles are composited, with a
+format. A sole growing circle updates only 16x32 tiles crossed by its annulus;
+untouched pixels remain in CO5300 GRAM. Fragmented or layered scenes switch to a
+full-screen address window with ping-ponged DMA stripes, while sole full-screen
+fades use the panel brightness command and transfer no pixels. Up to 32
+fixed-capacity circles are composited, with a
 one-pixel antialiased edge, smooth fixed-time growth, and a fade after reaching
 the farthest screen corner.
 
