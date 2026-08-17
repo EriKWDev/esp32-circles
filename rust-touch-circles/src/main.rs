@@ -7,7 +7,7 @@ use esp_hal::{
     delay::Delay,
     dma::DmaTxBuf,
     dma_tx_buffer,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Event, Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     main,
     spi::{
@@ -147,17 +147,18 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u32, u8) {
     const GROW_MS: u32 = 700;
     const FADE_MS: u32 = 520;
     if age_ms < GROW_MS {
-        let t = age_ms * 65_535 / GROW_MS;
-        let t2 = ((t as u64 * t as u64) >> 16) as u32;
-        let eased = ((t2 as u64 * (3 * 65_535u32 - 2 * t) as u64) >> 16) as u32;
-        return (((c.full_radius_q4 as u64 * eased as u64) >> 16) as u32, 16, 255);
+        // Q15 keeps every product within u32, avoiding RV32 multiword maths.
+        let t = age_ms * 32_768 / GROW_MS;
+        let t2 = t * t >> 15;
+        let eased = t2 * (3 * 32_768 - 2 * t) >> 15;
+        return (c.full_radius_q4 * eased >> 15, 16, 255);
     }
     let fade_age = age_ms - GROW_MS;
     if fade_age >= FADE_MS { return (c.full_radius_q4, 16, 0); }
-    let t = fade_age * 65_535 / FADE_MS;
-    let t2 = ((t as u64 * t as u64) >> 16) as u32;
-    let smooth = ((t2 as u64 * (3 * 65_535u32 - 2 * t) as u64) >> 16) as u32;
-    let alpha = (((65_535 - smooth) as u64 * 255) >> 16) as u8;
+    let t = fade_age * 32_768 / FADE_MS;
+    let t2 = t * t >> 15;
+    let smooth = t2 * (3 * 32_768 - 2 * t) >> 15;
+    let alpha = ((32_768 - smooth) * 255 >> 15) as u8;
     (c.full_radius_q4, 16, alpha)
 }
 
@@ -184,7 +185,8 @@ fn main() -> ! {
     delay.delay_millis(10);
     touch_rst.set_high();
     delay.delay_millis(30);
-    let touch_int = Input::new(p.GPIO5, InputConfig::default().with_pull(Pull::Up));
+    let mut touch_int = Input::new(p.GPIO5, InputConfig::default().with_pull(Pull::Up));
+    touch_int.listen(Event::FallingEdge);
 
     let transmit_buffer = dma_tx_buffer!(STRIPE_BYTES).unwrap();
     let packing_buffer = dma_tx_buffer!(STRIPE_BYTES).unwrap();
@@ -216,7 +218,7 @@ fn main() -> ! {
 
     loop {
         let now_ticks = fast_ticks();
-        if sample_touch(&mut i2c, &touch_int, &mut scene, now_ticks) {
+        if sample_touch(&mut i2c, &mut touch_int, &mut scene, now_ticks) {
             next_frame = now_ticks;
         }
         if (now_ticks.wrapping_sub(next_frame) as i32) < 0 { continue; }
@@ -247,10 +249,11 @@ fn pmic_set_aldo3(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
     }
 }
 
-fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &Input<'_>, scene: &mut Scene, now_ticks: u32) -> bool {
+fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &mut Input<'_>, scene: &mut Scene, now_ticks: u32) -> bool {
     let touch_line_is_low = touch_int.is_low();
     scene.observe_touch_line(touch_line_is_low, now_ticks);
-    if !touch_line_is_low { return false; }
+    if !touch_line_is_low && !touch_int.is_interrupt_set() { return false; }
+    touch_int.clear_interrupt();
     let mut d = [0u8; 10];
     if i2c.write_read(TOUCH_ADDR, &[0xd0, 0x00], &mut d).is_ok()
         && d[6] == 0xab && d[5] & 0x7f != 0 && d[0] & 0x0f == 0x06
