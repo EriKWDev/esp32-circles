@@ -40,10 +40,8 @@ untouched pixels remain in CO5300 GRAM. Fragmented or layered scenes switch to a
 full-screen address window with ping-ponged DMA stripes, while sole full-screen
 fades use the panel brightness command and transfer no pixels. Up to 32
 fixed-capacity circles are composited, with a
-three-pixel luminous same-hue front on the newest bubble, a dithered antialiased
-edge, smooth fixed-time growth, and a fade after reaching the farthest screen
-corner. The front reuses the existing scanline extent—there is no second square
-root, geometry pass, alpha buffer, or additional display traffic.
+one-pixel antialiased edge, smooth fixed-time growth, and a fade after reaching
+the farthest screen corner.
 
 ## Tuning
 
