@@ -23,18 +23,12 @@ const H: usize = 480;
 // Two 32-row buffers keep GDMA busy while the CPU packs the following stripe.
 const STRIPE_ROWS: usize = 32;
 const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
-const FRAME_BYTES: usize = W * H * 3 / 2;
-const TILE_W: usize = 16;
 const TILE_H: usize = STRIPE_ROWS;
-const TILES_X: usize = W / TILE_W;
 const TILES_Y: usize = H / TILE_H;
-const ALL_TILE_COLUMNS: u32 = (1u32 << TILES_X) - 1;
 const MAX_CIRCLES: usize = 32;
 const TOUCH_ADDR: u8 = 0x5a;
 const PMIC_ADDR: u8 = 0x34;
 const FRAME_TICKS: u32 = 16_000_000 / 60;
-
-static FRAMEBUFFER: static_cell::StaticCell<[u8; FRAME_BYTES]> = static_cell::StaticCell::new();
 
 const PALETTE: [(u8, u8, u8); 8] = [
     (255, 55, 125), (80, 210, 255), (255, 185, 45), (135, 80, 255),
@@ -43,25 +37,29 @@ const PALETTE: [(u8, u8, u8); 8] = [
 
 #[derive(Clone, Copy)]
 struct Circle {
-    live: bool,
     x: i32,
     y: i32,
     born_ticks: u32,
     full_radius_q4: u32,
     palette_index: u8,
-    drawn_radius_q4: u32,
-    drawn_alpha: u8,
 }
 
 const EMPTY: Circle = Circle {
-    live: false, x: 0, y: 0, born_ticks: 0, full_radius_q4: 0,
-    palette_index: 0, drawn_radius_q4: 0, drawn_alpha: 0,
+    x: 0, y: 0, born_ticks: 0, full_radius_q4: 0, palette_index: 0,
 };
 
 struct Scene {
     circles: [Circle; MAX_CIRCLES],
     len: usize,
     next_color: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RenderCircle {
+    x: i32,
+    y: i32,
+    radius_q4: u32,
+    rgb565: u16,
 }
 
 impl Scene {
@@ -90,11 +88,9 @@ impl Scene {
             let dy = y.max((H - 1) as i32 - y) as u32;
             let far = isqrt(dx * dx + dy * dy) + 2;
             self.circles[self.len] = Circle {
-                live: true, x, y, born_ticks: now_ticks,
+                x, y, born_ticks: now_ticks,
                 full_radius_q4: far << 4,
                 palette_index: (self.next_color % PALETTE.len()) as u8,
-                drawn_radius_q4: 0,
-                drawn_alpha: 255,
             };
             self.len += 1;
             self.next_color += 1;
@@ -131,6 +127,54 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u32, u8) {
     let smooth = smoothstep_q15(fade_age, FADE_MS);
     let alpha = ((32_768 - smooth) * 255 >> 15) as u8;
     (c.full_radius_q4, 16, alpha)
+}
+
+fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; MAX_CIRCLES], usize) {
+    const EMPTY_RENDER: RenderCircle = RenderCircle { x: 0, y: 0, radius_q4: 0, rgb565: 0 };
+    let mut rendered = [EMPTY_RENDER; MAX_CIRCLES];
+    let mut count = 0;
+    let mut newest_full = None;
+
+    for index in 0..scene.len {
+        let circle = scene.circles[index];
+        let (radius_q4, _, alpha) = circle_state(circle, now_ticks);
+        if alpha == 0 { continue; }
+        if radius_q4 >= circle.full_radius_q4 { newest_full = Some(index); }
+        let color = PALETTE[circle.palette_index as usize];
+        let red = mul_255(color.0 as u16, alpha as u16) as u8;
+        let green = mul_255(color.1 as u16, alpha as u16) as u8;
+        let blue = mul_255(color.2 as u16, alpha as u16) as u8;
+        rendered[count] = RenderCircle {
+            x: circle.x,
+            y: circle.y,
+            radius_q4,
+            rgb565: rgb888_to_565(red, green, blue),
+        };
+        count += 1;
+    }
+
+    if let Some(first_visible) = newest_full {
+        let retained = scene.len - first_visible;
+        scene.circles.copy_within(first_visible..scene.len, 0);
+        scene.len = retained;
+        rendered.copy_within(count - retained..count, 0);
+        count = retained;
+    } else {
+        let mut write = 0;
+        for read in 0..scene.len {
+            if circle_state(scene.circles[read], now_ticks).2 != 0 {
+                scene.circles[write] = scene.circles[read];
+                write += 1;
+            }
+        }
+        scene.len = write;
+    }
+    (rendered, count)
+}
+
+#[inline(always)]
+const fn rgb888_to_565(red: u8, green: u8, blue: u8) -> u16 {
+    ((red as u16 & 0xf8) << 8) | ((green as u16 & 0xfc) << 3) | (blue as u16 >> 3)
 }
 
 #[main]
@@ -176,9 +220,8 @@ fn main() -> ! {
 
     init_lcd(&mut lcd, &delay);
     let mut scene = Scene::new();
-    let frame = FRAMEBUFFER.init_with(|| [0u8; FRAME_BYTES]);
-    let mut dirty = [0u32; TILES_Y];
     let mut next_frame = fast_ticks();
+    let mut scene_was_visible = false;
 
     // Establish a known black GRAM once. Subsequent growth is partial-update only.
     set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
@@ -199,8 +242,12 @@ fn main() -> ! {
         if now_ticks.wrapping_sub(next_frame) < 0x8000_0000 && now_ticks.wrapping_sub(next_frame) > FRAME_TICKS {
             next_frame = now_ticks.wrapping_add(FRAME_TICKS);
         }
-        let fade = update_circles(&mut scene, now_ticks, frame, &mut dirty);
-        flush_dirty(&mut lcd, frame, &mut dirty, fade.as_ref());
+        let (render_circles, render_count) = prepare_render_circles(&mut scene, now_ticks);
+        if render_count != 0 || scene_was_visible {
+            set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+            stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+        }
+        scene_was_visible = render_count != 0;
     }
 }
 
@@ -306,254 +353,11 @@ fn set_window<S: LcdBus>(spi: &mut S, x0: u16, y0: u16, x1: u16, y1: u16) {
     qspi(spi, 0x02, 0x2b, DataMode::Single, &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8]);
 }
 
-fn update_circles(
-    scene: &mut Scene,
-    now_ticks: u32,
-    frame: &mut [u8; FRAME_BYTES],
-    dirty: &mut [u32; TILES_Y],
-) -> Option<[[u8; 16]; 3]> {
-    let mut combined = [[0u8; 16]; 3];
-    for channel in &mut combined { for (i, v) in channel.iter_mut().enumerate() { *v = i as u8; } }
-    let mut has_fade = false;
-    for c in &mut scene.circles[..scene.len] {
-        let (radius, _, alpha) = circle_state(*c, now_ticks);
-        if radius > c.drawn_radius_q4 {
-            draw_annulus(frame, dirty, *c, c.drawn_radius_q4, radius);
-            c.drawn_radius_q4 = radius;
-        }
-        if radius >= c.full_radius_q4 && alpha != c.drawn_alpha {
-            let maps = fade_maps(PALETTE[c.palette_index as usize], c.drawn_alpha, alpha);
-            for ch in 0..3 {
-                for value in 0..16 {
-                    combined[ch][value] = maps[ch][combined[ch][value] as usize];
-                }
-            }
-            has_fade = true;
-            c.drawn_alpha = alpha;
-        }
-        if alpha == 0 { c.live = false; }
-    }
-    let mut write = 0;
-    for read in 0..scene.len {
-        if scene.circles[read].live {
-            scene.circles[write] = scene.circles[read];
-            write += 1;
-        }
-    }
-    scene.len = write;
-
-    if has_fade && scene.len == 0 {
-        frame.fill(0);
-        dirty.fill(ALL_TILE_COLUMNS);
-        None
-    } else if has_fade {
-        Some(combined)
-    } else {
-        None
-    }
-}
-
-fn draw_annulus(
-    frame: &mut [u8; FRAME_BYTES],
-    dirty: &mut [u32; TILES_Y],
-    c: Circle,
-    old_r: u32,
-    new_r: u32,
-) {
-    let new2 = new_r * new_r;
-    let old2 = old_r * old_r;
-    let y0 = (c.y - ((new_r as i32 + 15) >> 4) - 1).clamp(0, (H - 1) as i32);
-    let y1 = (c.y + ((new_r as i32 + 15) >> 4) + 1).clamp(0, (H - 1) as i32);
-    for y in y0..=y1 {
-        let dy = (y - c.y).unsigned_abs() << 4;
-        if dy > new_r + 8 { continue; }
-        let dy2 = dy * dy;
-        let ne = isqrt(new2.saturating_sub(dy2)) as i32;
-        let oe = if old_r != 0 && dy <= old_r + 8 { isqrt(old2.saturating_sub(dy2)) as i32 } else { -16 };
-        let nl = (c.x << 4) - ne; let nr = (c.x << 4) + ne;
-        let ol = (c.x << 4) - oe; let or = (c.x << 4) + oe;
-        let x0 = ((nl - 8) >> 4).clamp(0, (W - 1) as i32);
-        let x1 = ((nr + 8) >> 4).clamp(0, (W - 1) as i32);
-        if oe < 0 {
-            draw_annulus_range(frame, dirty, c, y, x0, x1, nl, nr, ol, or, false);
-        } else {
-            // Visit only the two changed side intervals. The already-filled
-            // middle is neither tested nor touched.
-            let left_end = ((ol + 8) >> 4).clamp(x0, x1);
-            let right_start = ((or - 8) >> 4).clamp(x0, x1);
-            if right_start <= left_end + 1 {
-                draw_annulus_range(frame, dirty, c, y, x0, x1, nl, nr, ol, or, true);
-            } else {
-                draw_annulus_range(frame, dirty, c, y, x0, left_end, nl, nr, ol, or, true);
-                draw_annulus_range(frame, dirty, c, y, right_start, x1, nl, nr, ol, or, true);
-            }
-        }
-    }
-}
-
-#[inline(always)]
-fn draw_annulus_range(
-    frame: &mut [u8; FRAME_BYTES], dirty: &mut [u32; TILES_Y], c: Circle,
-    y: i32, x0: i32, x1: i32, nl: i32, nr: i32, ol: i32, or: i32, has_old: bool,
-) {
-    let first_tile = x0 as usize / TILE_W;
-    let last_tile = x1 as usize / TILE_W;
-    let column_count = last_tile - first_tile + 1;
-    dirty[y as usize / TILE_H] |= ((1u32 << column_count) - 1) << first_tile;
-    let mut x = x0;
-    while x <= x1 {
-        let px = x << 4;
-        let new_inside = (px - nl).min(nr - px);
-        let old_inside = if has_old { (px - ol).min(or - px) } else { -16 };
-        let nc = (new_inside + 8).clamp(0, 16) as u16;
-        let oc = (old_inside + 8).clamp(0, 16) as u16;
-        if nc <= oc {
-            x += 1;
-            continue;
-        }
-        if oc == 0 && nc == 16 && x & 1 == 0 && x < x1 {
-            let next_px = (x + 1) << 4;
-            let next_new_inside = (next_px - nl).min(nr - next_px);
-            let next_old_inside = if has_old { (next_px - ol).min(or - next_px) } else { -16 };
-            let next_new_coverage = (next_new_inside + 8).clamp(0, 16) as usize;
-            let next_old_coverage = (next_old_inside + 8).clamp(0, 16) as usize;
-            if next_old_coverage == 0 && next_new_coverage == 16 {
-                blend_two_full_pixels(frame, x as usize, y as usize, c.palette_index as usize);
-                x += 2;
-                continue;
-            }
-        }
-
-        blend_pixel(frame, x as usize, y as usize, c.palette_index as usize, oc as u8, nc as u8);
-        x += 1;
-    }
-}
-
-#[inline(always)]
-fn blend_two_full_pixels(frame: &mut [u8], x: usize, y: usize, palette_index: usize) {
-    let byte = (y * W + x) * 3 / 2;
-    let first = ((frame[byte] as usize) << 4) | (frame[byte + 1] as usize >> 4);
-    let second = (((frame[byte + 1] as usize) & 15) << 8) | frame[byte + 2] as usize;
-    let transform = &PALETTE_SCREEN_TRANSFORMS[palette_index];
-    let first = transform[first];
-    let second = transform[second];
-
-    frame[byte] = (first >> 4) as u8;
-    frame[byte + 1] = ((first as u8 & 15) << 4) | ((second >> 8) as u8 & 15);
-    frame[byte + 2] = second as u8;
-}
-
-#[inline(always)]
-fn blend_pixel(
-    frame: &mut [u8], x: usize, y: usize, palette_index: usize,
-    old_coverage: u8, new_coverage: u8,
-) {
-    let pi = y * W + x;
-    let old = get_rgb444(frame, pi);
-    let color = PALETTE[palette_index];
-    let nr = transition_component((old >> 8) & 15, color.0 >> 4, old_coverage, new_coverage);
-    let ng = transition_component((old >> 4) & 15, color.1 >> 4, old_coverage, new_coverage);
-    let nb = transition_component(old & 15, color.2 >> 4, old_coverage, new_coverage);
-    set_rgb444(frame, pi, (nr << 8) | (ng << 4) | nb);
-}
-
-#[inline(always)]
-fn transition_component(shown: u16, source: u8, old_coverage: u8, new_coverage: u8) -> u16 {
-    let old_source = (source as usize * old_coverage as usize + 8) >> 4;
-    let new_source = (source as usize * new_coverage as usize + 8) >> 4;
-    COMPONENT_TRANSITIONS[old_source][new_source][shown as usize] as u16
-}
-
-const fn make_component_transitions() -> [[[u8; 16]; 16]; 16] {
-    let mut table = [[[0u8; 16]; 16]; 16];
-    let mut old_source = 0;
-    while old_source < 16 {
-        let mut new_source = 0;
-        while new_source < 16 {
-            let mut shown = 0;
-            while shown < 16 {
-                let mut underlying = 0;
-                let mut best_error = 16;
-                let mut candidate = 0;
-                while candidate < 16 {
-                    let reconstructed = SCREEN4[old_source * 16 + candidate] as usize;
-                    let error = reconstructed.abs_diff(shown);
-                    if error < best_error { best_error = error; underlying = candidate; }
-                    candidate += 1;
-                }
-                table[old_source][new_source][shown] = SCREEN4[new_source * 16 + underlying];
-                shown += 1;
-            }
-            new_source += 1;
-        }
-        old_source += 1;
-    }
-    table
-}
-
-const COMPONENT_TRANSITIONS: [[[u8; 16]; 16]; 16] = make_component_transitions();
-
-fn fade_maps(color: (u8, u8, u8), old_a: u8, new_a: u8) -> [[u8; 16]; 3] {
-    [fade_map(color.0, old_a, new_a), fade_map(color.1, old_a, new_a), fade_map(color.2, old_a, new_a)]
-}
-
-fn fade_map(channel: u8, old_a: u8, new_a: u8) -> [u8; 16] {
-    let os = (mul_255(channel as u16, old_a as u16) >> 4) as usize;
-    let ns = (mul_255(channel as u16, new_a as u16) >> 4) as usize;
-    let mut map = [0u8; 16];
-    for shown in 0..16 {
-        let mut base = 0usize; let mut best = 16usize;
-        for candidate in 0..16 {
-            let v = SCREEN4[os * 16 + candidate] as usize;
-            let err = v.abs_diff(shown);
-            if err < best { best = err; base = candidate; }
-        }
-        map[shown] = SCREEN4[ns * 16 + base];
-    }
-    map
-}
-
 #[inline(always)]
 fn mul_255(a: u16, b: u16) -> u16 {
     let x = a * b + 128;
     (x + (x >> 8)) >> 8
 }
-
-#[inline(always)]
-const fn make_screen4() -> [u8; 256] {
-    let mut t = [0u8; 256]; let mut src = 0usize;
-    while src < 16 { let mut old = 0usize; while old < 16 {
-        t[src * 16 + old] = (old + src - old * src / 15) as u8; old += 1;
-    } src += 1; } t
-}
-
-const SCREEN4: [u8; 256] = make_screen4();
-
-const fn make_palette_screen_transforms() -> [[u16; 4096]; PALETTE.len()] {
-    let mut transforms = [[0u16; 4096]; PALETTE.len()];
-    let mut palette_index = 0;
-
-    while palette_index < PALETTE.len() {
-        let color = PALETTE[palette_index];
-        let source_red = (color.0 >> 4) as usize;
-        let source_green = (color.1 >> 4) as usize;
-        let source_blue = (color.2 >> 4) as usize;
-        let mut destination = 0;
-
-        while destination < 4096 {
-            let red = SCREEN4[source_red * 16 + ((destination >> 8) & 15)] as u16;
-            let green = SCREEN4[source_green * 16 + ((destination >> 4) & 15)] as u16;
-            let blue = SCREEN4[source_blue * 16 + (destination & 15)] as u16;
-            transforms[palette_index][destination] = (red << 8) | (green << 4) | blue;
-            destination += 1;
-        }
-        palette_index += 1;
-    }
-
-    transforms
-}
-
-const PALETTE_SCREEN_TRANSFORMS: [[u16; 4096]; PALETTE.len()] = make_palette_screen_transforms();
 
 #[inline(always)]
 fn fast_ticks() -> u32 {
@@ -562,108 +366,11 @@ fn fast_ticks() -> u32 {
     SystemTimer::unit_value(Unit::Unit0) as u32
 }
 
-const fn make_rgb444_to_565() -> [u16; 4096] {
-    let mut t = [0u16; 4096]; let mut c = 0usize;
-    while c < 4096 {
-        let r4 = ((c >> 8) & 15) as u16; let g4 = ((c >> 4) & 15) as u16; let b4 = (c & 15) as u16;
-        t[c] = (((r4 << 1) | (r4 >> 3)) << 11)
-            | (((g4 << 2) | (g4 >> 2)) << 5)
-            | ((b4 << 1) | (b4 >> 3));
-        c += 1;
-    }
-    t
-}
-
-const RGB444_TO_565: [u16; 4096] = make_rgb444_to_565();
-
-#[inline(always)]
-fn get_rgb444(buf: &[u8], pixel: usize) -> u16 {
-    let i = (pixel >> 1) * 3;
-    if pixel & 1 == 0 {
-        ((buf[i] as u16) << 4) | ((buf[i + 1] as u16) >> 4)
-    } else {
-        (((buf[i + 1] as u16) & 15) << 8) | buf[i + 2] as u16
-    }
-}
-
-#[inline(always)]
-fn set_rgb444(buf: &mut [u8], pixel: usize, color: u16) {
-    let i = (pixel >> 1) * 3;
-    if pixel & 1 == 0 {
-        buf[i] = (color >> 4) as u8;
-        buf[i + 1] = (buf[i + 1] & 15) | ((color as u8 & 15) << 4);
-    } else {
-        buf[i + 1] = (buf[i + 1] & 0xf0) | ((color >> 8) as u8 & 15);
-        buf[i + 2] = color as u8;
-    }
-}
-
-fn flush_dirty(
-    lcd: &mut Lcd<'_>,
-    frame: &mut [u8; FRAME_BYTES],
-    dirty: &mut [u32; TILES_Y],
-    fade: Option<&[[u8; 16]; 3]>,
-) {
-    // A fade necessarily changes the whole image. Transform packed RGB444 and
-    // emit RGB565 in the same cache pass, instead of walking 230,400 pixels
-    // twice. The counter rectangle is deliberately excluded from scene fades.
-    if let Some(maps) = fade {
-        set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
-        stream_full_screen(lcd, frame, Some(maps));
-        dirty.fill(0);
-        return;
-    }
-    let dirty_tile_count: usize = dirty.iter().map(|row| row.count_ones() as usize).sum();
-    let dirty_run_count: usize = dirty
-        .iter()
-        .map(|row| (row & !(row << 1)).count_ones() as usize)
-        .sum();
-
-    /*
-        NOTE: A partial run costs two address-window DMA transactions plus its
-              pixel transaction. Once sparse traffic reaches this threshold,
-              one pipelined full-screen stream finishes sooner despite sending
-              unchanged pixels. This also bounds multi-circle frame time.
-    */
-    let partial_pixel_cost = dirty_tile_count * TILE_W * TILE_H;
-    let transaction_cost_in_pixels = dirty_run_count * 768;
-    let full_screen_is_cheaper = partial_pixel_cost + transaction_cost_in_pixels >= W * H;
-
-    if full_screen_is_cheaper {
-        set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
-        stream_full_screen(lcd, frame, None);
-        dirty.fill(0);
-        return;
-    }
-    for ty in 0..TILES_Y {
-        let mut columns = dirty[ty];
-        while columns != 0 {
-            let start = columns.trailing_zeros() as usize;
-            let shifted = columns >> start;
-            let width_tiles = (!shifted).trailing_zeros().min((TILES_X - start) as u32) as usize;
-            let end = start + width_tiles;
-            let x0 = start * TILE_W; let width = (end - start) * TILE_W;
-            let y0 = ty * TILE_H;
-            let n = pack_rect(frame, x0, y0, width, lcd.buffer_mut());
-            set_window(lcd, x0 as u16, y0 as u16, (x0 + width - 1) as u16, (y0 + TILE_H - 1) as u16);
-            lcd.send_prepared(0x32, 0x2c, DataMode::Quad, n);
-            let run_mask = ((1u32 << width_tiles) - 1) << start;
-            columns &= !run_mask;
-        }
-    }
-    dirty.fill(0);
-}
-
-fn stream_full_screen(
-    lcd: &mut Lcd<'_>,
-    frame: &mut [u8; FRAME_BYTES],
-    fade_maps: Option<&[[u8; 16]; 3]>,
-) {
+fn stream_opaque_scene(lcd: &mut Lcd<'_>, circles: &[RenderCircle]) {
     let mut spi = lcd.spi.take().unwrap();
     let mut transmitting = lcd.tx.take().unwrap();
-    let mut packing = lcd.spare.take().unwrap();
-
-    pack_screen_stripe(frame, 0, fade_maps, transmitting.as_mut_slice());
+    let mut drawing = lcd.spare.take().unwrap();
+    render_scene_stripe(circles, 0, transmitting.as_mut_slice());
 
     for stripe in 0..H / STRIPE_ROWS {
         let command = if stripe == 0 { 0x2c } else { 0x3c };
@@ -675,86 +382,159 @@ fn stream_full_screen(
             STRIPE_BYTES,
             transmitting,
         ).unwrap_or_else(|_| panic!());
-
         if stripe + 1 < H / STRIPE_ROWS {
-            pack_screen_stripe(
-                frame,
-                (stripe + 1) * STRIPE_ROWS,
-                fade_maps,
-                packing.as_mut_slice(),
-            );
+            render_scene_stripe(circles, (stripe + 1) * STRIPE_ROWS, drawing.as_mut_slice());
         }
-
         (spi, transmitting) = transfer.wait();
-        core::mem::swap(&mut transmitting, &mut packing);
+        core::mem::swap(&mut transmitting, &mut drawing);
     }
-
     lcd.spi = Some(spi);
-    lcd.tx = Some(packing);
+    lcd.tx = Some(drawing);
     lcd.spare = Some(transmitting);
 }
 
-#[inline]
-fn pack_screen_stripe(
-    frame: &mut [u8; FRAME_BYTES],
-    y0: usize,
-    fade_maps: Option<&[[u8; 16]; 3]>,
-    pixels: &mut [u8],
-) {
-    if let Some(maps) = fade_maps {
-        pack_mapped_stripe(frame, y0, maps, pixels);
-    } else {
-        pack_rect(frame, 0, y0, W, pixels);
+fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
+    let mut covered_left = [0i16; MAX_CIRCLES * 3];
+    let mut covered_right = [0i16; MAX_CIRCLES * 3];
+
+    for local_y in 0..STRIPE_ROWS {
+        let y = (y0 + local_y) as i32;
+        let row = &mut pixels[local_y * W * 2..(local_y + 1) * W * 2];
+        let mut covered_count = 0;
+
+        for circle in circles.iter().rev() {
+            let dy_q4 = (y - circle.y).unsigned_abs() << 4;
+            if dy_q4 > circle.radius_q4 + 8 { continue; }
+            let radius_squared = circle.radius_q4 * circle.radius_q4;
+            let x_extent_q4 = isqrt(radius_squared.saturating_sub(dy_q4 * dy_q4)) as i32;
+            let left_q4 = (circle.x << 4) - x_extent_q4;
+            let right_q4 = (circle.x << 4) + x_extent_q4;
+            let inner_left = ((left_q4 + 23) >> 4).clamp(0, W as i32);
+            let inner_right = ((right_q4 - 8) >> 4).clamp(-1, (W - 1) as i32);
+
+            if inner_left <= inner_right {
+                paint_uncovered(
+                    row, inner_left as i16, inner_right as i16, circle.rgb565,
+                    &mut covered_left, &mut covered_right, &mut covered_count,
+                );
+            }
+            let left_edge = inner_left - 1;
+            if left_edge >= 0 {
+                let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
+                if coverage > bayer4(left_edge as usize, y as usize) {
+                    paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565,
+                        &mut covered_left, &mut covered_right, &mut covered_count);
+                }
+            }
+            let right_edge = inner_right + 1;
+            if right_edge < W as i32 && right_edge != left_edge {
+                let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
+                if coverage > bayer4(right_edge as usize, y as usize) {
+                    paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565,
+                        &mut covered_left, &mut covered_right, &mut covered_count);
+                }
+            }
+        }
+        paint_background(row, &covered_left, &covered_right, covered_count);
     }
 }
 
 #[inline(always)]
-fn map_rgb444(c: u16, maps: &[[u8; 16]; 3]) -> u16 {
-    ((maps[0][((c >> 8) & 15) as usize] as u16) << 8)
-        | ((maps[1][((c >> 4) & 15) as usize] as u16) << 4)
-        | maps[2][(c & 15) as usize] as u16
-}
-
-#[inline]
-fn pack_mapped_stripe(
-    frame: &mut [u8; FRAME_BYTES], y0: usize, maps: &[[u8; 16]; 3], pixels: &mut [u8],
+fn paint_uncovered(
+    row: &mut [u8], left: i16, right: i16, color: u16,
+    covered_left: &mut [i16; MAX_CIRCLES * 3],
+    covered_right: &mut [i16; MAX_CIRCLES * 3],
+    covered_count: &mut usize,
 ) {
-    let mut n = 0;
-    for y in y0..y0 + STRIPE_ROWS {
-        let mut bi = y * W * 3 / 2;
-        for _ in (0..W).step_by(2) {
-            let b0 = frame[bi]; let b1 = frame[bi + 1]; let b2 = frame[bi + 2];
-            let mut c0 = ((b0 as u16) << 4) | (b1 as u16 >> 4);
-            let mut c1 = (((b1 as u16) & 15) << 8) | b2 as u16;
-            c0 = map_rgb444(c0, maps);
-            c1 = map_rgb444(c1, maps);
-            frame[bi] = (c0 >> 4) as u8;
-            frame[bi + 1] = ((c0 as u8 & 15) << 4) | ((c1 >> 8) as u8 & 15);
-            frame[bi + 2] = c1 as u8;
-            let p0 = RGB444_TO_565[c0 as usize]; let p1 = RGB444_TO_565[c1 as usize];
-            pixels[n] = (p0 >> 8) as u8; pixels[n + 1] = p0 as u8;
-            pixels[n + 2] = (p1 >> 8) as u8; pixels[n + 3] = p1 as u8;
-            n += 4; bi += 3;
+    let mut cursor = left;
+    for interval in 0..*covered_count {
+        if covered_right[interval] < cursor { continue; }
+        if covered_left[interval] > right { break; }
+        if cursor < covered_left[interval] {
+            fill_rgb565(row, cursor, (covered_left[interval] - 1).min(right), color);
         }
+        cursor = cursor.max(covered_right[interval] + 1);
+        if cursor > right { break; }
+    }
+    if cursor <= right { fill_rgb565(row, cursor, right, color); }
+    insert_covered(left, right, covered_left, covered_right, covered_count);
+}
+
+#[inline(always)]
+fn insert_covered(
+    mut left: i16, mut right: i16,
+    covered_left: &mut [i16; MAX_CIRCLES * 3],
+    covered_right: &mut [i16; MAX_CIRCLES * 3],
+    count: &mut usize,
+) {
+    let mut first = 0;
+    while first < *count && covered_right[first] + 1 < left { first += 1; }
+    let mut after = first;
+    while after < *count && covered_left[after] <= right + 1 {
+        left = left.min(covered_left[after]);
+        right = right.max(covered_right[after]);
+        after += 1;
+    }
+    let removed = after - first;
+    if removed == 0 {
+        let mut index = *count;
+        while index > first {
+            covered_left[index] = covered_left[index - 1];
+            covered_right[index] = covered_right[index - 1];
+            index -= 1;
+        }
+        *count += 1;
+    } else if removed > 1 {
+        let mut source = after;
+        while source < *count {
+            covered_left[source - removed + 1] = covered_left[source];
+            covered_right[source - removed + 1] = covered_right[source];
+            source += 1;
+        }
+        *count -= removed - 1;
+    }
+    covered_left[first] = left;
+    covered_right[first] = right;
+}
+
+#[inline(always)]
+fn fill_rgb565(row: &mut [u8], left: i16, right: i16, color: u16) {
+    let high = (color >> 8) as u8;
+    let low = color as u8;
+    let mut pixel = left as usize;
+    let end = right as usize + 1;
+    if pixel & 1 != 0 {
+        let byte = pixel * 2;
+        row[byte] = high;
+        row[byte + 1] = low;
+        pixel += 1;
+    }
+    let pair = u32::from_le_bytes([high, low, high, low]);
+    while pixel + 1 < end {
+        // `pixel` is even, so the DMA row address plus pixel*2 is word aligned.
+        unsafe { (row.as_mut_ptr().add(pixel * 2) as *mut u32).write(pair) };
+        pixel += 2;
+    }
+    if pixel < end {
+        let byte = pixel * 2;
+        row[byte] = high;
+        row[byte + 1] = low;
     }
 }
 
-#[inline]
-fn pack_rect(frame: &[u8; FRAME_BYTES], x0: usize, y0: usize, width: usize, pixels: &mut [u8]) -> usize {
-    let mut n = 0;
-    for y in y0..y0 + TILE_H {
-        let mut bi = (y * W + x0) * 3 / 2;
-        for _ in (0..width).step_by(2) {
-            let b0 = frame[bi]; let b1 = frame[bi + 1]; let b2 = frame[bi + 2];
-            let c0 = ((b0 as usize) << 4) | (b1 as usize >> 4);
-            let c1 = (((b1 as usize) & 15) << 8) | b2 as usize;
-            let p0 = RGB444_TO_565[c0]; let p1 = RGB444_TO_565[c1];
-            pixels[n] = (p0 >> 8) as u8; pixels[n + 1] = p0 as u8;
-            pixels[n + 2] = (p1 >> 8) as u8; pixels[n + 3] = p1 as u8;
-            n += 4; bi += 3;
-        }
+fn paint_background(row: &mut [u8], left: &[i16], right: &[i16], count: usize) {
+    let mut cursor = 0i16;
+    for interval in 0..count {
+        if cursor < left[interval] { fill_rgb565(row, cursor, left[interval] - 1, 0); }
+        cursor = right[interval] + 1;
     }
-    n
+    if cursor < W as i16 { fill_rgb565(row, cursor, W as i16 - 1, 0); }
+}
+
+#[inline(always)]
+const fn bayer4(x: usize, y: usize) -> u8 {
+    const MATRIX: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    MATRIX[(y & 3) * 4 + (x & 3)]
 }
 
 #[inline]
