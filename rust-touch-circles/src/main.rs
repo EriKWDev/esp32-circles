@@ -63,6 +63,9 @@ struct Scene {
     next_color: usize,
     was_down: bool,
     release_started_ticks: u32,
+    last_spawn_x: u16,
+    last_spawn_y: u16,
+    last_spawn_ticks: u32,
 }
 
 impl Scene {
@@ -72,11 +75,22 @@ impl Scene {
             next_color: 0,
             was_down: false,
             release_started_ticks: 0,
+            last_spawn_x: u16::MAX,
+            last_spawn_y: u16::MAX,
+            last_spawn_ticks: 0,
         }
     }
 
-    fn press(&mut self, x: u16, y: u16, now_ticks: u32) {
-        if self.was_down { return; }
+    fn press(&mut self, x: u16, y: u16, now_ticks: u32) -> bool {
+        // The interrupt is a report pulse, so suppress repeated packets by
+        // position. A new contact elsewhere must not wait for global rearming.
+        const SAME_TOUCH_RADIUS_SQUARED: u32 = 48 * 48;
+        const SAME_TOUCH_TICKS: u32 = 16_000_000 * 180 / 1_000;
+        if self.was_down && now_ticks.wrapping_sub(self.last_spawn_ticks) < SAME_TOUCH_TICKS {
+            let dx = x.abs_diff(self.last_spawn_x) as u32;
+            let dy = y.abs_diff(self.last_spawn_y) as u32;
+            if dx * dx + dy * dy <= SAME_TOUCH_RADIUS_SQUARED { return false; }
+        }
         self.was_down = true;
         if let Some(slot) = self.circles.iter_mut().find(|c| !c.live) {
             let x = (x as i32).clamp(0, (W - 1) as i32);
@@ -92,14 +106,19 @@ impl Scene {
                 drawn_alpha: 255,
             };
             self.next_color += 1;
+            self.last_spawn_x = x as u16;
+            self.last_spawn_y = y as u16;
+            self.last_spawn_ticks = now_ticks;
+            return true;
         }
+        false
     }
 
     fn observe_touch_line(&mut self, is_low: bool, now_ticks: u32) {
         /*
             NOTE: CST9220 GPIO5 is a report pulse, not a stable contact level.
-                  A press re-arms only after 160 ms without another report.
-                  This adds no latency to the initial press.
+                  Global contact state re-arms after 160 ms without a report;
+                  spatially distinct contacts bypass that wait in `press`.
         */
         const RELEASE_TICKS: u32 = 16_000_000 * 160 / 1_000;
 
@@ -232,15 +251,13 @@ fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &Input<'_>, sce
     let touch_line_is_low = touch_int.is_low();
     scene.observe_touch_line(touch_line_is_low, now_ticks);
     if !touch_line_is_low { return false; }
-    if scene.was_down { return false; }
     let mut d = [0u8; 10];
     if i2c.write_read(TOUCH_ADDR, &[0xd0, 0x00], &mut d).is_ok()
         && d[6] == 0xab && d[5] & 0x7f != 0 && d[0] & 0x0f == 0x06
     {
         let y = ((d[1] as u16) << 4) | ((d[3] as u16) >> 4);
         let raw_x = ((d[2] as u16) << 4) | ((d[3] as u16) & 0x0f);
-        scene.press(480u16.saturating_sub(raw_x), y, now_ticks);
-        return true;
+        return scene.press(480u16.saturating_sub(raw_x), y, now_ticks);
     }
     false
 }
@@ -461,22 +478,39 @@ fn blend_pixel(
 
 #[inline(always)]
 fn transition_component(shown: u16, source: u8, old_coverage: u8, new_coverage: u8) -> u16 {
-    let old_source = ((source as u16 * old_coverage as u16 + 8) >> 4) as usize;
-    let new_source = ((source as u16 * new_coverage as u16 + 8) >> 4) as usize;
-    let mut underlying = 0usize;
-    let mut best_error = 16u16;
-
-    for candidate in 0..16 {
-        let reconstructed = SCREEN4[old_source * 16 + candidate] as u16;
-        let error = reconstructed.abs_diff(shown);
-        if error < best_error {
-            best_error = error;
-            underlying = candidate;
-        }
-    }
-
-    SCREEN4[new_source * 16 + underlying] as u16
+    let old_source = (source as usize * old_coverage as usize + 8) >> 4;
+    let new_source = (source as usize * new_coverage as usize + 8) >> 4;
+    COMPONENT_TRANSITIONS[old_source][new_source][shown as usize] as u16
 }
+
+const fn make_component_transitions() -> [[[u8; 16]; 16]; 16] {
+    let mut table = [[[0u8; 16]; 16]; 16];
+    let mut old_source = 0;
+    while old_source < 16 {
+        let mut new_source = 0;
+        while new_source < 16 {
+            let mut shown = 0;
+            while shown < 16 {
+                let mut underlying = 0;
+                let mut best_error = 16;
+                let mut candidate = 0;
+                while candidate < 16 {
+                    let reconstructed = SCREEN4[old_source * 16 + candidate] as usize;
+                    let error = reconstructed.abs_diff(shown);
+                    if error < best_error { best_error = error; underlying = candidate; }
+                    candidate += 1;
+                }
+                table[old_source][new_source][shown] = SCREEN4[new_source * 16 + underlying];
+                shown += 1;
+            }
+            new_source += 1;
+        }
+        old_source += 1;
+    }
+    table
+}
+
+const COMPONENT_TRANSITIONS: [[[u8; 16]; 16]; 16] = make_component_transitions();
 
 fn fade_maps(color: (u8, u8, u8), old_a: u8, new_a: u8) -> [[u8; 16]; 3] {
     [fade_map(color.0, old_a, new_a), fade_map(color.1, old_a, new_a), fade_map(color.2, old_a, new_a)]
