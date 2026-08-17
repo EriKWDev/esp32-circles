@@ -182,14 +182,14 @@ fn main() -> ! {
         if now_ticks.wrapping_sub(next_frame) < 0x8000_0000 && now_ticks.wrapping_sub(next_frame) > FRAME_TICKS {
             next_frame = now_ticks.wrapping_add(FRAME_TICKS);
         }
-        update_circles(&mut scene, now_ticks, frame, &mut dirty);
+        let fade = update_circles(&mut scene, now_ticks, frame, &mut dirty);
         let count = scene.count();
         if count != shown_count {
             draw_counter(frame, count);
             for tx in 0..4 { dirty[tx] = true; }
             shown_count = count;
         }
-        flush_dirty(&mut lcd, frame, &mut dirty);
+        flush_dirty(&mut lcd, frame, &mut dirty, fade.as_ref());
     }
 }
 
@@ -304,7 +304,7 @@ fn update_circles(
     now_ticks: u32,
     frame: &mut [u8; FRAME_BYTES],
     dirty: &mut [bool; TILE_COUNT],
-) {
+) -> Option<[[u8; 16]; 3]> {
     let mut combined = [[0u8; 16]; 3];
     for channel in &mut combined { for (i, v) in channel.iter_mut().enumerate() { *v = i as u8; } }
     let mut has_fade = false;
@@ -327,7 +327,7 @@ fn update_circles(
         }
         if alpha == 0 { c.live = false; }
     }
-    if has_fade { apply_fade_maps(frame, dirty, &combined); }
+    if has_fade { Some(combined) } else { None }
 }
 
 fn draw_annulus(
@@ -378,7 +378,10 @@ fn draw_annulus_range(
         let nc = (new_inside + 8).clamp(0, 16) as u16;
         let oc = (old_inside + 8).clamp(0, 16) as u16;
         if nc <= oc { continue; }
-        let coverage = ((nc - oc) * 255) >> 4;
+        // The framebuffer already contains coverage `oc`. Screen blending is
+        // nonlinear, so adding (nc-oc) directly leaves a darker colored seam.
+        // This LUT supplies the residual alpha that composes oc exactly to nc.
+        let coverage = RESIDUAL_ALPHA[oc as usize * 17 + nc as usize] as u16;
         if y < TILE_H as i32 && x < (TILE_W * 4) as i32 { continue; }
         blend_pixel(frame, x as usize, y as usize, c.color, coverage);
         dirty[(y as usize / TILE_H) * TILES_X + x as usize / TILE_W] = true;
@@ -400,31 +403,6 @@ fn blend_pixel(frame: &mut [u8], x: usize, y: usize, color: (u8, u8, u8), alpha:
     let ng = SCREEN4[sg * 16 + ((old >> 4) & 15) as usize] as u16;
     let nb = SCREEN4[sb * 16 + (old & 15) as usize] as u16;
     set_rgb444(frame, pi, (nr << 8) | (ng << 4) | nb);
-}
-
-fn apply_fade_maps(
-    frame: &mut [u8; FRAME_BYTES],
-    dirty: &mut [bool; TILE_COUNT],
-    maps: &[[u8; 16]; 3],
-) {
-    for y in 0..H {
-        let start_x = if y < TILE_H { TILE_W * 4 } else { 0 };
-        let mut bi = (y * W + start_x) * 3 / 2;
-        for _ in (start_x..W).step_by(2) {
-            let b0 = frame[bi]; let b1 = frame[bi + 1]; let b2 = frame[bi + 2];
-            let c0 = ((b0 as u16) << 4) | (b1 as u16 >> 4);
-            let c1 = (((b1 as u16) & 15) << 8) | b2 as u16;
-            let n0 = ((maps[0][((c0 >> 8) & 15) as usize] as u16) << 8)
-                | ((maps[1][((c0 >> 4) & 15) as usize] as u16) << 4) | maps[2][(c0 & 15) as usize] as u16;
-            let n1 = ((maps[0][((c1 >> 8) & 15) as usize] as u16) << 8)
-                | ((maps[1][((c1 >> 4) & 15) as usize] as u16) << 4) | maps[2][(c1 & 15) as usize] as u16;
-            frame[bi] = (n0 >> 4) as u8;
-            frame[bi + 1] = ((n0 as u8 & 15) << 4) | ((n1 >> 8) as u8 & 15);
-            frame[bi + 2] = n1 as u8;
-            bi += 3;
-        }
-    }
-    dirty.fill(true);
 }
 
 fn fade_maps(color: (u8, u8, u8), old_a: u8, new_a: u8) -> [[u8; 16]; 3] {
@@ -462,6 +440,23 @@ const fn make_screen4() -> [u8; 256] {
 }
 
 const SCREEN4: [u8; 256] = make_screen4();
+
+const fn make_residual_alpha() -> [u8; 17 * 17] {
+    let mut t = [0u8; 17 * 17];
+    let mut old = 0usize;
+    while old <= 16 {
+        let mut new = old + 1;
+        while new <= 16 {
+            let remaining = 16 - old;
+            t[old * 17 + new] = (((new - old) * 255 + remaining / 2) / remaining) as u8;
+            new += 1;
+        }
+        old += 1;
+    }
+    t
+}
+
+const RESIDUAL_ALPHA: [u8; 17 * 17] = make_residual_alpha();
 
 #[inline(always)]
 fn fast_ticks() -> u32 {
@@ -508,9 +503,22 @@ fn set_rgb444(buf: &mut [u8], pixel: usize, color: u16) {
 
 fn flush_dirty(
     lcd: &mut Lcd<'_>,
-    frame: &[u8; FRAME_BYTES],
+    frame: &mut [u8; FRAME_BYTES],
     dirty: &mut [bool; TILE_COUNT],
+    fade: Option<&[[u8; 16]; 3]>,
 ) {
+    // A fade necessarily changes the whole image. Transform packed RGB444 and
+    // emit RGB565 in the same cache pass, instead of walking 230,400 pixels
+    // twice. The counter rectangle is deliberately excluded from scene fades.
+    if let Some(maps) = fade {
+        set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+        for stripe in 0..H / STRIPE_ROWS {
+            pack_mapped_stripe(frame, stripe * STRIPE_ROWS, maps, lcd.buffer_mut());
+            lcd.send_prepared(0x32, if stripe == 0 { 0x2c } else { 0x3c }, DataMode::Quad, STRIPE_BYTES);
+        }
+        dirty.fill(false);
+        return;
+    }
     if dirty.iter().all(|&v| v) {
         set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
         for ty in 0..TILES_Y {
@@ -536,6 +544,39 @@ fn flush_dirty(
         }
     }
     dirty.fill(false);
+}
+
+#[inline(always)]
+fn map_rgb444(c: u16, maps: &[[u8; 16]; 3]) -> u16 {
+    ((maps[0][((c >> 8) & 15) as usize] as u16) << 8)
+        | ((maps[1][((c >> 4) & 15) as usize] as u16) << 4)
+        | maps[2][(c & 15) as usize] as u16
+}
+
+#[inline]
+fn pack_mapped_stripe(
+    frame: &mut [u8; FRAME_BYTES], y0: usize, maps: &[[u8; 16]; 3], pixels: &mut [u8],
+) {
+    let mut n = 0;
+    for y in y0..y0 + STRIPE_ROWS {
+        let mut bi = y * W * 3 / 2;
+        for x in (0..W).step_by(2) {
+            let b0 = frame[bi]; let b1 = frame[bi + 1]; let b2 = frame[bi + 2];
+            let mut c0 = ((b0 as u16) << 4) | (b1 as u16 >> 4);
+            let mut c1 = (((b1 as u16) & 15) << 8) | b2 as u16;
+            if y >= TILE_H || x >= TILE_W * 4 {
+                c0 = map_rgb444(c0, maps);
+                c1 = map_rgb444(c1, maps);
+                frame[bi] = (c0 >> 4) as u8;
+                frame[bi + 1] = ((c0 as u8 & 15) << 4) | ((c1 >> 8) as u8 & 15);
+                frame[bi + 2] = c1 as u8;
+            }
+            let p0 = RGB444_TO_565[c0 as usize]; let p1 = RGB444_TO_565[c1 as usize];
+            pixels[n] = (p0 >> 8) as u8; pixels[n + 1] = p0 as u8;
+            pixels[n + 2] = (p1 >> 8) as u8; pixels[n + 3] = p1 as u8;
+            n += 4; bi += 3;
+        }
+    }
 }
 
 #[inline]

@@ -1,3 +1,0 @@
-cargo:rustc-link-search=C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\build\esp32c6-9b8212936723a355\out
-cargo:rerun-if-changed=device.x
-cargo:rerun-if-changed=build.rs
