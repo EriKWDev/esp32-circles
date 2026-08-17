@@ -1,8 +1,8 @@
 # Touch Circles (bare-metal Rust)
 
 Minimal, low-latency firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.16.
-It uses no RTOS, allocator, LVGL, Wi-Fi, or Bluetooth. Touch is polled at 400 kHz
-once per frame, and the SH8601 runs at 80 MHz quad-SPI.
+It uses no RTOS, allocator, LVGL, Wi-Fi, or Bluetooth. Touch is read over a
+400 kHz I2C link, and the CO5300 panel runs at 80 MHz quad-SPI using SPI2/GDMA.
 
 ## Install and flash
 
@@ -26,23 +26,25 @@ BOOT, tap RESET, then release BOOT if automatic download mode does not engage.
 
 | Function | Connection |
 |---|---|
-| SH8601 QSPI clock / D0..D3 / CS | GPIO 0 / 1..4 / 15 |
-| CST9217 I2C SDA / SCL / reset | GPIO 8 / 7 / 11 |
-| CST9217 address | `0x5A` |
+| CO5300 QSPI clock / D0..D3 / CS | GPIO 0 / 1..4 / 15 |
+| CST9220 I2C SDA / SCL / reset / interrupt | GPIO 8 / 7 / 11 / 5 |
+| CST9220 address | `0x5A` |
 | AXP2101 address / AMOLED rail | `0x34` / ALDO3 |
 | Display | 480x480 RGB565 |
 
 The 80 MHz four-bit display link has a theoretical full-frame floor of about
-11.5 ms (roughly 86.8 frames/s before command overhead). The renderer uses a single
-full-screen address window with DMA stripes and a scanline-span rasterizer. Up to
-32 fixed-capacity circles are composited additively, with a
+11.5 ms (roughly 86.8 frames/s before command and packing overhead). The panel
+cannot accept RGB332 over its QSPI interface, so RGB565 is the minimum transfer
+format. The renderer uses a full-screen address window with ping-ponged DMA
+stripes, packed RGB444 retained state, row-mask dirty tracking, and an incremental
+scanline-span rasterizer. Up to 32 fixed-capacity circles are composited, with a
 one-pixel antialiased edge, smooth fixed-time growth, and a fade after reaching
 the farthest screen corner.
 
 ## Tuning
 
-- `STRIPE_ROWS`: lower improves worst-case input latency; higher reduces command
-  overhead. Eight is a good latency/throughput balance.
+- `STRIPE_ROWS`: higher reduces transaction overhead but consumes twice its size
+  in SRAM for ping-pong DMA. The current 32-row setting leaves about 34 KiB stack.
 - Growth/fade timing is in `circle_state`.
 - `PALETTE` controls circle colors.
 - The shortened touch/panel startup waits favor boot speed. If touch is unreliable
