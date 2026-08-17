@@ -60,80 +60,55 @@ const EMPTY: Circle = Circle {
 
 struct Scene {
     circles: [Circle; MAX_CIRCLES],
+    len: usize,
     next_color: usize,
-    was_down: bool,
-    release_started_ticks: u32,
-    last_spawn_x: u16,
-    last_spawn_y: u16,
-    last_spawn_ticks: u32,
 }
 
 impl Scene {
     fn new() -> Self {
         Self {
             circles: [EMPTY; MAX_CIRCLES],
+            len: 0,
             next_color: 0,
-            was_down: false,
-            release_started_ticks: 0,
-            last_spawn_x: u16::MAX,
-            last_spawn_y: u16::MAX,
-            last_spawn_ticks: 0,
         }
     }
 
     fn press(&mut self, x: u16, y: u16, now_ticks: u32) -> bool {
-        // The interrupt is a report pulse, so suppress repeated packets by
-        // position. A new contact elsewhere must not wait for global rearming.
-        const SAME_TOUCH_RADIUS_SQUARED: u32 = 48 * 48;
-        const SAME_TOUCH_TICKS: u32 = 16_000_000 * 180 / 1_000;
-        if self.was_down && now_ticks.wrapping_sub(self.last_spawn_ticks) < SAME_TOUCH_TICKS {
-            let dx = x.abs_diff(self.last_spawn_x) as u32;
-            let dy = y.abs_diff(self.last_spawn_y) as u32;
-            if dx * dx + dy * dy <= SAME_TOUCH_RADIUS_SQUARED { return false; }
+        // CST9220 reports are pulses rather than stable down/up state. Reject
+        // only reports belonging to a circle already alive at this location;
+        // contacts elsewhere never share a timer or global lockout.
+        const SAME_ORIGIN_RADIUS_SQUARED: u32 = 28 * 28;
+        for circle in &self.circles[..self.len] {
+            let dx = (x as i32 - circle.x).unsigned_abs();
+            let dy = (y as i32 - circle.y).unsigned_abs();
+            if dx * dx + dy * dy <= SAME_ORIGIN_RADIUS_SQUARED { return false; }
         }
-        self.was_down = true;
-        if let Some(slot) = self.circles.iter_mut().find(|c| !c.live) {
+        if self.len < MAX_CIRCLES {
             let x = (x as i32).clamp(0, (W - 1) as i32);
             let y = (y as i32).clamp(0, (H - 1) as i32);
             let dx = x.max((W - 1) as i32 - x) as u32;
             let dy = y.max((H - 1) as i32 - y) as u32;
             let far = isqrt(dx * dx + dy * dy) + 2;
-            *slot = Circle {
+            self.circles[self.len] = Circle {
                 live: true, x, y, born_ticks: now_ticks,
                 full_radius_q4: far << 4,
                 palette_index: (self.next_color % PALETTE.len()) as u8,
                 drawn_radius_q4: 0,
                 drawn_alpha: 255,
             };
+            self.len += 1;
             self.next_color += 1;
-            self.last_spawn_x = x as u16;
-            self.last_spawn_y = y as u16;
-            self.last_spawn_ticks = now_ticks;
             return true;
         }
         false
     }
+}
 
-    fn observe_touch_line(&mut self, is_low: bool, now_ticks: u32) {
-        /*
-            NOTE: CST9220 GPIO5 is a report pulse, not a stable contact level.
-                  Global contact state re-arms after 160 ms without a report;
-                  spatially distinct contacts bypass that wait in `press`.
-        */
-        const RELEASE_TICKS: u32 = 16_000_000 * 160 / 1_000;
-
-        if is_low {
-            self.release_started_ticks = 0;
-        } else if self.was_down {
-            if self.release_started_ticks == 0 {
-                self.release_started_ticks = now_ticks;
-            } else if now_ticks.wrapping_sub(self.release_started_ticks) >= RELEASE_TICKS {
-                self.was_down = false;
-                self.release_started_ticks = 0;
-            }
-        }
-    }
-
+#[inline(always)]
+fn smoothstep_q15(elapsed: u32, duration: u32) -> u32 {
+    let t = elapsed * 32_768 / duration;
+    let squared = t * t >> 15;
+    squared * (3 * 32_768 - 2 * t) >> 15
 }
 
 // Center-out radial motion with cubic ease-out. Once the circle reaches the
@@ -148,16 +123,12 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u32, u8) {
     const FADE_MS: u32 = 520;
     if age_ms < GROW_MS {
         // Q15 keeps every product within u32, avoiding RV32 multiword maths.
-        let t = age_ms * 32_768 / GROW_MS;
-        let t2 = t * t >> 15;
-        let eased = t2 * (3 * 32_768 - 2 * t) >> 15;
+        let eased = smoothstep_q15(age_ms, GROW_MS);
         return (c.full_radius_q4 * eased >> 15, 16, 255);
     }
     let fade_age = age_ms - GROW_MS;
     if fade_age >= FADE_MS { return (c.full_radius_q4, 16, 0); }
-    let t = fade_age * 32_768 / FADE_MS;
-    let t2 = t * t >> 15;
-    let smooth = t2 * (3 * 32_768 - 2 * t) >> 15;
+    let smooth = smoothstep_q15(fade_age, FADE_MS);
     let alpha = ((32_768 - smooth) * 255 >> 15) as u8;
     (c.full_radius_q4, 16, alpha)
 }
@@ -251,7 +222,6 @@ fn pmic_set_aldo3(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
 
 fn sample_touch(i2c: &mut I2c<'_, esp_hal::Blocking>, touch_int: &mut Input<'_>, scene: &mut Scene, now_ticks: u32) -> bool {
     let touch_line_is_low = touch_int.is_low();
-    scene.observe_touch_line(touch_line_is_low, now_ticks);
     if !touch_line_is_low && !touch_int.is_interrupt_set() { return false; }
     touch_int.clear_interrupt();
     let mut d = [0u8; 10];
@@ -345,8 +315,7 @@ fn update_circles(
     let mut combined = [[0u8; 16]; 3];
     for channel in &mut combined { for (i, v) in channel.iter_mut().enumerate() { *v = i as u8; } }
     let mut has_fade = false;
-    for c in &mut scene.circles {
-        if !c.live { continue; }
+    for c in &mut scene.circles[..scene.len] {
         let (radius, _, alpha) = circle_state(*c, now_ticks);
         if radius > c.drawn_radius_q4 {
             draw_annulus(frame, dirty, *c, c.drawn_radius_q4, radius);
@@ -364,7 +333,16 @@ fn update_circles(
         }
         if alpha == 0 { c.live = false; }
     }
-    if has_fade && !scene.circles.iter().any(|circle| circle.live) {
+    let mut write = 0;
+    for read in 0..scene.len {
+        if scene.circles[read].live {
+            scene.circles[write] = scene.circles[read];
+            write += 1;
+        }
+    }
+    scene.len = write;
+
+    if has_fade && scene.len == 0 {
         frame.fill(0);
         dirty.fill(ALL_TILE_COLUMNS);
         None
