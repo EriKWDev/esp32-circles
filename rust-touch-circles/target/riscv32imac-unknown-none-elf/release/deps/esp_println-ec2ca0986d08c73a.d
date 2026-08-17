@@ -1,0 +1,12 @@
+C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\deps\esp_println-ec2ca0986d08c73a.d: C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\lib.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\logger.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\../README.md C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\build\esp-println-0c3781286cdae680\out\log_filter.rs
+
+C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\deps\libesp_println-ec2ca0986d08c73a.rlib: C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\lib.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\logger.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\../README.md C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\build\esp-println-0c3781286cdae680\out\log_filter.rs
+
+C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\deps\libesp_println-ec2ca0986d08c73a.rmeta: C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\lib.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\logger.rs C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\../README.md C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\build\esp-println-0c3781286cdae680\out\log_filter.rs
+
+C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\lib.rs:
+C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\logger.rs:
+C:\Users\nisse3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\esp-println-0.16.1\src\../README.md:
+C:\Users\nisse3\Code\ESP32-C6-Touch-AMOLED-2.16\rust-touch-circles\target\riscv32imac-unknown-none-elf\release\build\esp-println-0c3781286cdae680\out\log_filter.rs:
+
+# env-dep:OUT_DIR=C:\\Users\\nisse3\\Code\\ESP32-C6-Touch-AMOLED-2.16\\rust-touch-circles\\target\\riscv32imac-unknown-none-elf\\release\\build\\esp-println-0c3781286cdae680\\out
