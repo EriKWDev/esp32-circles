@@ -222,6 +222,7 @@ fn main() -> ! {
     let mut scene = Scene::new();
     let mut next_frame = fast_ticks();
     let mut scene_was_visible = false;
+    let mut hardware_fade_active = false;
 
     // Establish a known black GRAM once. Subsequent growth is partial-update only.
     set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
@@ -242,11 +243,34 @@ fn main() -> ! {
         if now_ticks.wrapping_sub(next_frame) < 0x8000_0000 && now_ticks.wrapping_sub(next_frame) > FRAME_TICKS {
             next_frame = now_ticks.wrapping_add(FRAME_TICKS);
         }
+        let sole_full_circle_alpha = if scene.len == 1 {
+            let circle = scene.circles[0];
+            let (radius, _, alpha) = circle_state(circle, now_ticks);
+            (radius >= circle.full_radius_q4 && alpha != 0).then_some(alpha)
+        } else {
+            None
+        };
+
+        if let Some(alpha) = sole_full_circle_alpha {
+            if !hardware_fade_active {
+                let (render_circles, render_count) = prepare_render_circles(&mut scene, now_ticks);
+                set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+                stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+                hardware_fade_active = true;
+            }
+            set_brightness(&mut lcd, alpha);
+            scene_was_visible = true;
+            continue;
+        }
+
         let (render_circles, render_count) = prepare_render_circles(&mut scene, now_ticks);
         if render_count != 0 || scene_was_visible {
+            if hardware_fade_active && render_count == 0 { set_brightness(&mut lcd, 0); }
             set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
             stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+            if hardware_fade_active { set_brightness(&mut lcd, 255); }
         }
+        hardware_fade_active = false;
         scene_was_visible = render_count != 0;
     }
 }
@@ -351,6 +375,11 @@ fn qspi<S: LcdBus>(spi: &mut S, opcode: u8, cmd: u8, mode: DataMode, data: &[u8]
 fn set_window<S: LcdBus>(spi: &mut S, x0: u16, y0: u16, x1: u16, y1: u16) {
     qspi(spi, 0x02, 0x2a, DataMode::Single, &[(x0 >> 8) as u8, x0 as u8, (x1 >> 8) as u8, x1 as u8]);
     qspi(spi, 0x02, 0x2b, DataMode::Single, &[(y0 >> 8) as u8, y0 as u8, (y1 >> 8) as u8, y1 as u8]);
+}
+
+#[inline]
+fn set_brightness<S: LcdBus>(spi: &mut S, brightness: u8) {
+    qspi(spi, 0x02, 0x51, DataMode::Single, &[brightness]);
 }
 
 #[inline(always)]
