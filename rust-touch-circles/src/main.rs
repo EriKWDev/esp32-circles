@@ -56,10 +56,11 @@ struct Scene {
 
 #[derive(Clone, Copy)]
 struct RenderCircle {
-    x: i32,
-    y: i32,
+    center_x_q4: i32,
+    center_y_q4: i32,
     radius_q4: u32,
-    rgb565: u16,
+    radius_squared_q8: u32,
+    rgb565_pair: u32,
 }
 
 impl Scene {
@@ -110,7 +111,7 @@ fn smoothstep_q15(elapsed: u32, duration: u32) -> u32 {
 // Center-out radial motion with cubic ease-out. Once the circle reaches the
 // farthest corner, its opacity follows a smoothstep fade instead of a linear ramp.
 #[inline(always)]
-fn circle_state(c: Circle, now_ticks: u32) -> (u32, u32, u8) {
+fn circle_state(c: Circle, now_ticks: u32) -> (u32, u8) {
     let age_ticks = now_ticks.wrapping_sub(c.born_ticks);
     // Convert once to bounded u32 milliseconds so RV32 uses its hardware DIVU;
     // u64 division otherwise calls the slow software __udivdi3 routine.
@@ -120,56 +121,56 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u32, u8) {
     if age_ms < GROW_MS {
         // Q15 keeps every product within u32, avoiding RV32 multiword maths.
         let eased = smoothstep_q15(age_ms, GROW_MS);
-        return (c.full_radius_q4 * eased >> 15, 16, 255);
+        return (c.full_radius_q4 * eased >> 15, 255);
     }
     let fade_age = age_ms - GROW_MS;
-    if fade_age >= FADE_MS { return (c.full_radius_q4, 16, 0); }
+    if fade_age >= FADE_MS { return (c.full_radius_q4, 0); }
     let smooth = smoothstep_q15(fade_age, FADE_MS);
     let alpha = ((32_768 - smooth) * 255 >> 15) as u8;
-    (c.full_radius_q4, 16, alpha)
+    (c.full_radius_q4, alpha)
 }
 
 fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; MAX_CIRCLES], usize) {
-    const EMPTY_RENDER: RenderCircle = RenderCircle { x: 0, y: 0, radius_q4: 0, rgb565: 0 };
+    const EMPTY_RENDER: RenderCircle = RenderCircle {
+        center_x_q4: 0, center_y_q4: 0, radius_q4: 0,
+        radius_squared_q8: 0, rgb565_pair: 0,
+    };
     let mut rendered = [EMPTY_RENDER; MAX_CIRCLES];
-    let mut count = 0;
+    let mut alive = 0;
     let mut newest_full = None;
 
-    for index in 0..scene.len {
-        let circle = scene.circles[index];
-        let (radius_q4, _, alpha) = circle_state(circle, now_ticks);
+    for read in 0..scene.len {
+        let circle = scene.circles[read];
+        let (radius_q4, alpha) = circle_state(circle, now_ticks);
         if alpha == 0 { continue; }
-        if radius_q4 >= circle.full_radius_q4 { newest_full = Some(index); }
+        if radius_q4 >= circle.full_radius_q4 { newest_full = Some(alive); }
         let color = PALETTE[circle.palette_index as usize];
         let red = mul_255(color.0 as u16, alpha as u16) as u8;
         let green = mul_255(color.1 as u16, alpha as u16) as u8;
         let blue = mul_255(color.2 as u16, alpha as u16) as u8;
-        rendered[count] = RenderCircle {
-            x: circle.x,
-            y: circle.y,
+        let rgb565 = rgb888_to_565(red, green, blue);
+        let high = (rgb565 >> 8) as u8;
+        let low = rgb565 as u8;
+        scene.circles[alive] = circle;
+        rendered[alive] = RenderCircle {
+            center_x_q4: circle.x << 4,
+            center_y_q4: circle.y << 4,
             radius_q4,
-            rgb565: rgb888_to_565(red, green, blue),
+            radius_squared_q8: radius_q4 * radius_q4,
+            rgb565_pair: u32::from_le_bytes([high, low, high, low]),
         };
-        count += 1;
+        alive += 1;
     }
+    scene.len = alive;
 
     if let Some(first_visible) = newest_full {
-        let retained = scene.len - first_visible;
-        scene.circles.copy_within(first_visible..scene.len, 0);
+        let retained = alive - first_visible;
+        scene.circles.copy_within(first_visible..alive, 0);
         scene.len = retained;
-        rendered.copy_within(count - retained..count, 0);
-        count = retained;
-    } else {
-        let mut write = 0;
-        for read in 0..scene.len {
-            if circle_state(scene.circles[read], now_ticks).2 != 0 {
-                scene.circles[write] = scene.circles[read];
-                write += 1;
-            }
-        }
-        scene.len = write;
+        rendered.copy_within(first_visible..alive, 0);
+        alive = retained;
     }
-    (rendered, count)
+    (rendered, alive)
 }
 
 #[inline(always)]
@@ -245,7 +246,7 @@ fn main() -> ! {
         }
         let sole_full_circle_alpha = if scene.len == 1 {
             let circle = scene.circles[0];
-            let (radius, _, alpha) = circle_state(circle, now_ticks);
+            let (radius, alpha) = circle_state(circle, now_ticks);
             (radius >= circle.full_radius_q4 && alpha != 0).then_some(alpha)
         } else {
             None
@@ -432,18 +433,17 @@ fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
         let mut covered_count = 0;
 
         for circle in circles.iter().rev() {
-            let dy_q4 = (y - circle.y).unsigned_abs() << 4;
+            let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
             if dy_q4 > circle.radius_q4 + 8 { continue; }
-            let radius_squared = circle.radius_q4 * circle.radius_q4;
-            let x_extent_q4 = isqrt(radius_squared.saturating_sub(dy_q4 * dy_q4)) as i32;
-            let left_q4 = (circle.x << 4) - x_extent_q4;
-            let right_q4 = (circle.x << 4) + x_extent_q4;
+            let x_extent_q4 = isqrt(circle.radius_squared_q8.saturating_sub(dy_q4 * dy_q4)) as i32;
+            let left_q4 = circle.center_x_q4 - x_extent_q4;
+            let right_q4 = circle.center_x_q4 + x_extent_q4;
             let inner_left = ((left_q4 + 23) >> 4).clamp(0, W as i32);
             let inner_right = ((right_q4 - 8) >> 4).clamp(-1, (W - 1) as i32);
 
             if inner_left <= inner_right {
                 paint_uncovered(
-                    row, inner_left as i16, inner_right as i16, circle.rgb565,
+                    row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
                     &mut covered_left, &mut covered_right, &mut covered_count,
                 );
             }
@@ -451,7 +451,7 @@ fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
             if left_edge >= 0 {
                 let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
                 if coverage > bayer4(left_edge as usize, y as usize) {
-                    paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565,
+                    paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565_pair,
                         &mut covered_left, &mut covered_right, &mut covered_count);
                 }
             }
@@ -459,7 +459,7 @@ fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
             if right_edge < W as i32 && right_edge != left_edge {
                 let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
                 if coverage > bayer4(right_edge as usize, y as usize) {
-                    paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565,
+                    paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565_pair,
                         &mut covered_left, &mut covered_right, &mut covered_count);
                 }
             }
@@ -470,7 +470,7 @@ fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
 
 #[inline(always)]
 fn paint_uncovered(
-    row: &mut [u8], left: i16, right: i16, color: u16,
+    row: &mut [u8], left: i16, right: i16, rgb565_pair: u32,
     covered_left: &mut [i16; MAX_CIRCLES * 3],
     covered_right: &mut [i16; MAX_CIRCLES * 3],
     covered_count: &mut usize,
@@ -480,12 +480,12 @@ fn paint_uncovered(
         if covered_right[interval] < cursor { continue; }
         if covered_left[interval] > right { break; }
         if cursor < covered_left[interval] {
-            fill_rgb565(row, cursor, (covered_left[interval] - 1).min(right), color);
+            fill_rgb565(row, cursor, (covered_left[interval] - 1).min(right), rgb565_pair);
         }
         cursor = cursor.max(covered_right[interval] + 1);
         if cursor > right { break; }
     }
-    if cursor <= right { fill_rgb565(row, cursor, right, color); }
+    if cursor <= right { fill_rgb565(row, cursor, right, rgb565_pair); }
     insert_covered(left, right, covered_left, covered_right, covered_count);
 }
 
@@ -527,9 +527,9 @@ fn insert_covered(
 }
 
 #[inline(always)]
-fn fill_rgb565(row: &mut [u8], left: i16, right: i16, color: u16) {
-    let high = (color >> 8) as u8;
-    let low = color as u8;
+fn fill_rgb565(row: &mut [u8], left: i16, right: i16, rgb565_pair: u32) {
+    let high = rgb565_pair as u8;
+    let low = (rgb565_pair >> 8) as u8;
     let mut pixel = left as usize;
     let end = right as usize + 1;
     if pixel & 1 != 0 {
@@ -538,10 +538,9 @@ fn fill_rgb565(row: &mut [u8], left: i16, right: i16, color: u16) {
         row[byte + 1] = low;
         pixel += 1;
     }
-    let pair = u32::from_le_bytes([high, low, high, low]);
     while pixel + 1 < end {
         // `pixel` is even, so the DMA row address plus pixel*2 is word aligned.
-        unsafe { (row.as_mut_ptr().add(pixel * 2) as *mut u32).write(pair) };
+        unsafe { (row.as_mut_ptr().add(pixel * 2) as *mut u32).write(rgb565_pair) };
         pixel += 2;
     }
     if pixel < end {
