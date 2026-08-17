@@ -3,6 +3,9 @@ name = "touch-circles"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+profile = []
+
 [dependencies]
 esp-hal = { version = "1.1.0", features = ["esp32c6", "unstable"] }
 esp-backtrace = { version = "0.18", features = ["esp32c6", "panic-handler", "println"] }

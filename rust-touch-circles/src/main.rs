@@ -2,6 +2,8 @@
 #![no_main]
 
 use esp_backtrace as _;
+#[cfg(feature = "profile")]
+use esp_println::println;
 esp_bootloader_esp_idf::esp_app_desc!();
 use esp_hal::{
     delay::Delay,
@@ -224,6 +226,8 @@ fn main() -> ! {
     let mut next_frame = fast_ticks();
     let mut scene_was_visible = false;
     let mut hardware_fade_active = false;
+    #[cfg(feature = "profile")]
+    let mut profile_frames = 0u32;
 
     // Establish a known black GRAM once. Subsequent growth is partial-update only.
     set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
@@ -231,6 +235,8 @@ fn main() -> ! {
     for stripe in 0..TILES_Y {
         lcd.send_prepared(0x32, if stripe == 0 { 0x2c } else { 0x3c }, DataMode::Quad, STRIPE_BYTES);
     }
+    #[cfg(feature = "profile")]
+    profile_renderer(&mut lcd, &delay);
 
     loop {
         let now_ticks = fast_ticks();
@@ -268,7 +274,18 @@ fn main() -> ! {
         if render_count != 0 || scene_was_visible {
             if hardware_fade_active && render_count == 0 { set_brightness(&mut lcd, 0); }
             set_window(&mut lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+            #[cfg(feature = "profile")]
+            let frame_started = fast_ticks();
             stream_opaque_scene(&mut lcd, &render_circles[..render_count]);
+            #[cfg(feature = "profile")]
+            {
+                let elapsed_ticks = fast_ticks().wrapping_sub(frame_started);
+                profile_frames += 1;
+                if profile_frames == 15 {
+                    println!("circles={} frame_us={}", render_count, elapsed_ticks / 16);
+                    profile_frames = 0;
+                }
+            }
             if hardware_fade_active { set_brightness(&mut lcd, 255); }
         }
         hardware_fade_active = false;
@@ -383,6 +400,42 @@ fn set_brightness<S: LcdBus>(spi: &mut S, brightness: u8) {
     qspi(spi, 0x02, 0x51, DataMode::Single, &[brightness]);
 }
 
+#[cfg(feature = "profile")]
+fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
+    const EMPTY_RENDER: RenderCircle = RenderCircle {
+        center_x_q4: 0, center_y_q4: 0, radius_q4: 0,
+        radius_squared_q8: 0, rgb565_pair: 0,
+    };
+    let mut circles = [EMPTY_RENDER; MAX_CIRCLES];
+    delay.delay_millis(5_000);
+    for &count in &[1usize, 2, 4, 8, 16, 32] {
+        for (index, circle) in circles[..count].iter_mut().enumerate() {
+            let x = 48 + (index * 83 % 384) as i32;
+            let y = 48 + (index * 137 % 384) as i32;
+            let radius_q4 = ((96 + index % 6 * 24) as u32) << 4;
+            let color = rgb888_to_565(
+                48 + (index * 71 % 208) as u8,
+                48 + (index * 43 % 208) as u8,
+                48 + (index * 97 % 208) as u8,
+            );
+            let high = (color >> 8) as u8;
+            let low = color as u8;
+            *circle = RenderCircle {
+                center_x_q4: x << 4,
+                center_y_q4: y << 4,
+                radius_q4,
+                radius_squared_q8: radius_q4 * radius_q4,
+                rgb565_pair: u32::from_le_bytes([high, low, high, low]),
+            };
+        }
+        set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
+        let started = fast_ticks();
+        stream_opaque_scene(lcd, &circles[..count]);
+        println!("benchmark circles={} frame_us={}", count, fast_ticks().wrapping_sub(started) / 16);
+    }
+    delay.delay_millis(2_000);
+}
+
 #[inline(always)]
 fn mul_255(a: u16, b: u16) -> u16 {
     let x = a * b + 128;
@@ -397,10 +450,23 @@ fn fast_ticks() -> u32 {
 }
 
 fn stream_opaque_scene(lcd: &mut Lcd<'_>, circles: &[RenderCircle]) {
+    if circles.len() <= 8 {
+        stream_scene(lcd, circles, None);
+        return;
+    }
+    let mut x_extents = [[-1i16; MAX_CIRCLES]; H];
+    build_x_extents(circles, &mut x_extents);
+    stream_scene(lcd, circles, Some(&x_extents));
+}
+
+fn stream_scene(
+    lcd: &mut Lcd<'_>, circles: &[RenderCircle],
+    x_extents: Option<&[[i16; MAX_CIRCLES]; H]>,
+) {
     let mut spi = lcd.spi.take().unwrap();
     let mut transmitting = lcd.tx.take().unwrap();
     let mut drawing = lcd.spare.take().unwrap();
-    render_scene_stripe(circles, 0, transmitting.as_mut_slice());
+    render_scene_stripe(circles, x_extents, 0, transmitting.as_mut_slice());
 
     for stripe in 0..H / STRIPE_ROWS {
         let command = if stripe == 0 { 0x2c } else { 0x3c };
@@ -413,7 +479,7 @@ fn stream_opaque_scene(lcd: &mut Lcd<'_>, circles: &[RenderCircle]) {
             transmitting,
         ).unwrap_or_else(|_| panic!());
         if stripe + 1 < H / STRIPE_ROWS {
-            render_scene_stripe(circles, (stripe + 1) * STRIPE_ROWS, drawing.as_mut_slice());
+            render_scene_stripe(circles, x_extents, (stripe + 1) * STRIPE_ROWS, drawing.as_mut_slice());
         }
         (spi, transmitting) = transfer.wait();
         core::mem::swap(&mut transmitting, &mut drawing);
@@ -423,23 +489,75 @@ fn stream_opaque_scene(lcd: &mut Lcd<'_>, circles: &[RenderCircle]) {
     lcd.spare = Some(transmitting);
 }
 
-fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
-    let mut covered_left = [0i16; MAX_CIRCLES * 3];
-    let mut covered_right = [0i16; MAX_CIRCLES * 3];
+fn build_x_extents(circles: &[RenderCircle], extents: &mut [[i16; MAX_CIRCLES]; H]) {
+    for (circle_index, circle) in circles.iter().enumerate() {
+        let center_y = circle.center_y_q4 >> 4;
+        let maximum_dy = ((circle.radius_q4 + 15) >> 4) as i32;
+        let mut x = maximum_dy;
+        for dy in 0..=maximum_dy {
+            let dy_q4 = (dy as u32) << 4;
+            while x >= 0 {
+                let x_q4 = (x as u32) << 4;
+                if x_q4 * x_q4 + dy_q4 * dy_q4 <= circle.radius_squared_q8 { break; }
+                x -= 1;
+            }
+            if x < 0 { break; }
+            let upper = center_y - dy;
+            let lower = center_y + dy;
+            if upper >= 0 && upper < H as i32 { extents[upper as usize][circle_index] = x as i16; }
+            if lower >= 0 && lower < H as i32 { extents[lower as usize][circle_index] = x as i16; }
+        }
+    }
+}
 
+fn render_scene_stripe(
+    circles: &[RenderCircle], x_extents: Option<&[[i16; MAX_CIRCLES]; H]>,
+    y0: usize, pixels: &mut [u8],
+) {
     for local_y in 0..STRIPE_ROWS {
         let y = (y0 + local_y) as i32;
         let row = &mut pixels[local_y * W * 2..(local_y + 1) * W * 2];
+        let mut covered_left = [0i16; MAX_CIRCLES * 3];
+        let mut covered_right = [0i16; MAX_CIRCLES * 3];
         let mut covered_count = 0;
 
-        for circle in circles.iter().rev() {
-            let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
-            if dy_q4 > circle.radius_q4 + 8 { continue; }
-            let x_extent_q4 = isqrt(circle.radius_squared_q8.saturating_sub(dy_q4 * dy_q4)) as i32;
-            let left_q4 = circle.center_x_q4 - x_extent_q4;
-            let right_q4 = circle.center_x_q4 + x_extent_q4;
-            let inner_left = ((left_q4 + 23) >> 4).clamp(0, W as i32);
-            let inner_right = ((right_q4 - 8) >> 4).clamp(-1, (W - 1) as i32);
+        for circle_index in (0..circles.len()).rev() {
+            let circle = &circles[circle_index];
+            if x_extents.is_none() {
+                let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
+                if dy_q4 > circle.radius_q4 + 8 { continue; }
+                let extent_q4 = isqrt(circle.radius_squared_q8.saturating_sub(dy_q4 * dy_q4)) as i32;
+                let left_q4 = circle.center_x_q4 - extent_q4;
+                let right_q4 = circle.center_x_q4 + extent_q4;
+                let inner_left = ((left_q4 + 23) >> 4).clamp(0, W as i32);
+                let inner_right = ((right_q4 - 8) >> 4).clamp(-1, (W - 1) as i32);
+                if inner_left <= inner_right {
+                    paint_uncovered(row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
+                        &mut covered_left, &mut covered_right, &mut covered_count);
+                }
+                let left_edge = inner_left - 1;
+                if left_edge >= 0 {
+                    let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
+                    if coverage > bayer4(left_edge as usize, y as usize) {
+                        paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565_pair,
+                            &mut covered_left, &mut covered_right, &mut covered_count);
+                    }
+                }
+                let right_edge = inner_right + 1;
+                if right_edge < W as i32 && right_edge != left_edge {
+                    let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
+                    if coverage > bayer4(right_edge as usize, y as usize) {
+                        paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565_pair,
+                            &mut covered_left, &mut covered_right, &mut covered_count);
+                    }
+                }
+                continue;
+            }
+            let x_extent = x_extents.unwrap()[y as usize][circle_index] as i32;
+            if x_extent < 0 { continue; }
+            let center_x = circle.center_x_q4 >> 4;
+            let inner_left = (center_x - x_extent + 1).clamp(0, W as i32);
+            let inner_right = (center_x + x_extent - 1).clamp(-1, (W - 1) as i32);
 
             if inner_left <= inner_right {
                 paint_uncovered(
@@ -447,24 +565,32 @@ fn render_scene_stripe(circles: &[RenderCircle], y0: usize, pixels: &mut [u8]) {
                     &mut covered_left, &mut covered_right, &mut covered_count,
                 );
             }
-            let left_edge = inner_left - 1;
-            if left_edge >= 0 {
-                let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
-                if coverage > bayer4(left_edge as usize, y as usize) {
-                    paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565_pair,
-                        &mut covered_left, &mut covered_right, &mut covered_count);
-                }
-            }
-            let right_edge = inner_right + 1;
-            if right_edge < W as i32 && right_edge != left_edge {
-                let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
-                if coverage > bayer4(right_edge as usize, y as usize) {
-                    paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565_pair,
-                        &mut covered_left, &mut covered_right, &mut covered_count);
-                }
+            paint_dithered_edge(row, center_x - x_extent, y, circle,
+                &mut covered_left, &mut covered_right, &mut covered_count);
+            if x_extent != 0 {
+                paint_dithered_edge(row, center_x + x_extent, y, circle,
+                    &mut covered_left, &mut covered_right, &mut covered_count);
             }
         }
         paint_background(row, &covered_left, &covered_right, covered_count);
+    }
+}
+
+#[inline(always)]
+fn paint_dithered_edge(
+    row: &mut [u8], x: i32, y: i32, circle: &RenderCircle,
+    covered_left: &mut [i16; MAX_CIRCLES * 3],
+    covered_right: &mut [i16; MAX_CIRCLES * 3],
+    covered_count: &mut usize,
+) {
+    if x < 0 || x >= W as i32 { return; }
+    let threshold = bayer4(x as usize, y as usize) as i32;
+    let test_radius = (circle.radius_q4 as i32 + 8 - threshold).max(0) as u32;
+    let dx_q4 = ((x << 4) - circle.center_x_q4).unsigned_abs();
+    let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
+    if dx_q4 * dx_q4 + dy_q4 * dy_q4 <= test_radius * test_radius {
+        paint_uncovered(row, x as i16, x as i16, circle.rgb565_pair,
+            covered_left, covered_right, covered_count);
     }
 }
 
