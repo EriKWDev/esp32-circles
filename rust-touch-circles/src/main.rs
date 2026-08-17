@@ -30,6 +30,7 @@ const TILE_H: usize = STRIPE_ROWS;
 const TILES_X: usize = W / TILE_W;
 const TILES_Y: usize = H / TILE_H;
 const MAX_CIRCLES: usize = 32;
+const RIM_PIXELS: i16 = 3;
 const TOUCH_ADDR: u8 = 0x5a;
 const PMIC_ADDR: u8 = 0x34;
 const FRAME_TICKS: u32 = 16_000_000 / 60;
@@ -67,6 +68,7 @@ struct RenderCircle {
     previous_radius_q4: u32,
     radius_squared_q8: u32,
     rgb565_pair: u32,
+    rim565_pair: u32,
 }
 
 impl Scene {
@@ -140,7 +142,7 @@ fn circle_state(c: Circle, now_ticks: u32) -> (u32, u8) {
 fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; MAX_CIRCLES], usize) {
     const EMPTY_RENDER: RenderCircle = RenderCircle {
         center_x_q4: 0, center_y_q4: 0, radius_q4: 0, previous_radius_q4: 0,
-        radius_squared_q8: 0, rgb565_pair: 0,
+        radius_squared_q8: 0, rgb565_pair: 0, rim565_pair: 0,
     };
     let mut rendered = [EMPTY_RENDER; MAX_CIRCLES];
     let mut alive = 0;
@@ -156,6 +158,11 @@ fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; 
         let green = mul_255(color.1 as u16, alpha as u16) as u8;
         let blue = mul_255(color.2 as u16, alpha as u16) as u8;
         let rgb565 = rgb888_to_565(red, green, blue);
+        let rim565 = rgb888_to_565(
+            mul_255(color.0 as u16 + ((255 - color.0 as u16) * 5 >> 3), alpha as u16) as u8,
+            mul_255(color.1 as u16 + ((255 - color.1 as u16) * 5 >> 3), alpha as u16) as u8,
+            mul_255(color.2 as u16 + ((255 - color.2 as u16) * 5 >> 3), alpha as u16) as u8,
+        );
         let high = (rgb565 >> 8) as u8;
         let low = rgb565 as u8;
         let mut updated_circle = circle;
@@ -168,6 +175,7 @@ fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; 
             previous_radius_q4: circle.drawn_radius_q4,
             radius_squared_q8: radius_q4 * radius_q4,
             rgb565_pair: u32::from_le_bytes([high, low, high, low]),
+            rim565_pair: pack_rgb565_pair(rim565),
         };
         alive += 1;
     }
@@ -186,6 +194,13 @@ fn prepare_render_circles(scene: &mut Scene, now_ticks: u32) -> ([RenderCircle; 
 #[inline(always)]
 const fn rgb888_to_565(red: u8, green: u8, blue: u8) -> u16 {
     ((red as u16 & 0xf8) << 8) | ((green as u16 & 0xfc) << 3) | (blue as u16 >> 3)
+}
+
+#[inline(always)]
+const fn pack_rgb565_pair(rgb565: u16) -> u32 {
+    let high = (rgb565 >> 8) as u8;
+    let low = rgb565 as u8;
+    u32::from_le_bytes([high, low, high, low])
 }
 
 #[main]
@@ -421,7 +436,7 @@ fn set_brightness<S: LcdBus>(spi: &mut S, brightness: u8) {
 fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
     const EMPTY_RENDER: RenderCircle = RenderCircle {
         center_x_q4: 0, center_y_q4: 0, radius_q4: 0, previous_radius_q4: 0,
-        radius_squared_q8: 0, rgb565_pair: 0,
+        radius_squared_q8: 0, rgb565_pair: 0, rim565_pair: 0,
     };
     let mut circles = [EMPTY_RENDER; MAX_CIRCLES];
     delay.delay_millis(5_000);
@@ -444,6 +459,7 @@ fn profile_renderer(lcd: &mut Lcd<'_>, delay: &Delay) {
                 previous_radius_q4: 0,
                 radius_squared_q8: radius_q4 * radius_q4,
                 rgb565_pair: u32::from_le_bytes([high, low, high, low]),
+                rim565_pair: u32::from_le_bytes([high, low, high, low]),
             };
         }
         set_window(lcd, 0, 0, (W - 1) as u16, (H - 1) as u16);
@@ -549,13 +565,20 @@ fn render_single_circle_rect(
         let inner_right = ((right_q4 - 8) >> 4).clamp(x0 as i32 - 1, x1);
         if inner_left <= inner_right {
             fill_rgb565(row, (inner_left - x0 as i32) as i16, (inner_right - x0 as i32) as i16, circle.rgb565_pair);
+            let left = (inner_left - x0 as i32) as i16;
+            let right = (inner_right - x0 as i32) as i16;
+            fill_rgb565(row, left, (left + RIM_PIXELS - 1).min(right), circle.rim565_pair);
+            let rim_right = (right - RIM_PIXELS + 1).max(left);
+            if rim_right > left + RIM_PIXELS - 1 {
+                fill_rgb565(row, rim_right, right, circle.rim565_pair);
+            }
         }
         let left_edge = inner_left - 1;
         if left_edge >= x0 as i32 {
             let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
             if coverage > bayer4(left_edge as usize, y as usize) {
                 let local_x = (left_edge - x0 as i32) as i16;
-                fill_rgb565(row, local_x, local_x, circle.rgb565_pair);
+                fill_rgb565(row, local_x, local_x, circle.rim565_pair);
             }
         }
         let right_edge = inner_right + 1;
@@ -563,7 +586,7 @@ fn render_single_circle_rect(
             let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
             if coverage > bayer4(right_edge as usize, y as usize) {
                 let local_x = (right_edge - x0 as i32) as i16;
-                fill_rgb565(row, local_x, local_x, circle.rgb565_pair);
+                fill_rgb565(row, local_x, local_x, circle.rim565_pair);
             }
         }
     }
@@ -643,6 +666,7 @@ fn render_scene_stripe(
 
         for circle_index in (0..circles.len()).rev() {
             let circle = &circles[circle_index];
+            let is_active = circle_index + 1 == circles.len();
             if x_extents.is_none() {
                 let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
                 if dy_q4 > circle.radius_q4 + 8 { continue; }
@@ -652,14 +676,21 @@ fn render_scene_stripe(
                 let inner_left = ((left_q4 + 23) >> 4).clamp(0, W as i32);
                 let inner_right = ((right_q4 - 8) >> 4).clamp(-1, (W - 1) as i32);
                 if inner_left <= inner_right {
-                    paint_uncovered(row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
-                        &mut covered_left, &mut covered_right, &mut covered_count);
+                    if is_active {
+                        paint_uncovered_rim(row, inner_left as i16, inner_right as i16,
+                            circle.rgb565_pair, circle.rim565_pair,
+                            &mut covered_left, &mut covered_right, &mut covered_count);
+                    } else {
+                        paint_uncovered(row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
+                            &mut covered_left, &mut covered_right, &mut covered_count);
+                    }
                 }
+                let edge_color = if is_active { circle.rim565_pair } else { circle.rgb565_pair };
                 let left_edge = inner_left - 1;
                 if left_edge >= 0 {
                     let coverage = (((left_edge << 4) - left_q4 + 8).clamp(0, 16)) as u8;
                     if coverage > bayer4(left_edge as usize, y as usize) {
-                        paint_uncovered(row, left_edge as i16, left_edge as i16, circle.rgb565_pair,
+                        paint_uncovered(row, left_edge as i16, left_edge as i16, edge_color,
                             &mut covered_left, &mut covered_right, &mut covered_count);
                     }
                 }
@@ -667,7 +698,7 @@ fn render_scene_stripe(
                 if right_edge < W as i32 && right_edge != left_edge {
                     let coverage = ((right_q4 - (right_edge << 4) + 8).clamp(0, 16)) as u8;
                     if coverage > bayer4(right_edge as usize, y as usize) {
-                        paint_uncovered(row, right_edge as i16, right_edge as i16, circle.rgb565_pair,
+                        paint_uncovered(row, right_edge as i16, right_edge as i16, edge_color,
                             &mut covered_left, &mut covered_right, &mut covered_count);
                     }
                 }
@@ -680,15 +711,24 @@ fn render_scene_stripe(
             let inner_right = (center_x + x_extent - 1).clamp(-1, (W - 1) as i32);
 
             if inner_left <= inner_right {
-                paint_uncovered(
-                    row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
-                    &mut covered_left, &mut covered_right, &mut covered_count,
-                );
+                if is_active {
+                    paint_uncovered_rim(
+                        row, inner_left as i16, inner_right as i16,
+                        circle.rgb565_pair, circle.rim565_pair,
+                        &mut covered_left, &mut covered_right, &mut covered_count,
+                    );
+                } else {
+                    paint_uncovered(
+                        row, inner_left as i16, inner_right as i16, circle.rgb565_pair,
+                        &mut covered_left, &mut covered_right, &mut covered_count,
+                    );
+                }
             }
-            paint_dithered_edge(row, center_x - x_extent, y, circle,
+            let edge_color = if is_active { circle.rim565_pair } else { circle.rgb565_pair };
+            paint_dithered_edge(row, center_x - x_extent, y, circle, edge_color,
                 &mut covered_left, &mut covered_right, &mut covered_count);
             if x_extent != 0 {
-                paint_dithered_edge(row, center_x + x_extent, y, circle,
+                paint_dithered_edge(row, center_x + x_extent, y, circle, edge_color,
                     &mut covered_left, &mut covered_right, &mut covered_count);
             }
         }
@@ -698,7 +738,7 @@ fn render_scene_stripe(
 
 #[inline(always)]
 fn paint_dithered_edge(
-    row: &mut [u8], x: i32, y: i32, circle: &RenderCircle,
+    row: &mut [u8], x: i32, y: i32, circle: &RenderCircle, color: u32,
     covered_left: &mut [i16; MAX_CIRCLES * 3],
     covered_right: &mut [i16; MAX_CIRCLES * 3],
     covered_count: &mut usize,
@@ -709,9 +749,50 @@ fn paint_dithered_edge(
     let dx_q4 = ((x << 4) - circle.center_x_q4).unsigned_abs();
     let dy_q4 = ((y << 4) - circle.center_y_q4).unsigned_abs();
     if dx_q4 * dx_q4 + dy_q4 * dy_q4 <= test_radius * test_radius {
-        paint_uncovered(row, x as i16, x as i16, circle.rgb565_pair,
+        paint_uncovered(row, x as i16, x as i16, color,
             covered_left, covered_right, covered_count);
     }
+}
+
+// Color the already-owned span while preserving the compositor's single
+// coverage insertion. Only fragments containing a geometric endpoint receive
+// a rim pixel, so overlap clipping cannot create false internal outlines.
+#[inline(always)]
+fn paint_uncovered_rim(
+    row: &mut [u8], left: i16, right: i16, body: u32, rim: u32,
+    covered_left: &mut [i16; MAX_CIRCLES * 3],
+    covered_right: &mut [i16; MAX_CIRCLES * 3],
+    covered_count: &mut usize,
+) {
+    let mut cursor = left;
+    for interval in 0..*covered_count {
+        if covered_right[interval] < cursor { continue; }
+        if covered_left[interval] > right { break; }
+        if cursor < covered_left[interval] {
+            fill_rimmed_span(row, cursor, (covered_left[interval] - 1).min(right), left, right, body, rim);
+        }
+        cursor = cursor.max(covered_right[interval] + 1);
+        if cursor > right { break; }
+    }
+    if cursor <= right { fill_rimmed_span(row, cursor, right, left, right, body, rim); }
+    insert_covered(left, right, covered_left, covered_right, covered_count);
+}
+
+#[inline(always)]
+fn fill_rimmed_span(
+    row: &mut [u8], left: i16, right: i16, circle_left: i16, circle_right: i16,
+    body: u32, rim: u32,
+) {
+    let left_rim_end = (circle_left + RIM_PIXELS - 1).min(circle_right);
+    let right_rim_start = (circle_right - RIM_PIXELS + 1).max(circle_left);
+    let a = left;
+    let b = right.min(left_rim_end);
+    if a <= b { fill_rgb565(row, a, b, rim); }
+    let a = left.max(left_rim_end + 1);
+    let b = right.min(right_rim_start - 1);
+    if a <= b { fill_rgb565(row, a, b, body); }
+    let a = left.max(right_rim_start).max(left_rim_end + 1);
+    if a <= right { fill_rgb565(row, a, right, rim); }
 }
 
 #[inline(always)]
