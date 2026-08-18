@@ -50,6 +50,10 @@ const PMIC_ADDR: u8 = 0x34;
 /// transfer can never interrupt an animation - see `net`.
 const POLL_INTERVAL_MS: u32 = 2_000;
 const INFO_POLL_INTERVAL_MS: u32 = 500;
+/// While a relay or a queued sequence is running. The handover from one entry to
+/// the next is only visible through a poll, and at two seconds that reads as the
+/// progress bar sticking and then jumping.
+const RUN_POLL_INTERVAL_MS: u32 = 500;
 
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
@@ -299,14 +303,16 @@ fn main() -> ! {
                 dirty = true;
             }
             Action::RunSchedule { controller, start } => {
+                // Applied locally first, for the same reason a manual trigger is:
+                // the panel should show the schedule you just started, not the one
+                // it superseded, on the same frame as the tap. The controller
+                // always honours this request - it supersedes rather than refusing
+                // - and the poll forced below confirms the details.
+                apply_local_schedule(&mut state, controller, start);
                 if let Some(net) = net.as_mut() {
                     net.run_schedule(controller, start, t);
                 }
-                // No optimistic local state here, unlike a manual trigger: which
-                // relay a schedule starts with, and how the controller sequences
-                // the rest, is the controller's to decide. The next poll - forced
-                // below - is what makes it visible.
-                last_poll_ms = t.wrapping_sub(POLL_INTERVAL_MS);
+                last_poll_ms = t.wrapping_sub(RUN_POLL_INTERVAL_MS);
                 dirty = true;
             }
             Action::None => {}
@@ -328,16 +334,27 @@ fn main() -> ! {
                 Link::Connecting
             };
 
-            // Requests only go out while nothing is animating, so a transfer can
-            // never stutter a transition. present() already blocks ~20 ms a frame,
-            // which is longer than smoltcp likes to be ignored, so this is the
-            // conservative placement until the stack is pumped between stripes.
+            // Requests hold off while the user is mid-interaction - a transition,
+            // a drag, a tap's ripple - so a transfer cannot stutter something the
+            // eye is following. Deliberately NOT gated on `animating()`, which is
+            // also true for as long as a relay is running: that stopped the panel
+            // polling for the whole of a multi-entry schedule, so the countdown
+            // stuck at 00:00 and every progress bar froze after the first entry.
+            // A running schedule is when fresh state matters most.
             let poll_interval = if ui.screen == ui::Screen::Info {
                 INFO_POLL_INTERVAL_MS
+            } else if state.running || state.queued > 0 {
+                // Following a sequence: the interesting transitions are the
+                // handovers between entries, which a two-second cadence renders
+                // as a visible jump.
+                RUN_POLL_INTERVAL_MS
             } else {
                 POLL_INTERVAL_MS
             };
-            if !ui.animating() && n.ip.is_some() && t.wrapping_sub(last_poll_ms) >= poll_interval {
+            if !ui.interaction_active()
+                && n.ip.is_some()
+                && t.wrapping_sub(last_poll_ms) >= poll_interval
+            {
                 last_poll_ms = t;
                 n.poll_dump(&mut state, t);
                 dirty = true;
@@ -497,6 +514,35 @@ fn update_power_state(i2c: &mut I2c<'_, esp_hal::Blocking>, state: &mut State) -
     state.external_power = external_power;
     state.battery_percent = battery_percent;
     changed
+}
+
+/// Show a schedule as running the moment it is asked for.
+///
+/// Mirrors `apply_local_trigger`: the first entry becomes the active relay and
+/// the rest become the queue, so the countdown and the progress bars are right
+/// immediately rather than a poll later. It also transfers ownership away from a
+/// schedule that was already running, which is what the controller does too -
+/// without this, triggering a second schedule left the first one still claiming
+/// the progress display until the next poll landed.
+fn apply_local_schedule(state: &mut State, controller: u8, start: u8) {
+    let Some(index) = state.starts[..state.n_starts]
+        .iter()
+        .position(|s| s.controller == controller && s.remote_id == start)
+    else {
+        return;
+    };
+    let schedule = state.starts[index];
+    if schedule.n_entries == 0 {
+        return;
+    }
+    for s in state.starts[..state.n_starts].iter_mut() {
+        s.running = false;
+    }
+    state.starts[index].running = true;
+
+    let first = schedule.entries[0];
+    apply_local_trigger(state, first.relay, first.seconds as u32);
+    state.queued = schedule.n_entries as u32 - 1;
 }
 
 fn apply_local_trigger(state: &mut State, relay: u8, seconds: u32) {

@@ -81,9 +81,16 @@ mod l {
     /// RING_INNER and vertically balanced about the panel centre.
     pub const RING_OUTER: i32 = 208;
     pub const RING_INNER: i32 = 194;
+    /// Second, thinner gauge inside the first: the entry running now, while the
+    /// outer one measures the whole schedule. Only drawn for a sequence.
+    pub const RING2_OUTER: i32 = 186;
+    pub const RING2_INNER: i32 = 177;
     /// Baselines for the countdown stack.
     pub const RUN_NAME_BASELINE: i32 = 152;
     pub const RUN_DIGITS_BASELINE: i32 = 284;
+    /// Position in the running order and the total left, under the digits and
+    /// clear of the cancel button below them.
+    pub const RUN_QUEUE_BASELINE: i32 = 308;
 
     pub const SLIDER_X: i32 = 88;
     pub const SLIDER_TOP: i32 = 148;
@@ -1281,6 +1288,29 @@ impl Ui {
             // circle has faded.
             || self.game.active()
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
+    }
+
+    /// True only while something is happening that a network transfer would
+    /// visibly disturb: a transition, a tap's feedback, a finger on the panel.
+    ///
+    /// Separate from `animating` because that answers a different question -
+    /// "does this frame need repainting" - and using it to gate polling was a
+    /// deadlock. `animating` is true for as long as a run is active, so during a
+    /// multi-entry schedule the panel stopped polling *for the whole run*: the
+    /// first entry's bar filled from the local clock prediction, and then nothing
+    /// ever arrived to say the next entry had started. The countdown sat at 00:00
+    /// and every progress bar froze until the run was stopped by hand.
+    ///
+    /// A continuously repainting countdown is not a reason to withhold a poll. It
+    /// is the moment a poll matters most, and its arc is driven from elapsed time
+    /// rather than accumulated frames, so a transfer costs it nothing but one
+    /// slightly longer frame.
+    pub fn interaction_active(&self) -> bool {
+        self.wipe.is_some()
+            || self.ripples.iter().any(|r| r.active)
+            || self.dragging_slider
+            || self.dragging_list
+            || self.game.active()
     }
 
     /// Build the frame.
@@ -3436,7 +3466,9 @@ impl Ui {
             .n_entries
             .saturating_sub(first)
             .min(l::DETAIL_MAX_ROWS + 1);
-        let progress = state.schedule_progress(index);
+        // Milliseconds, not seconds: a row is over 300 px wide, so a whole
+        // second of a short entry is a visible jump.
+        let progress = state.schedule_progress_ms(index);
         scene.clip(178, 432);
         for row in 0..rows {
             let i = first + row;
@@ -3451,17 +3483,19 @@ impl Ui {
                 rgb(15, 34, 72),
                 alpha,
             );
-            if let Some((_, _, active, entry_elapsed)) = progress {
-                let amount = if i < active {
-                    e.seconds as u32
+            if let Some((active, elapsed_ms, duration_ms)) = progress {
+                // Entries before the active one are complete, the active one is
+                // partly filled, later ones are untouched.
+                let (amount, of) = if i < active {
+                    (1, 1)
                 } else if i == active {
-                    entry_elapsed
+                    (elapsed_ms, duration_ms.max(1))
                 } else {
-                    0
+                    (0, 1)
                 };
                 if amount > 0 {
                     let fill = l::DETAIL_X0
-                        + (l::DETAIL_X1 - l::DETAIL_X0) * amount as i32 / (e.seconds as i32).max(1);
+                        + ((l::DETAIL_X1 - l::DETAIL_X0) as u32 * amount / of) as i32;
                     scene.pill(l::DETAIL_X0, cy + 15, fill, cy + 21, 3, C_RUN, alpha);
                 }
             }
@@ -3643,11 +3677,71 @@ impl Ui {
         // no angular test at all, so the cheap primitive does the cheap job.
         scene.ring(CX, CY, l::RING_OUTER, l::RING_INNER, rgb(10, 52, 36), alpha);
 
-        let total_ms = (self.minutes * 60 * 1000).max(1);
+        // Which schedule, if any, this run belongs to. When one does, the outer
+        // ring measures the *whole* schedule and an inner ring measures the entry
+        // running now - so the screen answers both "how far through the watering
+        // am I" and "how long until this valve closes" at once.
+        let sequence = state.starts[..state.n_starts]
+            .iter()
+            .position(|schedule| schedule.running)
+            .and_then(|index| {
+                let schedule = state.starts[index];
+                let (at, elapsed_ms, duration_ms) = state.schedule_progress_ms(index)?;
+                let before_s = schedule.entries[..at]
+                    .iter()
+                    .map(|entry| entry.seconds as u32)
+                    .sum::<u32>()
+                    + schedule.gap_s as u32 * at as u32;
+                let total_s = schedule.total_seconds();
+                Some((schedule, at, elapsed_ms, duration_ms, before_s, total_s))
+            });
+
         let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
-        let span = progress_span_q12(total_ms, left_ms);
+        // The outer sweep. For a sequence it is the whole schedule; for a manual
+        // run, the length of that run. It used to be `self.minutes` either way -
+        // the manual slider - so a schedule-driven run was measured against
+        // whatever the slider happened to be left on, and a run this panel did not
+        // start had no relation to it at all.
+        let (outer_total_ms, outer_done_ms) = match sequence {
+            Some((_, _, elapsed_ms, _, before_s, total_s)) => {
+                (total_s.max(1) * 1000, before_s * 1000 + elapsed_ms)
+            }
+            None => {
+                let total = self.observed_run_total_s.max(state.left_s).max(1);
+                (total * 1000, (total * 1000).saturating_sub(left_ms.min(total * 1000)))
+            }
+        };
+        let span = progress_span_q12(outer_total_ms, outer_total_ms - outer_done_ms.min(outer_total_ms));
         if span > 0 {
             scene.arc(CX, CY, l::RING_OUTER, l::RING_INNER, 0, span, C_RUN, alpha);
+        }
+
+        // Inner gauge: the entry running right now, within that.
+        if let Some((_, _, elapsed_ms, duration_ms, _, _)) = sequence {
+            scene.ring(
+                CX,
+                CY,
+                l::RING2_OUTER,
+                l::RING2_INNER,
+                rgb(8, 38, 27),
+                alpha,
+            );
+            let entry_span = progress_span_q12(
+                duration_ms.max(1),
+                duration_ms.saturating_sub(elapsed_ms.min(duration_ms)),
+            );
+            if entry_span > 0 {
+                scene.arc(
+                    CX,
+                    CY,
+                    l::RING2_OUTER,
+                    l::RING2_INNER,
+                    0,
+                    entry_span,
+                    rgb(120, 214, 160),
+                    alpha,
+                );
+            }
         }
 
         let name = state
@@ -3683,6 +3777,31 @@ impl Ui {
             Align::Center,
             big.as_str(),
         );
+
+        // What the queue is doing, under the digits: where we are in the running
+        // order and how much watering is left overall. This is the part the
+        // "6 more queued" line could not tell you.
+        if let Some((schedule, at, _, _, _, total_s)) = sequence {
+            let mut line = Buf::<32>::new();
+            let remaining = total_s.saturating_sub(outer_done_ms / 1000);
+            let _ = write!(
+                line,
+                "{} OF {} \u{b7} {}:{:02} LEFT",
+                at + 1,
+                schedule.n_entries,
+                remaining / 60,
+                remaining % 60
+            );
+            scene.label(
+                CX,
+                l::RUN_QUEUE_BASELINE,
+                FontId::Caption,
+                rgb(120, 214, 160),
+                alpha,
+                Align::Center,
+                line.as_str(),
+            );
+        }
 
         let (x0, y0, x1, y1) = l::CANCEL;
         let finished = self.run_finished;

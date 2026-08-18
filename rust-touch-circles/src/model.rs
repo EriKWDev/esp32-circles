@@ -280,50 +280,60 @@ impl State {
         if total == 0 || total >= 24 * 60 * 60 {
             return None;
         }
-        let visibly_active = self.running && (self.left_s > 0 || self.queued > 0);
-        if visibly_active {
-            // Entries still queued behind the active one place it exactly.
-            let active = schedule
-                .n_entries
-                .saturating_sub(1)
-                .saturating_sub(self.queued as usize);
-            let duration = schedule.entries[active].seconds as u32;
-            let entry_elapsed = duration.saturating_sub(self.left_s.min(duration));
-            let before = schedule.entries[..active]
-                .iter()
-                .map(|entry| entry.seconds as u32)
-                .sum::<u32>()
-                + schedule.gap_s as u32 * active as u32;
-            return Some((before + entry_elapsed, total, active, entry_elapsed));
-        }
-        if self.queued == 0 || !self.clock_valid {
+        // How far into the running order we are, from the queue depth alone.
+        //
+        // The same expression covers both phases, which is why there is no longer
+        // a second branch here. While a valve is energized, `queued` counts the
+        // entries *after* it, so this is the active one. Between entries the
+        // controller has not yet popped the next one, so `queued` counts the
+        // entries not yet started and this is the one that just finished - which
+        // wants to be drawn full, exactly as the arithmetic below does.
+        let at = schedule
+            .n_entries
+            .saturating_sub(1)
+            .saturating_sub(self.queued as usize);
+        let duration = schedule.entries[at].seconds as u32;
+        // Sub-second precision from the same fractional clock the countdown uses,
+        // so a bar creeps rather than stepping once a second.
+        let left_ms = if self.running {
+            (self.left_s * 1000).saturating_sub(self.clock_frac_ms)
+        } else {
+            // Mid-gap: this entry is done.
+            0
+        };
+        let entry_elapsed_ms = (duration * 1000).saturating_sub(left_ms.min(duration * 1000));
+        let before = schedule.entries[..at]
+            .iter()
+            .map(|entry| entry.seconds as u32)
+            .sum::<u32>()
+            + schedule.gap_s as u32 * at as u32;
+        Some((
+            before + entry_elapsed_ms / 1000,
+            total,
+            at,
+            entry_elapsed_ms / 1000,
+        ))
+    }
+
+    /// As `schedule_progress`, but the active entry's own progress in
+    /// milliseconds - for the bars, which are wide enough that a whole second is
+    /// several pixels and stepping is visible.
+    pub fn schedule_progress_ms(&self, index: usize) -> Option<(usize, u32, u32)> {
+        let schedule = self.starts.get(index)?;
+        if !schedule.running || schedule.n_entries == 0 {
             return None;
         }
-
-        // A sequence can briefly have no energized relay during `relaygap`.
-        // Locate that gap from the shared controller clock, then require its
-        // remaining-entry count to agree with the dump before displaying it.
-        let now = self.hh as u32 * 3600 + self.mm as u32 * 60 + self.ss as u32;
-        let start = schedule.hh as u32 * 3600 + schedule.mm as u32 * 60;
-        let elapsed = (now + 24 * 60 * 60 - start) % (24 * 60 * 60);
-        let mut before = 0;
-        for (entry, item) in schedule.entries[..schedule.n_entries].iter().enumerate() {
-            let end = before + item.seconds as u32;
-            let gap_end = end
-                + if entry + 1 < schedule.n_entries {
-                    schedule.gap_s as u32
-                } else {
-                    0
-                };
-            if elapsed >= end
-                && elapsed < gap_end
-                && schedule.n_entries - entry - 1 == self.queued as usize
-            {
-                return Some((elapsed, total, entry, item.seconds as u32));
-            }
-            before = gap_end;
-        }
-        None
+        let at = schedule
+            .n_entries
+            .saturating_sub(1)
+            .saturating_sub(self.queued as usize);
+        let duration_ms = schedule.entries[at].seconds as u32 * 1000;
+        let left_ms = if self.running {
+            (self.left_s * 1000).saturating_sub(self.clock_frac_ms)
+        } else {
+            0
+        };
+        Some((at, duration_ms.saturating_sub(left_ms.min(duration_ms)), duration_ms))
     }
 }
 
