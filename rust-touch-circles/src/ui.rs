@@ -487,10 +487,10 @@ impl Ui {
                     Target::Force => C_FORCE,
                     Target::Go => C_RUN,
                     Target::Cancel => {
-                        if state.running {
-                            C_CANCEL
-                        } else {
+                        if self.run_finished {
                             C_RUN
+                        } else {
+                            C_CANCEL
                         }
                     }
                     Target::Info => C_INFO,
@@ -561,12 +561,12 @@ impl Ui {
                             x,
                             y,
                             born_ms: now_ms,
-                            color: if state.running { C_CANCEL } else { C_RUN },
+                            color: if self.run_finished { C_RUN } else { C_CANCEL },
                         });
-                        if state.running {
-                            Action::Stop
-                        } else {
+                        if self.run_finished {
                             Action::None
+                        } else {
+                            Action::Stop
                         }
                     }
                     Target::Slider => Action::None,
@@ -711,6 +711,12 @@ impl Ui {
         let ended = !state.running && self.last_running;
         self.last_running = state.running;
         if ended && self.screen == Screen::Running {
+            self.run_finished = true;
+        }
+        // Some controller revisions leave `run:1` asserted for the final poll
+        // even though the last countdown has reached zero. With no queued step,
+        // zero remaining time is the user-visible completion boundary.
+        if self.screen == Screen::Running && state.left_s == 0 && state.queued == 0 {
             self.run_finished = true;
         }
     }
@@ -1004,21 +1010,26 @@ impl Ui {
             let age = now_ms.wrapping_sub(bubble.born_ms).min(BUBBLE_MS);
             let t = age * 32_768 / BUBBLE_MS;
             let radius = 3 + (bubble.max_r as u32 * ease_out_q15(t) / 32_768) as i32;
-            let fade = 72 * (32_768 - smoothstep_q15(t)) / 32_768;
-            let bubble_alpha = (fade * alpha as u32 / 255) as u8;
+            let fade = (72 * (32_768 - smoothstep_q15(t)) / 32_768) as u8;
             let thickness = if age > BUBBLE_MS * 4 / 5 { 3 } else { 6 };
-            let color = if screen == Screen::Home {
+            let accent = if screen == Screen::Home {
                 rgb(156, 166, 174)
             } else {
                 screen.accent()
             };
+            // Bubbles are below every UI primitive on a uniform background.
+            // Preblending once here makes their normal alpha 255, sending the
+            // ring spans through the paired-store fast path instead of doing
+            // three channel multiplies for every covered pixel. During a wipe,
+            // `alpha` still fades the whole destination scene as intended.
+            let color = mix565(screen.background(), accent, fade);
             scene.ring(
                 bubble.x,
                 bubble.y,
                 radius,
                 (radius - thickness).max(0),
                 color,
-                bubble_alpha,
+                alpha,
             );
         }
     }
@@ -1719,7 +1730,7 @@ impl Ui {
         );
 
         let (x0, y0, x1, y1) = l::CANCEL;
-        let finished = !state.running && self.run_finished;
+        let finished = self.run_finished;
         scene.pill(
             x0,
             y0,
@@ -1762,6 +1773,21 @@ fn progress_span_q12(total_ms: u32, left_ms: u32) -> i32 {
     // Scale before multiplying so long controller-side runs remain inside u32.
     let denom = (total_ms / 8).max(1);
     ((done_ms / 8).min(denom) * 4096 / denom).min(4095) as i32
+}
+
+fn mix565(background: u16, foreground: u16, alpha: u8) -> u16 {
+    let a = alpha as u32;
+    let ia = 255 - a;
+    let br = (background >> 11) as u32 & 0x1f;
+    let bg = (background >> 5) as u32 & 0x3f;
+    let bb = background as u32 & 0x1f;
+    let fr = (foreground >> 11) as u32 & 0x1f;
+    let fg = (foreground >> 5) as u32 & 0x3f;
+    let fb = foreground as u32 & 0x1f;
+    let r = (fr * a + br * ia + 127) / 255;
+    let g = (fg * a + bg * ia + 127) / 255;
+    let b = (fb * a + bb * ia + 127) / 255;
+    ((r as u16) << 11) | ((g as u16) << 5) | b as u16
 }
 
 fn minutes_from_y(y: i32) -> u32 {

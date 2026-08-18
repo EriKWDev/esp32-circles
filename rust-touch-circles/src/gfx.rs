@@ -22,8 +22,9 @@ pub const H: usize = 480;
 pub const STRIPE_ROWS: usize = 32;
 pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 
-// Worst case is INFO: four controllers, seven analog rows, a running badge,
-// eight ambient bubbles, and foreground tap ripples. Keep fixed storage (and
+// Worst case is INFO: four controllers, six visible analog rows plus one
+// clipped scrolling row, a running badge, ten ambient bubbles, and foreground
+// tap ripples. Keep fixed storage (and
 // therefore deterministic memory use), but leave enough headroom that playful
 // background effects can never evict functional foreground primitives.
 pub const MAX_PRIMS: usize = 80;
@@ -163,22 +164,8 @@ fn blend_span(row: &mut [u8], left: i32, right: i32, color: u16, cov: u8) {
 }
 
 #[inline]
-fn isqrt(mut n: u32) -> u32 {
-    let mut res = 0u32;
-    let mut bit = 1u32 << 30;
-    while bit > n {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        if n >= res + bit {
-            n -= res + bit;
-            res = (res >> 1) + bit;
-        } else {
-            res >>= 1;
-        }
-        bit >>= 2;
-    }
-    res
+fn isqrt(n: u32) -> u32 {
+    n.isqrt()
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +277,9 @@ pub enum Prim {
 
 pub struct Scene {
     pub prims: [Prim; MAX_PRIMS],
+    /// Precomputed inclusive vertical bounds for each primitive. This removes
+    /// geometry/font dispatch from the scanline hot loop.
+    rows: [(i16, i16); MAX_PRIMS],
     pub len: usize,
     pub background: u16,
 }
@@ -306,6 +296,7 @@ impl Scene {
     pub fn new() -> Self {
         Self {
             prims: [NOTHING; MAX_PRIMS],
+            rows: [(0, -1); MAX_PRIMS],
             len: 0,
             background: 0,
         }
@@ -318,8 +309,16 @@ impl Scene {
 
     #[inline]
     pub fn push(&mut self, p: Prim) {
+        let (top, bottom) = prim_rows(&p);
+        self.push_rows(p, top, bottom);
+    }
+
+    #[inline]
+    fn push_rows(&mut self, p: Prim, top: i32, bottom: i32) {
+        debug_assert!(self.len < MAX_PRIMS, "scene primitive capacity exceeded");
         if self.len < MAX_PRIMS {
             self.prims[self.len] = p;
+            self.rows[self.len] = (top as i16, bottom as i16);
             self.len += 1;
         }
     }
@@ -408,14 +407,27 @@ impl Scene {
             Align::Center => x - font.get().width(text.as_str()) / 2,
             Align::Right => x - font.get().width(text.as_str()),
         };
-        self.push(Prim::Label {
-            x,
-            baseline,
-            font,
-            color,
-            alpha,
-            text,
-        });
+        let f = font.get();
+        let mut top = baseline;
+        let mut bottom = baseline;
+        for ch in text.as_str().chars() {
+            if let Some(g) = f.glyph(ch) {
+                top = top.min(baseline + g.top - 1);
+                bottom = bottom.max(baseline + g.top + g.h as i32 + 1);
+            }
+        }
+        self.push_rows(
+            Prim::Label {
+                x,
+                baseline,
+                font,
+                color,
+                alpha,
+                text,
+            },
+            top,
+            bottom,
+        );
     }
 }
 
@@ -734,7 +746,8 @@ pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
             if y < clip_top || y > clip_bottom {
                 continue;
             }
-            let (top, bottom) = prim_rows(p);
+            let (top, bottom) = scene.rows[index];
+            let (top, bottom) = (top as i32, bottom as i32);
             if y < top || y > bottom {
                 continue;
             }
