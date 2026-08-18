@@ -248,12 +248,12 @@ fn main() -> ! {
             if n.service(&mut state, t) {
                 dirty = true;
             }
-            state.link = if n.ip.is_some() {
-                Link::Online
-            } else if n.is_connected() {
-                Link::Connecting
-            } else {
+            state.link = if !n.is_connected() {
                 Link::Offline
+            } else if n.ip.is_some() {
+                Link::Online
+            } else {
+                Link::Connecting
             };
 
             // Requests only go out while nothing is animating, so a transfer can

@@ -184,20 +184,12 @@ impl Text {
         let mut t = Text::EMPTY;
         // Truncate on a char boundary so a clipped name never becomes invalid
         // UTF-8 (relay names contain å/ä/ö, which are two bytes each).
-        let mut end = 0;
-        for (i, _) in s.char_indices() {
-            if i > MAX_TEXT {
-                break;
-            }
-            end = i;
-        }
         let take = s
             .char_indices()
             .map(|(i, c)| i + c.len_utf8())
             .take_while(|&e| e <= MAX_TEXT)
             .last()
             .unwrap_or(0);
-        let _ = end;
         t.bytes[..take].copy_from_slice(&s.as_bytes()[..take]);
         t.len = take as u8;
         t
@@ -221,8 +213,6 @@ pub enum Align {
 
 #[derive(Clone, Copy)]
 pub enum Prim {
-    /// Change the vertical clip for following primitives. `(0, H-1)` resets it.
-    Clip { y0: i32, y1: i32 },
     /// Filled circle. Doubles as the screen-covering transition wipe.
     Disc {
         cx: i32,
@@ -280,6 +270,11 @@ pub struct Scene {
     /// Precomputed inclusive vertical bounds for each primitive. This removes
     /// geometry/font dispatch from the scanline hot loop.
     rows: [(i16, i16); MAX_PRIMS],
+    /// Current build-time vertical clip. It is folded into `rows` when a
+    /// primitive is appended, so scanline rendering has no clip state to
+    /// interpret in its hot loop.
+    clip_top: i16,
+    clip_bottom: i16,
     pub len: usize,
     pub background: u16,
 }
@@ -297,6 +292,8 @@ impl Scene {
         Self {
             prims: [NOTHING; MAX_PRIMS],
             rows: [(0, -1); MAX_PRIMS],
+            clip_top: 0,
+            clip_bottom: H as i16 - 1,
             len: 0,
             background: 0,
         }
@@ -305,6 +302,8 @@ impl Scene {
     pub fn clear(&mut self, background: u16) {
         self.len = 0;
         self.background = background;
+        self.clip_top = 0;
+        self.clip_bottom = H as i16 - 1;
     }
 
     #[inline]
@@ -318,7 +317,10 @@ impl Scene {
         debug_assert!(self.len < MAX_PRIMS, "scene primitive capacity exceeded");
         if self.len < MAX_PRIMS {
             self.prims[self.len] = p;
-            self.rows[self.len] = (top as i16, bottom as i16);
+            self.rows[self.len] = (
+                (top as i16).max(self.clip_top),
+                (bottom as i16).min(self.clip_bottom),
+            );
             self.len += 1;
         }
     }
@@ -357,14 +359,13 @@ impl Scene {
     }
 
     pub fn clip(&mut self, y0: i32, y1: i32) {
-        self.push(Prim::Clip { y0, y1 });
+        self.clip_top = y0.clamp(0, H as i32 - 1) as i16;
+        self.clip_bottom = y1.clamp(-1, H as i32 - 1) as i16;
     }
 
     pub fn clip_reset(&mut self) {
-        self.push(Prim::Clip {
-            y0: 0,
-            y1: H as i32 - 1,
-        });
+        self.clip_top = 0;
+        self.clip_bottom = H as i16 - 1;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -434,7 +435,6 @@ impl Scene {
 /// Vertical bounds of a primitive, so a stripe can skip primitives entirely.
 fn prim_rows(p: &Prim) -> (i32, i32) {
     match *p {
-        Prim::Clip { .. } => (0, H as i32 - 1),
         Prim::Disc { cy, r, .. } => (cy - r - 1, cy + r + 1),
         Prim::Ring { cy, r_outer, .. } | Prim::Arc { cy, r_outer, .. } => {
             (cy - r_outer - 1, cy + r_outer + 1)
@@ -734,25 +734,14 @@ pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
         let row = &mut pixels[local * W * 2..(local + 1) * W * 2];
         fill_span(row, 0, W as i32 - 1, scene.background);
 
-        let mut clip_top = 0;
-        let mut clip_bottom = H as i32 - 1;
         for index in 0..scene.len {
             let p = &scene.prims[index];
-            if let Prim::Clip { y0, y1 } = *p {
-                clip_top = y0;
-                clip_bottom = y1;
-                continue;
-            }
-            if y < clip_top || y > clip_bottom {
-                continue;
-            }
             let (top, bottom) = scene.rows[index];
             let (top, bottom) = (top as i32, bottom as i32);
             if y < top || y > bottom {
                 continue;
             }
             match *p {
-                Prim::Clip { .. } => unreachable!(),
                 Prim::Disc {
                     cx,
                     cy,

@@ -19,6 +19,7 @@
 extern crate alloc;
 
 use core::fmt::Write as _;
+use core::task::Poll;
 
 use esp_radio::wifi::{Interface as WifiIface, WifiController, WifiRxToken, WifiTxToken};
 use smoltcp::iface::{Config as IfConfig, Interface, SocketSet, SocketStorage};
@@ -150,6 +151,7 @@ pub struct Net {
     snapshot_valid: [bool; MAX_CONTROLLERS],
     http: Option<Http>,
     job: Job,
+    last_connect_attempt_ms: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -243,12 +245,13 @@ impl Net {
         controller
             .set_config(&config)
             .map_err(|_| "wifi config rejected")?;
-        // set_config starts the station interface but deliberately does not
-        // associate it. In this esp-radio release connection is async-only;
-        // blocking here is safe because it happens once, before the UI loop,
-        // while esp-rtos continues servicing the radio driver.
-        embassy_futures::block_on(controller.connect_async())
-            .map_err(|_| "wifi association failed")?;
+        // `connect_async` performs the actual connect request on its first poll,
+        // then only waits for the radio event. Poll it once and drop the waiter:
+        // association continues in esp-radio's scheduler while the UI starts
+        // immediately and observes progress through `is_connected()`.
+        if let Poll::Ready(Err(_)) = embassy_futures::poll_once(controller.connect_async()) {
+            return Err("wifi association failed");
+        }
 
         let station = WifiIface::station();
         let mac = station.mac_address();
@@ -302,6 +305,7 @@ impl Net {
             snapshot_valid: [false; MAX_CONTROLLERS],
             http: None,
             job: Job::Idle,
+            last_connect_attempt_ms: now_ms,
         })
     }
 
@@ -311,6 +315,18 @@ impl Net {
 
     /// Pump the stack once, and fold any DHCP result into our address.
     pub fn step(&mut self, now_ms: u32) {
+        // A lost AP must never strand the panel or require a reboot. Retrying is
+        // also one-shot/non-blocking for the same reason as initial association.
+        const RECONNECT_MS: u32 = 5_000;
+        if !self.controller.is_connected()
+            && now_ms.wrapping_sub(self.last_connect_attempt_ms) >= RECONNECT_MS
+        {
+            self.last_connect_attempt_ms = now_ms;
+            if let Poll::Ready(Err(_)) = embassy_futures::poll_once(self.controller.connect_async())
+            {
+                self.last_error = Some("wifi association failed");
+            }
+        }
         let now = Instant::from_millis(now_ms as i64);
         self.iface.poll(now, &mut self.phy, &mut self.sockets);
 

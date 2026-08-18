@@ -328,6 +328,9 @@ pub struct Ui {
     run_finished: bool,
     /// A completed run remains available as a 00:00 badge until DONE is used.
     completion_pending: bool,
+    /// Cancel/DONE consumes the next falling edge; otherwise the optimistic
+    /// local stop would immediately re-latch the completion it just dismissed.
+    completion_acknowledged: bool,
     dragging_list: bool,
     list_start_y: i32,
     list_start_offset: i32,
@@ -371,6 +374,7 @@ impl Ui {
             run_return: Screen::Force,
             run_finished: false,
             completion_pending: false,
+            completion_acknowledged: false,
             dragging_list: false,
             list_start_y: 0,
             list_start_offset: 0,
@@ -574,6 +578,7 @@ impl Ui {
                             color: if self.run_finished { C_RUN } else { C_CANCEL },
                         });
                         self.completion_pending = false;
+                        self.completion_acknowledged = true;
                         if self.run_finished {
                             Action::None
                         } else {
@@ -727,8 +732,9 @@ impl Ui {
         if started {
             self.run_finished = false;
             self.completion_pending = false;
+            self.completion_acknowledged = false;
         }
-        if ended {
+        if ended && !self.completion_acknowledged {
             self.run_finished = true;
             self.completion_pending = true;
             // Let completion grow out of the same top-right affordance the user
@@ -801,7 +807,7 @@ impl Ui {
         // Keep the compact run affordance out of wipe frames. Popping it onto
         // the outgoing screen on the same frame a manual run starts made it
         // briefly intersect the expanding transition disc.
-        if (run_is_active(state) || self.completion_pending)
+        if ((run_is_active(state) && !self.completion_acknowledged) || self.completion_pending)
             && self.interactive_screen() != Screen::Running
         {
             self.draw_running_badge(scene, state, 255);
@@ -1010,7 +1016,9 @@ impl Ui {
                 self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
             }
         }
-        if (run_is_active(state) || self.completion_pending) && screen != Screen::Running {
+        if ((run_is_active(state) && !self.completion_acknowledged) || self.completion_pending)
+            && screen != Screen::Running
+        {
             let (cx, cy, r) = l::RUN_BADGE;
             self.zone(Target::RunningBadge, Zone::Disc { cx, cy, r });
         }
