@@ -263,6 +263,34 @@ pub enum Prim {
         alpha: u8,
         text: Text,
     },
+    /// One row of a keyboard: evenly spaced key plates, each with a single
+    /// character centred on it.
+    ///
+    /// This exists because a keyboard drawn from ordinary primitives costs two
+    /// of them per key - about eighty for a QWERTY layout, which on its own
+    /// would exceed MAX_PRIMS. A key row is a *regular grid*, though, so all of
+    /// its geometry follows from the band plus a character count, and the whole
+    /// row collapses into a single primitive. Four of these draw the keyboard.
+    KeyRow {
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        /// Corner radius of each key plate.
+        r: i32,
+        /// Horizontal gap between adjacent plates.
+        gap: i32,
+        plate: u16,
+        /// Plate colour for the key at `highlight`.
+        hot: u16,
+        ink: u16,
+        alpha: u8,
+        /// Slot drawn with `hot`, or -1 for none.
+        highlight: i8,
+        font: FontId,
+        /// One character per slot; its length sets the slot count.
+        text: Text,
+    },
 }
 
 pub struct Scene {
@@ -358,6 +386,40 @@ impl Scene {
         });
     }
 
+    /// One keyboard row. `text` supplies the key captions, one character each.
+    pub fn key_row(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        r: i32,
+        gap: i32,
+        plate: u16,
+        hot: u16,
+        ink: u16,
+        alpha: u8,
+        highlight: i8,
+        font: FontId,
+        text: &str,
+    ) {
+        self.push(Prim::KeyRow {
+            x0,
+            y0,
+            x1,
+            y1,
+            r,
+            gap,
+            plate,
+            hot,
+            ink,
+            alpha,
+            highlight,
+            font,
+            text: Text::new(text),
+        });
+    }
+
     pub fn clip(&mut self, y0: i32, y1: i32) {
         self.clip_top = y0.clamp(0, H as i32 - 1) as i16;
         self.clip_bottom = y1.clamp(-1, H as i32 - 1) as i16;
@@ -432,6 +494,30 @@ impl Scene {
     }
 }
 
+/// Horizontal bounds of key slot `index` of `n` within a band.
+///
+/// Public, and the only place this arithmetic exists: the renderer places the
+/// plates with it and the UI resolves a touch to a key with it, so a key can
+/// never drift away from the region that presses it - the same discipline the
+/// `l::` layout constants enforce for everything else.
+pub fn key_slot(x0: i32, x1: i32, gap: i32, n: usize, index: usize) -> (i32, i32) {
+    let span = x1 - x0;
+    let n = n.max(1) as i32;
+    let left = x0 + span * index as i32 / n;
+    let right = x0 + span * (index as i32 + 1) / n;
+    (left + gap / 2, right - gap / 2)
+}
+
+/// Which key of `n` a touch at `x` falls on, or None outside the band.
+pub fn key_slot_at(x0: i32, x1: i32, n: usize, x: i32) -> Option<usize> {
+    if n == 0 || x < x0 || x > x1 {
+        return None;
+    }
+    // Gaps deliberately do not reject: a finger landing between two plates
+    // should still press the nearer key rather than nothing at all.
+    Some((((x - x0) * n as i32 / (x1 - x0).max(1)) as usize).min(n - 1))
+}
+
 /// Vertical bounds of a primitive, so a stripe can skip primitives entirely.
 fn prim_rows(p: &Prim) -> (i32, i32) {
     match *p {
@@ -444,6 +530,7 @@ fn prim_rows(p: &Prim) -> (i32, i32) {
             let f = font.get();
             (baseline - f.ascent - 2, baseline + f.px + 2)
         }
+        Prim::KeyRow { y0, y1, .. } => (y0 - 1, y1 + 1),
     }
 }
 
@@ -695,35 +782,96 @@ fn label_row(
     alpha: u8,
     text: &str,
 ) {
-    let f = font.get();
     let mut pen = x;
     for ch in text.chars() {
-        let Some(g) = f.glyph(ch) else {
-            pen += f.px / 3;
-            continue;
-        };
-        let top = baseline + g.top;
-        let gy = y - top;
-        if gy >= 0 && gy < g.h as i32 {
-            let coverage = f.row(g, gy as usize);
-            let gx0 = pen + g.left;
-            for (i, &cov) in coverage.iter().enumerate() {
-                if cov == 0 {
-                    continue;
-                }
-                let px = gx0 + i as i32;
-                if px < 0 || px >= W as i32 {
-                    continue;
-                }
-                let cov = if alpha == 255 {
-                    cov
-                } else {
-                    ((cov as u32 * alpha as u32) / 255) as u8
-                };
-                blend_at(row, px as usize, color, cov);
+        pen += glyph_row(row, y, pen, baseline, font, color, alpha, ch);
+    }
+}
+
+/// One glyph's contribution to this scanline. Returns the pen advance, so the
+/// caller decides whether characters are laid out in sequence (`label_row`) or
+/// placed individually (`key_row_prim`).
+#[inline]
+fn glyph_row(
+    row: &mut [u8],
+    y: i32,
+    pen: i32,
+    baseline: i32,
+    font: FontId,
+    color: u16,
+    alpha: u8,
+    ch: char,
+) -> i32 {
+    let f = font.get();
+    let Some(g) = f.glyph(ch) else {
+        return f.px / 3;
+    };
+    let gy = y - (baseline + g.top);
+    if gy >= 0 && gy < g.h as i32 {
+        let coverage = f.row(g, gy as usize);
+        let gx0 = pen + g.left;
+        for (i, &cov) in coverage.iter().enumerate() {
+            if cov == 0 {
+                continue;
             }
+            let px = gx0 + i as i32;
+            if px < 0 || px >= W as i32 {
+                continue;
+            }
+            let cov = if alpha == 255 {
+                cov
+            } else {
+                ((cov as u32 * alpha as u32) / 255) as u8
+            };
+            blend_at(row, px as usize, color, cov);
         }
-        pen += g.advance;
+    }
+    g.advance
+}
+
+/// One scanline of a keyboard row: every plate that this row crosses, then the
+/// captions on top of them.
+#[inline]
+fn key_row_prim(
+    row: &mut [u8],
+    y: i32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: i32,
+    gap: i32,
+    plate: u16,
+    hot: u16,
+    ink: u16,
+    alpha: u8,
+    highlight: i8,
+    font: FontId,
+    text: &str,
+) {
+    let n = text.chars().count();
+    if n == 0 {
+        return;
+    }
+    let f = font.get();
+    // Captions sit on a baseline that centres the cap height in the plate,
+    // computed from the font's own ascent rather than a tuned constant.
+    let baseline = (y0 + y1) / 2 + f.ascent / 2 - f.ascent / 8;
+    for (index, ch) in text.chars().enumerate() {
+        let (kx0, kx1) = key_slot(x0, x1, gap, n, index);
+        let color = if index as i8 == highlight { hot } else { plate };
+        pill_row(row, y, kx0, y0, kx1, y1, r, color, alpha);
+        let advance = f.glyph(ch).map_or(0, |g| g.advance);
+        glyph_row(
+            row,
+            y,
+            (kx0 + kx1) / 2 - advance / 2,
+            baseline,
+            font,
+            ink,
+            alpha,
+            ch,
+        );
     }
 }
 
@@ -797,6 +945,39 @@ pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
                     ref text,
                 } => {
                     label_row(row, y, x, baseline, font, color, alpha, text.as_str());
+                }
+                Prim::KeyRow {
+                    x0,
+                    y0: ky0,
+                    x1,
+                    y1,
+                    r,
+                    gap,
+                    plate,
+                    hot,
+                    ink,
+                    alpha,
+                    highlight,
+                    font,
+                    ref text,
+                } => {
+                    key_row_prim(
+                        row,
+                        y,
+                        x0,
+                        ky0,
+                        x1,
+                        y1,
+                        r,
+                        gap,
+                        plate,
+                        hot,
+                        ink,
+                        alpha,
+                        highlight,
+                        font,
+                        text.as_str(),
+                    );
                 }
             }
         }

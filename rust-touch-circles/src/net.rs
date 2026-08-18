@@ -94,40 +94,112 @@ impl Device for Phy {
 /// A controller we poll. Several will be deployed, and the UI is meant to
 /// present their relays as one list, so the host is a table from the start
 /// rather than a single constant.
+///
+/// Credentials and the Digest challenge live here rather than on `Net` because
+/// controllers are configured from the panel now and need not share a login.
+/// A shared challenge cache was also self-defeating with more than one host: A's
+/// nonce is rejected by B, whose replacement is then rejected by A, so every
+/// request paid for a re-challenge. Per host, each keeps its own valid nonce.
 #[derive(Clone, Copy)]
 pub struct Host {
     pub ip: Ipv4Address,
+    user: crate::store::FixedStr<{ crate::store::MAX_USER }>,
+    pass: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
+    /// Realm and nonce from this host's last challenge, reused until it rejects
+    /// them - re-probing on every request would double the round trips.
+    realm: Buf<64>,
+    nonce: Buf<64>,
+    nc: u32,
 }
 
 const EMPTY_HOST: Host = Host {
     ip: Ipv4Address::UNSPECIFIED,
+    user: crate::store::FixedStr::EMPTY,
+    pass: crate::store::FixedStr::EMPTY,
+    realm: Buf::new(),
+    nonce: Buf::new(),
+    nc: 0,
 };
 
-/// `const`-evaluable dotted-quad parser, so HOSTS can be built at compile time
-/// from the string baked in by build.rs.
-const fn parse_ip(s: &str) -> Ipv4Address {
-    let b = s.as_bytes();
-    let mut octets = [0u8; 4];
-    let mut index = 0;
-    let mut value = 0u16;
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        if c == b'.' {
-            if index < 4 {
-                octets[index] = value as u8;
-            }
-            index += 1;
-            value = 0;
-        } else if c >= b'0' && c <= b'9' {
-            value = value * 10 + (c - b'0') as u16;
+/// One access point seen by a scan. Fixed capacity: the picker shows a page of
+/// networks, not an inventory, and the alternative is an allocation per scan.
+#[derive(Clone, Copy)]
+pub struct Network {
+    pub ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
+    pub rssi: i8,
+    pub secure: bool,
+}
+
+pub const MAX_NETWORKS: usize = 14;
+
+pub struct Networks {
+    pub items: [Network; MAX_NETWORKS],
+    pub n: usize,
+    /// Whether a scan has completed at least once, so the picker can tell
+    /// "nothing found" apart from "not looked yet".
+    pub scanned: bool,
+}
+
+impl Networks {
+    pub const EMPTY: Self = Self {
+        items: [Network {
+            ssid: crate::store::FixedStr::EMPTY,
+            rssi: -128,
+            secure: true,
+        }; MAX_NETWORKS],
+        n: 0,
+        scanned: false,
+    };
+}
+
+/// Set the station config and start the join.
+///
+/// Setting a station config is what starts the join; there is no separate connect
+/// call in this release. `connect_async` performs the actual connect request on
+/// its first poll and then only waits for the radio event, so it is polled once
+/// and dropped: association continues in esp-radio's scheduler while the UI runs,
+/// and progress is observed through `is_connected()`.
+fn join(
+    controller: &mut WifiController<'static>,
+    settings: &crate::store::Settings,
+) -> Result<(), &'static str> {
+    if settings.ssid.is_empty() {
+        return Err("no wi-fi network configured");
+    }
+    // The password setter wants an owned String; the heap exists for the radio's
+    // benefit anyway, and this runs only when the network changes.
+    let station_config = esp_radio::wifi::sta::StationConfig::default()
+        .with_ssid(settings.ssid.as_str())
+        .with_password(alloc::string::String::from(settings.psk.as_str()));
+    let config = esp_radio::wifi::Config::Station(station_config);
+    controller
+        .set_config(&config)
+        .map_err(|_| "wifi config rejected")?;
+    if let Poll::Ready(Err(_)) = embassy_futures::poll_once(controller.connect_async()) {
+        return Err("wifi association failed");
+    }
+    Ok(())
+}
+
+/// Drive a future to completion on this thread, giving up after `timeout_ms`.
+///
+/// Deliberately not `embassy_futures::block_on`, which spins forever: a radio
+/// event that never arrives would take the whole panel with it. The waker is a
+/// no-op because there is nothing to wake - this *is* the executor - and the
+/// radio's own tasks are run by esp-rtos on other threads regardless.
+fn block_on_deadline<F: core::future::Future>(future: F, timeout_ms: u32) -> Option<F::Output> {
+    let mut future = core::pin::pin!(future);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    let deadline =
+        esp_hal::time::Instant::now() + esp_hal::time::Duration::from_millis(timeout_ms as u64);
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return Some(value);
         }
-        i += 1;
+        if esp_hal::time::Instant::now() > deadline {
+            return None;
+        }
     }
-    if index < 4 {
-        octets[index] = value as u8;
-    }
-    Ipv4Address::new(octets[0], octets[1], octets[2], octets[3])
 }
 
 pub struct Net {
@@ -139,11 +211,6 @@ pub struct Net {
     tcp: smoltcp::iface::SocketHandle,
     pub ip: Option<Ipv4Address>,
     pub last_error: Option<&'static str>,
-    /// Realm and nonce from the last challenge, reused until the server rejects
-    /// them - re-probing on every request would double the round trips.
-    realm: Buf<64>,
-    nonce: Buf<64>,
-    nc: u32,
     body: [u8; RX_BODY],
     hosts: [Host; MAX_CONTROLLERS],
     n_hosts: usize,
@@ -229,29 +296,16 @@ impl Net {
         sockets_storage: &'static mut [SocketStorage<'static>],
         rx_buf: &'static mut [u8],
         tx_buf: &'static mut [u8],
+        settings: &crate::store::Settings,
         now_ms: u32,
     ) -> Result<Self, &'static str> {
         let mut controller = WifiController::new(wifi, Default::default())
             .map_err(|_| "wifi controller init failed")?;
 
-        // Setting a station config is what starts the join; there is no separate
-        // connect call in this release.
-        // The password setter wants an owned String; the heap exists for the
-        // radio's benefit anyway, and this allocation happens once at startup.
-        let station_config = esp_radio::wifi::sta::StationConfig::default()
-            .with_ssid(WIFI_SSID)
-            .with_password(alloc::string::String::from(WIFI_PASS));
-        let config = esp_radio::wifi::Config::Station(station_config);
-        controller
-            .set_config(&config)
-            .map_err(|_| "wifi config rejected")?;
-        // `connect_async` performs the actual connect request on its first poll,
-        // then only waits for the radio event. Poll it once and drop the waiter:
-        // association continues in esp-radio's scheduler while the UI starts
-        // immediately and observes progress through `is_connected()`.
-        if let Poll::Ready(Err(_)) = embassy_futures::poll_once(controller.connect_async()) {
-            return Err("wifi association failed");
-        }
+        // Credentials come from the persisted settings, not straight from the
+        // baked-in constants - those are only the first-boot default, and the
+        // panel can be pointed at a different network from its own UI.
+        join(&mut controller, settings)?;
 
         let station = WifiIface::station();
         let mac = station.mac_address();
@@ -269,24 +323,7 @@ impl Net {
         );
         let tcp = sockets.add(tcp_socket);
 
-        let mut hosts = [EMPTY_HOST; MAX_CONTROLLERS];
-        let mut n_hosts = 0;
-        for value in RB_HOST.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            if n_hosts < MAX_CONTROLLERS {
-                hosts[n_hosts] = Host {
-                    ip: parse_ip(value),
-                };
-                n_hosts += 1;
-            }
-        }
-        if n_hosts == 0 {
-            hosts[0] = Host {
-                ip: parse_ip("192.168.4.200"),
-            };
-            n_hosts = 1;
-        }
-
-        Ok(Self {
+        let mut net = Self {
             controller,
             phy,
             iface,
@@ -295,18 +332,123 @@ impl Net {
             tcp,
             ip: None,
             last_error: None,
-            realm: Buf::new(),
-            nonce: Buf::new(),
-            nc: 0,
             body: [0; RX_BODY],
-            hosts,
-            n_hosts,
+            hosts: [EMPTY_HOST; MAX_CONTROLLERS],
+            n_hosts: 0,
             snapshots: [const { State::new() }; MAX_CONTROLLERS],
             snapshot_valid: [false; MAX_CONTROLLERS],
             http: None,
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
-        })
+        };
+        net.apply_hosts(settings);
+        Ok(net)
+    }
+
+    /// Adopt the controller list from settings.
+    ///
+    /// Snapshots are dropped rather than reindexed: after an edit, slot 2 is not
+    /// necessarily the controller it was, and presenting one host's relays under
+    /// another's name would be worse than briefly showing none. The next poll
+    /// refills them.
+    pub fn apply_hosts(&mut self, settings: &crate::store::Settings) {
+        self.hosts = [EMPTY_HOST; MAX_CONTROLLERS];
+        self.n_hosts = 0;
+        for controller in settings.controllers[..settings.n_controllers]
+            .iter()
+            .filter(|c| c.is_set())
+        {
+            if self.n_hosts >= MAX_CONTROLLERS {
+                break;
+            }
+            let ip = controller.ip;
+            self.hosts[self.n_hosts] = Host {
+                ip: Ipv4Address::new(ip[0], ip[1], ip[2], ip[3]),
+                user: controller.user,
+                pass: controller.pass,
+                ..EMPTY_HOST
+            };
+            self.n_hosts += 1;
+        }
+        self.snapshot_valid = [false; MAX_CONTROLLERS];
+        // Any request in flight belongs to the old table's indices.
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+    }
+
+    /// Re-join with the credentials now in settings. Used when the network is
+    /// changed from the panel; the reconnect logic in `step` takes it from here.
+    pub fn apply_wifi(&mut self, settings: &crate::store::Settings) -> Result<(), &'static str> {
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        self.ip = None;
+        self.iface.update_ip_addrs(|addrs| addrs.clear());
+        self.iface.routes_mut().remove_default_ipv4_route();
+        // A DHCP socket that already holds a lease will not ask for a new one on
+        // a different network, so it is reset along with the address.
+        self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
+        let _ = embassy_futures::poll_once(self.controller.disconnect_async());
+        join(&mut self.controller, settings)
+    }
+
+    /// Scan for access points, blocking until the radio reports the scan done.
+    ///
+    /// This is the one deliberately blocking network call in the firmware. A scan
+    /// takes a few hundred milliseconds and its result is the entire content of
+    /// the screen that asked for it, so there is nothing to animate meanwhile;
+    /// spreading it over UI iterations would mean holding a self-referential
+    /// future across frames for no visible gain. The caller paints its "scanning"
+    /// state first, and the deadline guarantees the loop resumes regardless.
+    pub fn scan(&mut self, out: &mut Networks) {
+        use esp_radio::wifi::scan::ScanConfig;
+
+        let config = ScanConfig::default().with_max(MAX_NETWORKS);
+        let found = match block_on_deadline(self.controller.scan_async(&config), 4_000) {
+            Some(Ok(found)) => found,
+            Some(Err(_)) => {
+                self.last_error = Some("wifi scan failed");
+                return;
+            }
+            None => {
+                self.last_error = Some("wifi scan timed out");
+                return;
+            }
+        };
+
+        out.n = 0;
+        for ap in found.iter() {
+            let ssid = ap.ssid.as_str();
+            if ssid.is_empty() {
+                continue;
+            }
+            // The same network is seen once per band and per repeater. Keep the
+            // strongest sighting of each name rather than a list of duplicates.
+            if let Some(existing) = out.items[..out.n]
+                .iter_mut()
+                .find(|n| n.ssid.as_str() == ssid)
+            {
+                existing.rssi = existing.rssi.max(ap.signal_strength);
+                continue;
+            }
+            if out.n >= MAX_NETWORKS {
+                continue;
+            }
+            out.items[out.n] = Network {
+                ssid: crate::store::FixedStr::new(ssid),
+                rssi: ap.signal_strength,
+                secure: !matches!(
+                    ap.auth_method,
+                    None | Some(esp_radio::wifi::AuthenticationMethod::None)
+                ),
+            };
+            out.n += 1;
+        }
+        // Strongest first: the network you are standing next to is the one you
+        // almost certainly mean.
+        out.items[..out.n].sort_unstable_by(|a, b| b.rssi.cmp(&a.rssi));
+        out.scanned = true;
     }
 
     pub fn is_connected(&self) -> bool {
@@ -437,7 +579,7 @@ impl Net {
         }
 
         let status = status_code(&self.body[..http.got]);
-        if status == 401 && http.attempt == 0 && self.absorb_challenge(http.got) {
+        if status == 401 && http.attempt == 0 && self.absorb_challenge(http.host, http.got) {
             if let Err(e) = self.start_http(http.kind, http.host, http.post, http.path, 1, now_ms) {
                 self.finish_error(http, state, e);
             }
@@ -482,23 +624,22 @@ impl Net {
         if post {
             let _ = write!(head, "Content-Length: 0\r\n");
         }
-        if !self.realm.is_empty() || attempt > 0 {
-            self.nc = self.nc.wrapping_add(1);
+        if !self.hosts[host].realm.is_empty() || attempt > 0 {
+            self.hosts[host].nc = self.hosts[host].nc.wrapping_add(1);
             let mut auth = Buf::<320>::new();
             build_digest(
                 &mut auth,
                 method,
                 path.as_str(),
-                self.realm.as_str(),
-                self.nonce.as_str(),
-                self.nc,
+                &self.hosts[host],
             );
             let _ = write!(head, "Authorization: {}\r\n", auth.as_str());
         }
         let _ = write!(head, "\r\n");
+        let nc = self.hosts[host].nc;
         let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
         socket.abort();
-        let local_port = 49_152 + (now_ms.wrapping_add(self.nc) % 16_000) as u16;
+        let local_port = 49_152 + (now_ms.wrapping_add(nc) % 16_000) as u16;
         socket
             .connect(
                 self.iface.context(),
@@ -572,9 +713,14 @@ impl Net {
         );
         state.local_ip = self.ip.map(|ip| ip.octets());
         state.n_controllers = self.n_hosts;
-        if !self.snapshot_valid[..self.n_hosts]
-            .iter()
-            .any(|valid| *valid)
+        // Keep the last good model while a poll is failing - but not when there
+        // is nothing configured at all. With no hosts there is nothing to wait
+        // for, and holding on would keep offering the zones of a controller the
+        // user has just removed. Falling through clears the model instead.
+        if self.n_hosts > 0
+            && !self.snapshot_valid[..self.n_hosts]
+                .iter()
+                .any(|valid| *valid)
         {
             return;
         }
@@ -604,8 +750,8 @@ impl Net {
         }
     }
 
-    /// Extract realm and nonce from a 401's WWW-Authenticate header.
-    fn absorb_challenge(&mut self, len: usize) -> bool {
+    /// Extract realm and nonce from a 401's WWW-Authenticate header, for `host`.
+    fn absorb_challenge(&mut self, host: usize, len: usize) -> bool {
         let text = core::str::from_utf8(&self.body[..len]).unwrap_or("");
         let Some(line) = text
             .lines()
@@ -613,16 +759,17 @@ impl Net {
         else {
             return false;
         };
-        self.realm.clear();
-        self.nonce.clear();
+        let entry = &mut self.hosts[host];
+        entry.realm.clear();
+        entry.nonce.clear();
         if let Some(v) = quoted_param(line, "realm") {
-            self.realm.push_str(v);
+            entry.realm.push_str(v);
         }
         if let Some(v) = quoted_param(line, "nonce") {
-            self.nonce.push_str(v);
+            entry.nonce.push_str(v);
         }
-        self.nc = 0;
-        !self.realm.is_empty() && !self.nonce.is_empty()
+        entry.nc = 0;
+        !entry.realm.is_empty() && !entry.nonce.is_empty()
     }
 
     /// Fetch `/api/dump` from every configured controller and merge into `state`.
@@ -734,10 +881,12 @@ fn md5_hex(parts: &[&str], out: &mut Buf<32>) {
     hex(&digest, out);
 }
 
-/// RFC 2617 MD5 digest, qop=auth.
-fn build_digest(out: &mut Buf<320>, method: &str, uri: &str, realm: &str, nonce: &str, nc: u32) {
+/// RFC 2617 MD5 digest, qop=auth, using `host`'s own credentials and challenge.
+fn build_digest(out: &mut Buf<320>, method: &str, uri: &str, host: &Host) {
+    let (realm, nonce, nc) = (host.realm.as_str(), host.nonce.as_str(), host.nc);
+    let user = host.user.as_str();
     let mut ha1 = Buf::<32>::new();
-    md5_hex(&[RB_USER, realm, RB_PASS], &mut ha1);
+    md5_hex(&[user, realm, host.pass.as_str()], &mut ha1);
     let mut ha2 = Buf::<32>::new();
     md5_hex(&[method, uri], &mut ha2);
 
@@ -764,7 +913,7 @@ fn build_digest(out: &mut Buf<320>, method: &str, uri: &str, realm: &str, nonce:
         out,
         "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", \
          qop=auth, nc={}, cnonce=\"{}\", response=\"{}\"",
-        RB_USER,
+        user,
         realm,
         nonce,
         uri,

@@ -165,9 +165,23 @@ fn main() {
     let icon_face = fontdue::Font::from_bytes(icon_data, fontdue::FontSettings::default()).unwrap();
     let mut icon_bitmap = Vec::new();
     let mut icon_entries = String::new();
-    for ch in ['\u{f013}', '\u{f104}', '\u{f105}'] {
-        // gear, angle-left/right
+    // gear, arrow-up (keyboard shift), angle-left/right, delete-left
+    // (backspace). Kept in codepoint order: `Font::glyph` binary-searches this
+    // table, so an out-of-order entry would simply not be found.
+    for ch in [
+        '\u{f013}', '\u{f062}', '\u{f104}', '\u{f105}', '\u{f55a}',
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>()
+    {
         let (metrics, coverage) = icon_face.rasterize(ch, 42.0);
+        // A codepoint this typeface does not carry rasterizes to nothing, and
+        // would then ship as an invisible button. Fail the build instead.
+        assert!(
+            metrics.width > 0 && metrics.height > 0,
+            "icon U+{:04X} is missing from the icon font",
+            ch as u32
+        );
         let offset = icon_bitmap.len();
         icon_bitmap.extend_from_slice(&coverage);
         let top = -(metrics.ymin + metrics.height as i32);

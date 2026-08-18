@@ -264,7 +264,7 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     }
 
     let mut at = HEADER;
-    let mut take = |n: usize, at: &mut usize| -> &[u8] {
+    let take = |n: usize, at: &mut usize| -> &[u8] {
         let slice = &raw[*at..*at + n];
         *at += n;
         slice

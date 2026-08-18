@@ -156,6 +156,7 @@ fn main() -> ! {
         unsafe { &mut *core::ptr::addr_of_mut!(SOCKETS) },
         unsafe { &mut *core::ptr::addr_of_mut!(NET_RX) },
         unsafe { &mut *core::ptr::addr_of_mut!(NET_TX) },
+        &settings,
         now_ms(),
     ) {
         Ok(net) => {
@@ -270,6 +271,32 @@ fn main() -> ! {
                 }
                 dirty = true;
             }
+            // The UI owns the settings and has already changed them; persisting
+            // and reconfiguring belongs here, where the flash and the radio are.
+            Action::SaveSettings => {
+                persist(&mut store, &ui.settings);
+                if let Some(net) = net.as_mut() {
+                    net.apply_hosts(&ui.settings);
+                }
+                // Re-poll at the next opportunity rather than up to two seconds
+                // later: until fresh data lands, the relay list still describes
+                // the old controller table.
+                last_poll_ms = t.wrapping_sub(POLL_INTERVAL_MS);
+                dirty = true;
+            }
+            Action::ApplyWifi => {
+                persist(&mut store, &ui.settings);
+                if let Some(net) = net.as_mut() {
+                    match net.apply_wifi(&ui.settings) {
+                        Ok(()) => state.link = Link::Connecting,
+                        Err(e) => {
+                            esp_println::println!("wifi reconfigure failed: {e}");
+                            state.link = Link::Offline;
+                        }
+                    }
+                }
+                dirty = true;
+            }
             Action::None => {}
         }
 
@@ -306,6 +333,24 @@ fn main() -> ! {
         }
 
         ui.update(&state, t);
+
+        // A scan blocks for a few hundred milliseconds, so it happens between
+        // frames and only once the transition that asked for it has finished -
+        // see Ui::take_scan_request. The "scanning" frame is painted first, so
+        // the pause is explained rather than looking like a freeze.
+        if ui.take_scan_request() {
+            if let Some(n) = net.as_mut() {
+                ui.scan_busy = true;
+                ui.build(&mut scene, &state, t);
+                lcd.present(&scene);
+                n.scan(&mut ui.networks);
+                ui.scan_busy = false;
+                esp_println::println!("wifi scan: {} networks", ui.networks.n);
+                // The blocking call consumed the loop's sense of time.
+                last_ms = now_ms();
+                dirty = true;
+            }
+        }
 
         // Redraw when something is moving, when the visible clock or countdown
         // has ticked, or when input arrived. Idling without repainting keeps the
@@ -361,6 +406,9 @@ fn main() -> ! {
                     ui::Screen::Info => "info",
                     ui::Screen::Extras => "extras",
                     ui::Screen::Config => "config",
+                    ui::Screen::Wifi => "wifi",
+                    ui::Screen::Controller => "controller",
+                    ui::Screen::Keyboard => "keyboard",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
@@ -375,6 +423,20 @@ fn main() -> ! {
             build_us = 0;
             present_us = 0;
         }
+    }
+}
+
+/// Write settings to flash. A failed write is reported and otherwise tolerated:
+/// the change is already live in RAM, and refusing to apply it because it could
+/// not be *remembered* would be the worse failure.
+fn persist(store: &mut store::Store<'_>, settings: &store::Settings) {
+    match store.save(settings) {
+        Ok(()) => esp_println::println!(
+            "store: saved ssid=\"{}\" controllers={}",
+            settings.ssid.as_str(),
+            settings.n_controllers
+        ),
+        Err(e) => esp_println::println!("store: save failed: {e}"),
     }
 }
 

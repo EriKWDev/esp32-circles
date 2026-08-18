@@ -60,7 +60,13 @@ mod l {
     /// (cx, cy, r). The panel is square with rounded corners, not round, so this
     /// sits properly in the top-left instead of being pulled toward the middle.
     pub const BACK: (i32, i32, i32) = (58, 58, 40);
-    pub const INFO: (i32, i32, i32) = (58, 58, 40);
+    /// The cog sits in the top *right* on Home, opposite nothing else - Home has
+    /// no Back button. The one exception is a run in progress, whose badge owns
+    /// that corner; then the cog takes the free left one instead of overlapping
+    /// it. Both are corners of an empty strip, so neither placement crowds
+    /// anything, and `Ui::cog` is the single decision point.
+    pub const INFO: (i32, i32, i32) = (422, 58, 40);
+    pub const INFO_ALT: (i32, i32, i32) = (58, 58, 40);
     pub const RUN_BADGE: (i32, i32, i32) = (422, 58, 32);
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
@@ -127,6 +133,34 @@ mod l {
     pub const ANALOG_MAX_ROWS: usize = 6;
     pub const ANALOG_VIEW_TOP: i32 = 168;
     pub const ANALOG_VIEW_BOTTOM: i32 = 438;
+
+    /// On-screen keyboard.
+    ///
+    /// 480 px across is what makes a real QWERTY possible here: ten keys of 46 px
+    /// with a gap between them is a larger target than most phones give a thumb,
+    /// so there was no need to fall back to a compromise layout. Rows are
+    /// centred on their own key count rather than stretched to a fixed band,
+    /// which keeps every key the same size on every row.
+    pub const KEY_W: i32 = 46;
+    /// Digits get a proper keypad: three columns of these instead of ten of
+    /// KEY_W, because an IP address is the one thing typed here under time
+    /// pressure, standing at a valve box.
+    pub const KEY_W_PAD: i32 = 88;
+    pub const KEY_TOP: i32 = 238;
+    pub const KEY_H: i32 = 52;
+    pub const KEY_PITCH: i32 = 58;
+    pub const KEY_GAP: i32 = 6;
+    pub const KEY_R: i32 = 12;
+    /// Row 2's flanking keys: case toggle on the left, delete on the right.
+    pub const KEY_SHIFT: (i32, i32) = (4, 68);
+    pub const KEY_DEL: (i32, i32) = (412, 476);
+    /// Bottom row: mode toggle, space, commit.
+    pub const KEY_BOTTOM_Y: i32 = KEY_TOP + 3 * KEY_PITCH;
+    pub const KEY_MODE: (i32, i32) = (8, 116);
+    pub const KEY_SPACE: (i32, i32) = (126, 354);
+    pub const KEY_DONE: (i32, i32) = (364, 472);
+    /// The text being edited, above the keys.
+    pub const FIELD: (i32, i32, i32, i32) = (24, 132, 456, 200);
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -176,6 +210,13 @@ pub enum Screen {
     Extras,
     /// Network and controller configuration, backed by flash.
     Config,
+    /// Wi-Fi picker: the networks a scan found, plus rescan and manual entry.
+    Wifi,
+    /// One controller's settings, and the only place it can be removed.
+    Controller,
+    /// Text entry. What it is editing, and where Back returns to, are held in
+    /// `edit` and `kb_return` rather than encoded in more screen variants.
+    Keyboard,
 }
 
 impl Screen {
@@ -189,7 +230,9 @@ impl Screen {
             Screen::Info => BG_INFO,
             // Extras shares Info's palette: it is the same part of the app.
             Screen::Extras => BG_INFO,
-            Screen::Config => BG_CONFIG,
+            // Everything reached from Configuration keeps its palette, so the
+            // whole settings branch reads as one place.
+            Screen::Config | Screen::Wifi | Screen::Controller | Screen::Keyboard => BG_CONFIG,
         }
     }
     fn accent(self) -> u16 {
@@ -201,8 +244,18 @@ impl Screen {
             Screen::Detail => C_INSPECT,
             Screen::Info => C_INFO,
             Screen::Extras => C_INFO,
-            Screen::Config => C_CONFIG,
+            Screen::Config | Screen::Wifi | Screen::Controller | Screen::Keyboard => C_CONFIG,
         }
+    }
+
+    /// True for the list-shaped screens: one scrollable column of menu rows.
+    /// They share drawing, scrolling and hit testing, so they are recognised
+    /// here rather than enumerated at each of those places.
+    fn is_menu(self) -> bool {
+        matches!(
+            self,
+            Screen::Extras | Screen::Config | Screen::Wifi | Screen::Controller
+        )
     }
 }
 
@@ -219,6 +272,16 @@ enum Target {
     Extra(usize),
     /// A row of the Config page: Wi-Fi first, then one per controller, then Add.
     ConfigRow(usize),
+    /// A row of the Wi-Fi picker: the scanned networks, then rescan, then manual.
+    WifiRow(usize),
+    /// A row of one controller's page: address, user, password, remove.
+    CtlRow(usize),
+    /// A keyboard grid row; which key is resolved from x, using the same slot
+    /// arithmetic the renderer places the plates with.
+    KeyRow(usize),
+    /// A keyboard key that is not part of a grid row - shift, delete, mode,
+    /// space, commit.
+    KeyAux(usize),
     Schedule(usize),
     Info,
     RunningBadge,
@@ -260,7 +323,80 @@ pub enum Action {
         seconds: u32,
     },
     Stop,
+    /// Settings changed: persist them and adopt the new controller list.
+    SaveSettings,
+    /// The network changed: persist, then re-join with the new credentials.
+    ApplyWifi,
 }
+
+/// What the keyboard is filling in. Held as state rather than as more `Screen`
+/// variants, because every one of these uses the same screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Edit {
+    /// A network name typed by hand, for an access point that does not
+    /// broadcast or that a scan missed. Commits into the password step.
+    WifiSsid,
+    WifiPsk,
+    NewControllerIp,
+    ControllerIp(usize),
+    ControllerUser(usize),
+    ControllerPass(usize),
+}
+
+impl Edit {
+    fn title(self) -> &'static str {
+        match self {
+            Edit::WifiSsid => "NETWORK NAME",
+            Edit::WifiPsk => "WI-FI PASSWORD",
+            Edit::NewControllerIp | Edit::ControllerIp(_) => "IP ADDRESS",
+            Edit::ControllerUser(_) => "USERNAME",
+            Edit::ControllerPass(_) => "PASSWORD",
+        }
+    }
+
+    /// Addresses get the keypad; everything else gets letters.
+    fn mode(self) -> KeyMode {
+        match self {
+            Edit::NewControllerIp | Edit::ControllerIp(_) => KeyMode::Numeric,
+            _ => KeyMode::Lower,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyMode {
+    Lower,
+    Upper,
+    Symbols,
+    Numeric,
+}
+
+impl KeyMode {
+    /// The three grid rows, and how wide one key is.
+    fn rows(self) -> (&'static [&'static str; 3], i32) {
+        match self {
+            // Passwords are case-sensitive, so the case toggle is not cosmetic:
+            // the keyboard shows the case it will actually type.
+            KeyMode::Lower => (&["qwertyuiop", "asdfghjkl", "zxcvbnm"], l::KEY_W),
+            KeyMode::Upper => (&["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"], l::KEY_W),
+            // Restricted to glyphs the baked fonts actually carry - there is no
+            // fallback box to draw, a missing glyph is simply invisible.
+            KeyMode::Symbols => (
+                &["1234567890", "-_.,:;/@'\"", "!?#%&*+()="],
+                l::KEY_W,
+            ),
+            KeyMode::Numeric => (&["123", "456", "789"], l::KEY_W_PAD),
+        }
+    }
+
+    fn is_alpha(self) -> bool {
+        matches!(self, KeyMode::Lower | KeyMode::Upper)
+    }
+}
+
+/// How long a pressed key stays lit. Long enough to see on a panel refreshing at
+/// 40-60 fps, short enough not to lag a fast typist.
+const KEY_FLASH_MS: u32 = 130;
 
 /// A decorative expanding ring, spawned by every tap. The circles demo's
 /// signature effect, kept as the UI's tactile feedback.
@@ -328,11 +464,33 @@ pub struct Ui {
     relay_scroll: i32,
     info_scroll: i32,
     menu_scroll: i32,
-    /// Last Config row tapped, for the editor that will open on it.
-    config_selected: usize,
+    /// Which controller the Controller page is showing.
+    controller_selected: usize,
     /// The UI's copy of persisted settings. Held here rather than threaded
     /// through every draw call, and refreshed by main whenever it changes.
     pub settings: crate::store::Settings,
+    /// Networks from the last scan. Filled by main, which owns the radio.
+    pub networks: crate::net::Networks,
+    /// Set while main is inside a blocking scan, so the picker can say so.
+    pub scan_busy: bool,
+    /// A scan the UI has asked for but that has not been run yet. Not an
+    /// `Action`, because a scan blocks for a few hundred milliseconds and must
+    /// wait for the transition that requested it to finish animating.
+    want_scan: bool,
+    /// Keyboard: what is being edited, the text so far, and the layout.
+    edit: Edit,
+    edit_buf: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
+    /// Set when a commit was refused, so the field can say why instead of the
+    /// DONE key appearing to do nothing.
+    edit_invalid: bool,
+    key_mode: KeyMode,
+    /// (grid row, slot) of the key lit right now, and when it was pressed.
+    key_hot: Option<(usize, usize)>,
+    key_hot_ms: u32,
+    /// Where Back returns to from the keyboard, so it is a true stack pop.
+    kb_return: Screen,
+    /// The network chosen in the picker, held until its password is entered.
+    pending_ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
     schedule_scroll: i32,
     detail_scroll: i32,
     dragging_slider: bool,
@@ -399,8 +557,19 @@ impl Ui {
             relay_scroll: 0,
             info_scroll: 0,
             menu_scroll: 0,
-            config_selected: 0,
+            controller_selected: 0,
             settings: crate::store::Settings::EMPTY,
+            networks: crate::net::Networks::EMPTY,
+            scan_busy: false,
+            want_scan: false,
+            edit: Edit::WifiPsk,
+            edit_buf: crate::store::FixedStr::EMPTY,
+            edit_invalid: false,
+            key_mode: KeyMode::Lower,
+            key_hot: None,
+            key_hot_ms: 0,
+            kb_return: Screen::Config,
+            pending_ssid: crate::store::FixedStr::EMPTY,
             schedule_scroll: 0,
             detail_scroll: 0,
             dragging_slider: false,
@@ -529,6 +698,7 @@ impl Ui {
                         Screen::Detail => self.detail_scroll,
                         Screen::Info => self.info_scroll,
                         Screen::Force => self.relay_scroll,
+                        screen if screen.is_menu() => self.menu_scroll,
                         _ => 0,
                     };
                     self.pending_row = self.row_at(y, state);
@@ -548,7 +718,12 @@ impl Ui {
                     Target::Info => C_INFO,
                     _ => self.screen.accent(),
                 };
-                self.ripple(x, y, color, now_ms);
+                // Keys light up instead of rippling. A ripple per keystroke would
+                // be visual noise, and it would evict the ripples that carry
+                // meaning - there are only MAX_RIPPLES slots.
+                if !matches!(target, Target::KeyRow(_) | Target::KeyAux(_)) {
+                    self.ripple(x, y, color, now_ms);
+                }
 
                 match target {
                     Target::Back => {
@@ -560,8 +735,12 @@ impl Ui {
                             // Both of these are reached through Extras, so Back
                             // returns to the menu rather than skipping home.
                             Screen::Info | Screen::Config => Screen::Extras,
+                            Screen::Wifi | Screen::Controller => Screen::Config,
+                            // Cancels the edit: the buffer is simply dropped.
+                            Screen::Keyboard => self.kb_return,
                             _ => Screen::Home,
                         };
+                        self.menu_scroll = 0;
                         self.start_wipe(to, x, y, now_ms);
                         Action::None
                     }
@@ -596,12 +775,131 @@ impl Ui {
                         Action::None
                     }
                     Target::ConfigRow(row) => {
-                        // Editing lands here next; for now a tap is acknowledged
-                        // with a ripple so the rows do not feel dead, and the
-                        // row's identity is recorded for the editor to pick up.
-                        self.config_selected = row;
+                        let controllers = self.settings.n_controllers;
+                        if row == 0 {
+                            // Ask for a scan on the way in, so the picker has
+                            // something in it by the time the transition lands.
+                            self.want_scan = !self.networks.scanned;
+                            self.menu_scroll = 0;
+                            self.start_wipe(Screen::Wifi, x, y, now_ms);
+                        } else if row <= controllers {
+                            self.controller_selected = row - 1;
+                            self.menu_scroll = 0;
+                            self.start_wipe(Screen::Controller, x, y, now_ms);
+                        } else {
+                            self.open_keyboard(Edit::NewControllerIp, "", x, y, now_ms);
+                        }
                         Action::None
                     }
+                    Target::WifiRow(row) => {
+                        let found = self.networks.n;
+                        if row < found {
+                            let network = self.networks.items[row];
+                            self.pending_ssid = network.ssid;
+                            if network.secure {
+                                // Re-entering the network you are already on is
+                                // usually about fixing something else, so the
+                                // known password is offered rather than cleared.
+                                let known = if network.ssid.as_str()
+                                    == self.settings.ssid.as_str()
+                                {
+                                    self.settings.psk
+                                } else {
+                                    crate::store::FixedStr::EMPTY
+                                };
+                                self.open_keyboard(
+                                    Edit::WifiPsk,
+                                    known.as_str(),
+                                    x,
+                                    y,
+                                    now_ms,
+                                );
+                                Action::None
+                            } else {
+                                // Open network: nothing to type.
+                                self.settings.ssid = network.ssid;
+                                self.settings.psk = crate::store::FixedStr::EMPTY;
+                                self.start_wipe(Screen::Config, x, y, now_ms);
+                                Action::ApplyWifi
+                            }
+                        } else if row == found {
+                            self.want_scan = true;
+                            Action::None
+                        } else {
+                            self.open_keyboard(Edit::WifiSsid, "", x, y, now_ms);
+                            Action::None
+                        }
+                    }
+                    Target::CtlRow(row) => {
+                        let index = self.controller_selected;
+                        let Some(controller) = self
+                            .settings
+                            .controllers
+                            .get(index)
+                            .copied()
+                            .filter(|_| index < self.settings.n_controllers)
+                        else {
+                            self.start_wipe(Screen::Config, x, y, now_ms);
+                            return Action::None;
+                        };
+                        match row {
+                            0 => {
+                                let mut current = Buf::<20>::new();
+                                let ip = controller.ip;
+                                let _ =
+                                    write!(current, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                                self.open_keyboard(
+                                    Edit::ControllerIp(index),
+                                    current.as_str(),
+                                    x,
+                                    y,
+                                    now_ms,
+                                );
+                                Action::None
+                            }
+                            1 => {
+                                self.open_keyboard(
+                                    Edit::ControllerUser(index),
+                                    controller.user.as_str(),
+                                    x,
+                                    y,
+                                    now_ms,
+                                );
+                                Action::None
+                            }
+                            2 => {
+                                self.open_keyboard(
+                                    Edit::ControllerPass(index),
+                                    controller.pass.as_str(),
+                                    x,
+                                    y,
+                                    now_ms,
+                                );
+                                Action::None
+                            }
+                            _ => {
+                                self.settings.remove_controller(index);
+                                self.menu_scroll = 0;
+                                self.start_wipe(Screen::Config, x, y, now_ms);
+                                Action::SaveSettings
+                            }
+                        }
+                    }
+                    Target::KeyRow(row) => {
+                        let (rows, key_w) = self.key_mode.rows();
+                        let text = rows[row];
+                        let count = text.chars().count();
+                        let (bx0, bx1) = key_band(count, key_w);
+                        if let Some(slot) = crate::gfx::key_slot_at(bx0, bx1, count, x)
+                            && let Some(ch) = text.chars().nth(slot)
+                        {
+                            self.type_char(ch);
+                            self.key_hot = Some((row, slot));
+                            self.key_hot_ms = now_ms;
+                        }
+                        Action::None
+                    }
+                    Target::KeyAux(index) => self.key_aux(index, x, y, now_ms),
                     Target::Force => {
                         self.selected = self.selected.min(state.n_usable().saturating_sub(1));
                         self.start_wipe(Screen::Force, x, y, now_ms);
@@ -661,12 +959,11 @@ impl Ui {
                         ),
                         Screen::Info => (l::ANALOG_PITCH, l::ANALOG_MAX_ROWS, state.n_analogs),
                         Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
-                        Screen::Extras => {
-                            (l::MENU_PITCH, l::MENU_MAX_ROWS, Self::EXTRAS.len())
-                        }
-                        Screen::Config => {
-                            (l::MENU_PITCH, l::MENU_MAX_ROWS, self.config_rows())
-                        }
+                        screen if screen.is_menu() => (
+                            l::MENU_PITCH,
+                            l::MENU_MAX_ROWS,
+                            self.menu_total(screen),
+                        ),
                         _ => (1, 1, 0),
                     };
                     let max_offset = total.saturating_sub(visible) as i32 * pitch;
@@ -681,7 +978,7 @@ impl Ui {
                         Screen::Detail => self.detail_scroll = offset,
                         Screen::Info => self.info_scroll = offset,
                         Screen::Force => self.relay_scroll = offset,
-                        Screen::Extras | Screen::Config => self.menu_scroll = offset,
+                        screen if screen.is_menu() => self.menu_scroll = offset,
                         _ => {}
                     }
                 }
@@ -757,6 +1054,9 @@ impl Ui {
                 r.active = false;
             }
         }
+        if self.key_hot.is_some() && now_ms.wrapping_sub(self.key_hot_ms) >= KEY_FLASH_MS {
+            self.key_hot = None;
+        }
         for bubble in self.bubbles.iter_mut() {
             if bubble.active && now_ms.wrapping_sub(bubble.born_ms) >= BUBBLE_MS {
                 bubble.active = false;
@@ -830,6 +1130,8 @@ impl Ui {
             || (self.screen == Screen::Running && !self.run_finished)
             || self.last_running
             || self.dragging_slider
+            // A lit key has to be un-lit again, which needs one more frame.
+            || self.key_hot.is_some()
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -916,7 +1218,7 @@ impl Ui {
         let (bx, by, br) = l::BACK;
         match screen {
             Screen::Home => {
-                let (ix, iy, ir) = l::INFO;
+                let (ix, iy, ir) = self.cog_at(state);
                 self.zone(
                     Target::Info,
                     Zone::Disc {
@@ -990,10 +1292,11 @@ impl Ui {
                     },
                 );
             }
-            // Extras and Config are both menus: Back, a scrollable band, and one
-            // zone per visible row. The row targets are registered from the same
-            // pitch the drawing uses, and `row_at` maps a y back to a row.
-            Screen::Extras | Screen::Config => {
+            // All four list screens work the same way: Back, one zone per visible
+            // row, and the scrollbar gutter. The rows come from the same walker
+            // the drawing uses, so a row can never activate a different entry
+            // from the one under the finger.
+            Screen::Extras | Screen::Config | Screen::Wifi | Screen::Controller => {
                 self.zone(
                     Target::Back,
                     Zone::Disc {
@@ -1002,29 +1305,17 @@ impl Ui {
                         r: br,
                     },
                 );
-                let total = if screen == Screen::Extras {
-                    Self::EXTRAS.len()
-                } else {
-                    self.config_rows()
-                };
-                let first = (self.menu_scroll / l::MENU_PITCH) as usize;
-                let shift = -(self.menu_scroll % l::MENU_PITCH);
-                for slot in 0..l::MENU_MAX_ROWS + 1 {
-                    let row = first + slot;
-                    if row >= total {
-                        break;
+                let mut rows = [(0usize, 0i32); l::MENU_MAX_ROWS + 1];
+                let mut n_rows = 0;
+                self.menu_rows(screen, |_, row, cy| {
+                    if n_rows < rows.len() {
+                        rows[n_rows] = (row, cy);
+                        n_rows += 1;
                     }
-                    let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
-                    if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
-                        continue;
-                    }
-                    let target = if screen == Screen::Extras {
-                        Target::Extra(row)
-                    } else {
-                        Target::ConfigRow(row)
-                    };
+                });
+                for &(row, cy) in &rows[..n_rows] {
                     self.zone(
-                        target,
+                        Self::menu_target(screen, row),
                         Zone::Rect {
                             x0: l::MENU_X0,
                             y0: cy - l::MENU_HALF_H,
@@ -1043,6 +1334,73 @@ impl Ui {
                         y1: 470,
                     },
                 );
+            }
+            Screen::Keyboard => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                // Grid rows are one zone each; which key was pressed is resolved
+                // from x with the renderer's own slot arithmetic. Registered
+                // before the flanking keys so that where their hit slop overlaps,
+                // a letter wins - mistyping a letter is recoverable, and
+                // mis-hitting delete is not.
+                let (key_rows, key_w) = self.key_mode.rows();
+                for (row, keys) in key_rows.iter().enumerate() {
+                    let (x0, x1) = key_band(keys.chars().count(), key_w);
+                    let y0 = l::KEY_TOP + row as i32 * l::KEY_PITCH;
+                    self.zone(
+                        Target::KeyRow(row),
+                        Zone::Rect {
+                            x0,
+                            y0,
+                            x1,
+                            y1: y0 + l::KEY_H,
+                        },
+                    );
+                }
+                let row2 = l::KEY_TOP + 2 * l::KEY_PITCH;
+                if self.key_mode.is_alpha() {
+                    let (x0, x1) = l::KEY_SHIFT;
+                    self.zone(
+                        Target::KeyAux(0),
+                        Zone::Rect {
+                            x0,
+                            y0: row2,
+                            x1,
+                            y1: row2 + l::KEY_H,
+                        },
+                    );
+                }
+                let (x0, x1) = l::KEY_DEL;
+                self.zone(
+                    Target::KeyAux(1),
+                    Zone::Rect {
+                        x0,
+                        y0: row2,
+                        x1,
+                        y1: row2 + l::KEY_H,
+                    },
+                );
+                let by_bottom = l::KEY_BOTTOM_Y;
+                for (index, (x0, x1)) in [l::KEY_MODE, l::KEY_SPACE, l::KEY_DONE]
+                    .into_iter()
+                    .enumerate()
+                {
+                    self.zone(
+                        Target::KeyAux(2 + index),
+                        Zone::Rect {
+                            x0,
+                            y0: by_bottom,
+                            x1,
+                            y1: by_bottom + l::KEY_H,
+                        },
+                    );
+                }
             }
             Screen::Info => {
                 self.zone(
@@ -1161,6 +1519,9 @@ impl Ui {
             Screen::Info => self.draw_info(scene, state, alpha),
             Screen::Extras => self.draw_extras(scene, alpha),
             Screen::Config => self.draw_config(scene, state, alpha),
+            Screen::Wifi => self.draw_wifi(scene, alpha),
+            Screen::Controller => self.draw_controller(scene, state, alpha),
+            Screen::Keyboard => self.draw_keyboard(scene, now_ms, alpha),
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -1274,8 +1635,8 @@ impl Ui {
         );
     }
 
-    fn draw_cog(&self, scene: &mut Scene, alpha: u8) {
-        let (x, y, _) = l::INFO;
+    fn draw_cog(&self, scene: &mut Scene, state: &State, alpha: u8) {
+        let (x, y, _) = self.cog_at(state);
         // The icon itself is the affordance; the generous invisible hit area
         // does not need another enclosing circle.
         scene.label(
@@ -1343,7 +1704,7 @@ impl Ui {
         // shifts aside when a battery is present, so they are drawn together.
         self.draw_link(scene, state, alpha);
         self.draw_power(scene, Screen::Home, state, alpha);
-        self.draw_cog(scene, alpha);
+        self.draw_cog(scene, state, alpha);
 
         let mut clock = Buf::<8>::new();
         if state.clock_valid {
@@ -1432,19 +1793,11 @@ impl Ui {
         self.draw_back(scene, alpha);
         scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "EXTRAS");
 
-        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
-        let shift = -(self.menu_scroll % l::MENU_PITCH);
-        for slot in 0..l::MENU_MAX_ROWS + 1 {
-            let row = first + slot;
-            let Some((title, subtitle, screen)) = Self::EXTRAS.get(row) else {
-                break;
-            };
-            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
-            if cy + l::MENU_HALF_H < 110 || cy - l::MENU_HALF_H > 470 {
-                continue;
+        self.menu_rows(Screen::Extras, |ui, row, cy| {
+            if let Some((title, subtitle, screen)) = Self::EXTRAS.get(row) {
+                ui.menu_row(scene, cy, screen.accent(), title, subtitle, alpha, true);
             }
-            self.menu_row(scene, cy, screen.accent(), title, subtitle, alpha, true);
-        }
+        });
 
         self.draw_scrollbar(
             scene,
@@ -1491,6 +1844,203 @@ impl Ui {
         1 + self.settings.n_controllers + 1
     }
 
+    /// How many rows a list screen has. Same role as `config_rows`, for all of
+    /// them: drawing, scrolling and hit testing all ask here.
+    fn menu_total(&self, screen: Screen) -> usize {
+        match screen {
+            Screen::Extras => Self::EXTRAS.len(),
+            Screen::Config => self.config_rows(),
+            // The networks found, then "scan again", then "type it in".
+            Screen::Wifi => self.networks.n + 2,
+            // Address, username, password, remove.
+            Screen::Controller => 4,
+            _ => 0,
+        }
+    }
+
+    fn menu_target(screen: Screen, row: usize) -> Target {
+        match screen {
+            Screen::Extras => Target::Extra(row),
+            Screen::Wifi => Target::WifiRow(row),
+            Screen::Controller => Target::CtlRow(row),
+            _ => Target::ConfigRow(row),
+        }
+    }
+
+    /// A scan the UI has asked for, handed to main - which owns the radio.
+    ///
+    /// Withheld until nothing is animating: the scan blocks for a few hundred
+    /// milliseconds, and taking that out of the middle of the transition that
+    /// requested it would be visible as a stutter.
+    pub fn take_scan_request(&mut self) -> bool {
+        if self.want_scan && !self.animating() {
+            self.want_scan = false;
+            return true;
+        }
+        false
+    }
+
+    /// Which corner the cog is in - see `l::INFO`.
+    fn cog_at(&self, state: &State) -> (i32, i32, i32) {
+        if (run_is_active(state) && !self.completion_acknowledged) || self.completion_pending {
+            l::INFO_ALT
+        } else {
+            l::INFO
+        }
+    }
+
+    fn open_keyboard(&mut self, edit: Edit, initial: &str, x: i32, y: i32, now_ms: u32) {
+        self.kb_return = self.screen;
+        self.edit = edit;
+        self.edit_buf = crate::store::FixedStr::new(initial);
+        self.edit_invalid = false;
+        self.key_mode = edit.mode();
+        self.key_hot = None;
+        self.start_wipe(Screen::Keyboard, x, y, now_ms);
+    }
+
+    fn type_char(&mut self, ch: char) {
+        self.edit_invalid = false;
+        let mut text = Buf::<80>::new();
+        let _ = write!(text, "{}{}", self.edit_buf.as_str(), ch);
+        self.edit_buf.set(text.as_str());
+        // One-shot shift, as on every touch keyboard: typing one capital does
+        // not commit you to shouting.
+        if self.key_mode == KeyMode::Upper {
+            self.key_mode = KeyMode::Lower;
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.edit_invalid = false;
+        // Drop one *character*, not one byte: å is two bytes, and half of it is
+        // not valid UTF-8.
+        let keep = self
+            .edit_buf
+            .as_str()
+            .char_indices()
+            .next_back()
+            .map_or(0, |(at, _)| at);
+        self.edit_buf.bytes[keep..].fill(0);
+        self.edit_buf.len = keep as u8;
+    }
+
+    /// The keys that are not part of a grid row. Their meaning depends on the
+    /// layout, which is why they are indexed by position rather than by name.
+    fn key_aux(&mut self, index: usize, x: i32, y: i32, now_ms: u32) -> Action {
+        match index {
+            0 => {
+                self.key_mode = match self.key_mode {
+                    KeyMode::Lower => KeyMode::Upper,
+                    KeyMode::Upper => KeyMode::Lower,
+                    other => other,
+                };
+                Action::None
+            }
+            1 => {
+                self.backspace();
+                Action::None
+            }
+            2 => {
+                match self.key_mode {
+                    KeyMode::Symbols => self.key_mode = KeyMode::Lower,
+                    // On the keypad this position is the dot, since an address
+                    // needs one and there is no second layout to switch to.
+                    KeyMode::Numeric => self.type_char('.'),
+                    _ => self.key_mode = KeyMode::Symbols,
+                }
+                Action::None
+            }
+            3 => {
+                if self.key_mode == KeyMode::Numeric {
+                    self.type_char('0');
+                } else {
+                    self.type_char(' ');
+                }
+                Action::None
+            }
+            _ => self.commit_edit(x, y, now_ms),
+        }
+    }
+
+    /// DONE: write the edited value into settings and have main persist it.
+    ///
+    /// A refused commit raises `edit_invalid` instead of quietly doing nothing -
+    /// a DONE key that appears dead is the worst outcome here, since there is no
+    /// other way off this screen except discarding the work.
+    fn commit_edit(&mut self, x: i32, y: i32, now_ms: u32) -> Action {
+        let value = self.edit_buf;
+        match self.edit {
+            Edit::WifiSsid => {
+                if value.is_empty() {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                // Chain straight into the password instead of returning to the
+                // picker: a hand-typed network still needs one.
+                self.pending_ssid = crate::store::FixedStr::new(value.as_str());
+                self.kb_return = Screen::Wifi;
+                self.edit = Edit::WifiPsk;
+                self.edit_buf = crate::store::FixedStr::EMPTY;
+                self.key_mode = KeyMode::Lower;
+                self.ripple(x, y, C_CONFIG, now_ms);
+                Action::None
+            }
+            Edit::WifiPsk => {
+                self.settings.ssid = self.pending_ssid;
+                self.settings.psk = value;
+                self.menu_scroll = 0;
+                self.start_wipe(Screen::Config, x, y, now_ms);
+                Action::ApplyWifi
+            }
+            Edit::NewControllerIp => {
+                let Some(ip) = crate::store::parse_ip(value.as_str()) else {
+                    self.edit_invalid = true;
+                    return Action::None;
+                };
+                if !self.settings.add_controller(ip) {
+                    // The table is full. Nothing to do but say so.
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.menu_scroll = 0;
+                self.start_wipe(Screen::Config, x, y, now_ms);
+                Action::SaveSettings
+            }
+            Edit::ControllerIp(index) => {
+                let Some(ip) = crate::store::parse_ip(value.as_str()) else {
+                    self.edit_invalid = true;
+                    return Action::None;
+                };
+                if index >= self.settings.n_controllers {
+                    self.start_wipe(Screen::Config, x, y, now_ms);
+                    return Action::None;
+                }
+                self.settings.controllers[index].ip = ip;
+                self.start_wipe(Screen::Controller, x, y, now_ms);
+                Action::SaveSettings
+            }
+            Edit::ControllerUser(index) => {
+                if value.is_empty() || index >= self.settings.n_controllers {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.settings.controllers[index].user.set(value.as_str());
+                self.start_wipe(Screen::Controller, x, y, now_ms);
+                Action::SaveSettings
+            }
+            Edit::ControllerPass(index) => {
+                if index >= self.settings.n_controllers {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.settings.controllers[index].pass.set(value.as_str());
+                self.start_wipe(Screen::Controller, x, y, now_ms);
+                Action::SaveSettings
+            }
+        }
+    }
+
     fn draw_config(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
         scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "CONFIGURATION");
@@ -1509,34 +2059,22 @@ impl Ui {
         scene.label(CX, 100, FontId::Micro, MUTED, alpha, Align::Center, panel.as_str());
 
         let total = self.config_rows();
-        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
-        let shift = -(self.menu_scroll % l::MENU_PITCH);
-        for slot in 0..l::MENU_MAX_ROWS + 1 {
-            let row = first + slot;
-            if row >= total {
-                break;
-            }
-            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
-            if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
-                continue;
-            }
-
+        self.menu_rows(Screen::Config, |ui, row, cy| {
             if row == 0 {
                 let mut value = Buf::<40>::new();
-                if self.settings.ssid.is_empty() {
+                if ui.settings.ssid.is_empty() {
                     let _ = write!(value, "NOT SET \u{b7} TAP TO CHOOSE");
                 } else {
-                    let _ = write!(value, "{}", self.settings.ssid.as_str());
+                    let _ = write!(value, "{}", ui.settings.ssid.as_str());
                 }
                 let accent = match state.link {
                     Link::Online => C_RUN,
                     Link::Connecting => C_FORCE,
                     Link::Offline => C_CANCEL,
                 };
-                self.menu_row(scene, cy, accent, "WI-FI", value.as_str(), alpha, true);
-            } else if row <= self.settings.n_controllers {
-                let index = row - 1;
-                let controller = self.settings.controllers[index];
+                ui.menu_row(scene, cy, accent, "WI-FI", value.as_str(), alpha, true);
+            } else if row <= ui.settings.n_controllers {
+                let controller = ui.settings.controllers[row - 1];
                 let mut title = Buf::<32>::new();
                 let ip = controller.ip;
                 let _ = write!(title, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
@@ -1554,7 +2092,7 @@ impl Ui {
                     controller.user.as_str(),
                     if online { "ONLINE" } else { "OFFLINE" }
                 );
-                self.menu_row(
+                ui.menu_row(
                     scene,
                     cy,
                     if online { C_RUN } else { C_CANCEL },
@@ -1564,7 +2102,7 @@ impl Ui {
                     true,
                 );
             } else {
-                self.menu_row(
+                ui.menu_row(
                     scene,
                     cy,
                     C_CONFIG,
@@ -1574,7 +2112,7 @@ impl Ui {
                     false,
                 );
             }
-        }
+        });
 
         self.draw_scrollbar(
             scene,
@@ -1586,6 +2124,384 @@ impl Ui {
             l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
             C_CONFIG,
             alpha,
+        );
+    }
+
+    /// The rows of a list screen, drawn from `menu_total` and `menu_scroll`.
+    /// Calls `row` for each visible one with its index and centre line.
+    fn menu_rows(&self, screen: Screen, mut row: impl FnMut(&Self, usize, i32)) {
+        let total = self.menu_total(screen);
+        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
+        let shift = -(self.menu_scroll % l::MENU_PITCH);
+        for slot in 0..l::MENU_MAX_ROWS + 1 {
+            let index = first + slot;
+            if index >= total {
+                break;
+            }
+            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
+            if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
+                continue;
+            }
+            row(self, index, cy);
+        }
+    }
+
+    fn draw_wifi(&mut self, scene: &mut Scene, alpha: u8) {
+        self.draw_back(scene, alpha);
+        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "WI-FI");
+
+        let mut status = Buf::<48>::new();
+        if self.scan_busy {
+            let _ = write!(status, "SCANNING...");
+        } else if self.networks.n > 0 {
+            let _ = write!(status, "{} NETWORKS FOUND", self.networks.n);
+        } else if self.networks.scanned {
+            let _ = write!(status, "NOTHING FOUND \u{b7} TRY AGAIN");
+        } else {
+            let _ = write!(status, "TAP SCAN TO LOOK FOR NETWORKS");
+        }
+        scene.label(
+            CX,
+            100,
+            FontId::Micro,
+            MUTED,
+            alpha,
+            Align::Center,
+            status.as_str(),
+        );
+
+        let found = self.networks.n;
+        let current = self.settings.ssid;
+        self.menu_rows(Screen::Wifi, |ui, index, cy| {
+            if index < found {
+                let network = ui.networks.items[index];
+                let mut sub = Buf::<44>::new();
+                let _ = write!(
+                    sub,
+                    "{} \u{b7} {}",
+                    signal_words(network.rssi),
+                    if network.secure { "SECURED" } else { "OPEN" }
+                );
+                let joined = network.ssid.as_str() == current.as_str();
+                if joined {
+                    let _ = write!(sub, " \u{b7} CURRENT");
+                }
+                ui.menu_row(
+                    scene,
+                    cy,
+                    // Green for the one we are on, otherwise strength - which is
+                    // the only thing that predicts whether joining will work.
+                    if joined {
+                        C_RUN
+                    } else {
+                        signal_color(network.rssi)
+                    },
+                    network.ssid.as_str(),
+                    sub.as_str(),
+                    alpha,
+                    true,
+                );
+            } else if index == found {
+                ui.menu_row(
+                    scene,
+                    cy,
+                    C_CONFIG,
+                    "SCAN AGAIN",
+                    "LOOK FOR NETWORKS NEARBY",
+                    alpha,
+                    false,
+                );
+            } else {
+                ui.menu_row(
+                    scene,
+                    cy,
+                    MUTED,
+                    "TYPE NETWORK NAME",
+                    "FOR A HIDDEN NETWORK",
+                    alpha,
+                    true,
+                );
+            }
+        });
+
+        self.draw_scrollbar(
+            scene,
+            self.menu_scroll,
+            l::MENU_MAX_ROWS,
+            l::MENU_PITCH,
+            found + 2,
+            l::MENU_FIRST_CY - l::MENU_HALF_H,
+            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
+            C_CONFIG,
+            alpha,
+        );
+    }
+
+    fn draw_controller(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
+
+        let index = self.controller_selected;
+        let controller = self
+            .settings
+            .controllers
+            .get(index)
+            .copied()
+            .unwrap_or(crate::store::Controller::EMPTY);
+        let ip = controller.ip;
+
+        let mut title = Buf::<24>::new();
+        let _ = write!(title, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        scene.label(
+            CX,
+            69,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            title.as_str(),
+        );
+
+        // Matched by address rather than by slot, so it stays right after an edit
+        // reorders the table.
+        let online = state.controller_ips[..state.n_controllers]
+            .iter()
+            .position(|a| *a == ip)
+            .map(|i| state.controller_online[i])
+            .unwrap_or(false);
+        scene.label(
+            CX,
+            100,
+            FontId::Micro,
+            MUTED,
+            alpha,
+            Align::Center,
+            if online {
+                "RAINBIRD CONTROLLER \u{b7} ONLINE"
+            } else {
+                "RAINBIRD CONTROLLER \u{b7} NOT ANSWERING"
+            },
+        );
+
+        // The password is masked here but shown while typing: the risk this
+        // guards against is someone reading the panel over your shoulder, which
+        // the editing screen cannot avoid anyway.
+        let mut masked = Buf::<24>::new();
+        for _ in 0..controller.pass.len.min(12) {
+            let _ = write!(masked, "\u{b7}");
+        }
+        if controller.pass.is_empty() {
+            let _ = write!(masked, "NOT SET");
+        }
+
+        self.menu_rows(Screen::Controller, |ui, row, cy| {
+            let (accent, title, sub): (u16, &str, &str) = match row {
+                0 => (C_CONFIG, "ADDRESS", title.as_str()),
+                1 => (C_CONFIG, "USERNAME", controller.user.as_str()),
+                2 => (C_CONFIG, "PASSWORD", masked.as_str()),
+                _ => (C_CANCEL, "REMOVE CONTROLLER", "STOP POLLING THIS ONE"),
+            };
+            ui.menu_row(scene, cy, accent, title, sub, alpha, row < 3);
+        });
+    }
+
+    fn draw_keyboard(&mut self, scene: &mut Scene, now_ms: u32, alpha: u8) {
+        self.draw_back(scene, alpha);
+        scene.label(
+            CX,
+            69,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            self.edit.title(),
+        );
+
+        // The value being edited. A rejected commit turns the frame red, which is
+        // the only feedback DONE can give when it refuses.
+        let (fx0, fy0, fx1, fy1) = l::FIELD;
+        scene.pill(fx0, fy0, fx1, fy1, 20, rgb(5, 14, 20), alpha);
+        let frame = if self.edit_invalid { C_CANCEL } else { C_CONFIG };
+        scene.pill(fx0, fy1 - 4, fx1, fy1, 2, frame, alpha);
+
+        let text = self.edit_buf.as_str();
+        let baseline = (fy0 + fy1) / 2 + 14;
+        if text.is_empty() {
+            scene.label(
+                fx0 + 22,
+                baseline,
+                FontId::Body,
+                DIM,
+                alpha,
+                Align::Left,
+                if self.edit_invalid {
+                    "NOT VALID"
+                } else {
+                    "TYPE HERE"
+                },
+            );
+        } else {
+            // Long values scroll: the tail is what you are working on.
+            let shown = fit_tail(FontId::Body, text, fx1 - fx0 - 52);
+            let width = FontId::Body.get().width(shown);
+            scene.label(
+                fx0 + 22,
+                baseline,
+                FontId::Body,
+                INK,
+                alpha,
+                Align::Left,
+                shown,
+            );
+            scene.pill(
+                fx0 + 26 + width,
+                fy0 + 16,
+                fx0 + 30 + width,
+                fy1 - 16,
+                2,
+                frame,
+                alpha,
+            );
+        }
+
+        // The letter grid. One primitive per row - see Prim::KeyRow.
+        let (rows, key_w) = self.key_mode.rows();
+        let lit = self
+            .key_hot
+            .filter(|_| now_ms.wrapping_sub(self.key_hot_ms) < KEY_FLASH_MS);
+        for (row, keys) in rows.iter().enumerate() {
+            let count = keys.chars().count();
+            let (bx0, bx1) = key_band(count, key_w);
+            let y0 = l::KEY_TOP + row as i32 * l::KEY_PITCH;
+            let highlight = lit
+                .filter(|(hot_row, _)| *hot_row == row)
+                .map_or(-1, |(_, slot)| slot as i8);
+            scene.key_row(
+                bx0,
+                y0,
+                bx1,
+                y0 + l::KEY_H,
+                l::KEY_R,
+                l::KEY_GAP,
+                rgb(26, 46, 56),
+                C_CONFIG,
+                INK,
+                alpha,
+                highlight,
+                FontId::Body,
+                keys,
+            );
+        }
+
+        // Keys that are not part of the grid.
+        let row2 = l::KEY_TOP + 2 * l::KEY_PITCH;
+        if self.key_mode.is_alpha() {
+            let (x0, x1) = l::KEY_SHIFT;
+            // Lit while it is armed, so the case you are about to type is
+            // visible rather than remembered.
+            let armed = self.key_mode == KeyMode::Upper;
+            self.aux_key(
+                scene,
+                x0,
+                row2,
+                x1,
+                row2 + l::KEY_H,
+                if armed { C_CONFIG } else { rgb(20, 36, 46) },
+                if armed { rgb(6, 20, 26) } else { INK },
+                FontId::Icon,
+                "\u{f062}",
+                alpha,
+            );
+        }
+        let (x0, x1) = l::KEY_DEL;
+        self.aux_key(
+            scene,
+            x0,
+            row2,
+            x1,
+            row2 + l::KEY_H,
+            rgb(20, 36, 46),
+            INK,
+            FontId::Icon,
+            "\u{f55a}",
+            alpha,
+        );
+
+        let by = l::KEY_BOTTOM_Y;
+        let numeric = self.key_mode == KeyMode::Numeric;
+        let (x0, x1) = l::KEY_MODE;
+        self.aux_key(
+            scene,
+            x0,
+            by,
+            x1,
+            by + l::KEY_H,
+            rgb(20, 36, 46),
+            INK,
+            FontId::Caption,
+            match self.key_mode {
+                KeyMode::Numeric => ".",
+                KeyMode::Symbols => "abc",
+                _ => "?123",
+            },
+            alpha,
+        );
+        let (x0, x1) = l::KEY_SPACE;
+        self.aux_key(
+            scene,
+            x0,
+            by,
+            x1,
+            by + l::KEY_H,
+            rgb(20, 36, 46),
+            if numeric { INK } else { MUTED },
+            if numeric {
+                FontId::Body
+            } else {
+                FontId::Caption
+            },
+            if numeric { "0" } else { "SPACE" },
+            alpha,
+        );
+        let (x0, x1) = l::KEY_DONE;
+        self.aux_key(
+            scene,
+            x0,
+            by,
+            x1,
+            by + l::KEY_H,
+            C_RUN,
+            rgb(4, 22, 14),
+            FontId::Caption,
+            "DONE",
+            alpha,
+        );
+    }
+
+    /// One key that is not part of a grid row: a plate and a centred caption.
+    #[allow(clippy::too_many_arguments)]
+    fn aux_key(
+        &self,
+        scene: &mut Scene,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        plate: u16,
+        ink: u16,
+        font: FontId,
+        caption: &str,
+        alpha: u8,
+    ) {
+        scene.pill(x0, y0, x1, y1, l::KEY_R, plate, alpha);
+        let f = font.get();
+        scene.label(
+            (x0 + x1) / 2,
+            (y0 + y1) / 2 + f.ascent / 2 - f.ascent / 8,
+            font,
+            ink,
+            alpha,
+            Align::Center,
+            caption,
         );
     }
 
@@ -2175,6 +3091,48 @@ fn mix565(background: u16, foreground: u16, alpha: u8) -> u16 {
     let g = (fg * a + bg * ia + 127) / 255;
     let b = (fb * a + bb * ia + 127) / 255;
     ((r as u16) << 11) | ((g as u16) << 5) | b as u16
+}
+
+/// The x range of a centred key row of `n` keys, each `key_w` wide.
+///
+/// Rows are centred rather than stretched to a common band, so a key is the same
+/// size whether its row holds ten of them or three.
+fn key_band(n: usize, key_w: i32) -> (i32, i32) {
+    let half = n as i32 * key_w / 2;
+    (CX - half, CX + half)
+}
+
+/// The longest tail of `text` that fits `width`.
+///
+/// The tail, not the head: what you are typing is at the end, and a field that
+/// shows the beginning of a long password while hiding the character you just
+/// pressed is worse than one that scrolls.
+fn fit_tail(font: FontId, text: &str, width: i32) -> &str {
+    let f = font.get();
+    let mut start = 0;
+    while start < text.len() && f.width(&text[start..]) > width {
+        start += text[start..].chars().next().map_or(1, |c| c.len_utf8());
+    }
+    &text[start..]
+}
+
+/// RSSI in words. Absolute dBm means nothing to whoever is holding the panel;
+/// whether the network is worth joining does.
+fn signal_words(rssi: i8) -> &'static str {
+    match rssi {
+        r if r >= -55 => "STRONG",
+        r if r >= -70 => "GOOD",
+        r if r >= -80 => "FAIR",
+        _ => "WEAK",
+    }
+}
+
+fn signal_color(rssi: i8) -> u16 {
+    match rssi {
+        r if r >= -70 => C_CONFIG,
+        r if r >= -80 => C_FORCE,
+        _ => DIM,
+    }
 }
 
 fn minutes_from_y(y: i32) -> u32 {
