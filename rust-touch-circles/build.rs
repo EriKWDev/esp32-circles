@@ -164,9 +164,13 @@ fn main() {
                     let fy = y as f32 + (sy as f32 + 0.5) / SS as f32 - ICON_SIZE as f32 / 2.0;
                     let radius = (fx * fx + fy * fy).sqrt();
                     let angle = fy.atan2(fx);
-                    let tooth_phase = (angle * 8.0 / std::f32::consts::TAU).fract().abs();
-                    let tooth = !(0.20..=0.80).contains(&tooth_phase);
-                    let outer = if tooth { 22.0 } else { 18.0 };
+                    // Eight broad, symmetric teeth with softly tapered
+                    // shoulders. Unlike the previous binary tooth/notch
+                    // profile this reads as a conventional settings gear at
+                    // both native size and during a wipe transition.
+                    let wave = (angle * 8.0).cos();
+                    let tooth = ((wave - 0.15) / 0.85).clamp(0.0, 1.0);
+                    let outer = 18.5 + tooth * 4.0;
                     if radius >= 7.0 && radius <= outer {
                         inside += 1;
                     }

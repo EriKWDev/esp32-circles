@@ -811,18 +811,16 @@ impl Ui {
     }
 
     fn draw_back(&self, scene: &mut Scene, alpha: u8) {
-        let (bx, by, br) = l::BACK;
-        scene.ring(bx, by, br, br - 4, MUTED, alpha);
-        // Chevron as two pills. The renderer cannot rotate a primitive, so the
-        // arrow is a stem plus a shorter upright that reads as one mark at this
-        // size.
-        scene.pill(bx - 11, by - 3, bx + 10, by + 3, 3, INK, alpha);
-        scene.pill(bx - 11, by - 12, bx - 5, by + 12, 3, INK, alpha);
+        let (bx, by, _) = l::BACK;
+        // A typographic chevron stays crisp and unambiguous at this size. The
+        // full 80 px touch target remains unchanged and intentionally invisible.
+        scene.label(bx, by + 13, FontId::Body, INK, alpha, Align::Center, "<");
     }
 
     fn draw_cog(&self, scene: &mut Scene, alpha: u8) {
-        let (x, y, r) = l::INFO;
-        scene.ring(x, y, r, r - 4, MUTED, alpha);
+        let (x, y, _) = l::INFO;
+        // The icon itself is the affordance; the generous invisible hit area
+        // does not need another enclosing circle.
         scene.label(x, y + 24, FontId::Icon, INK, alpha, Align::Center, "⚙");
     }
 
@@ -1246,12 +1244,13 @@ impl Ui {
         );
         // Eased position, not the raw target - see `knob_q4`.
         let knob_y = (self.knob_q4 >> 4).clamp(l::SLIDER_TOP, l::SLIDER_BOTTOM);
+        let fill_radius = ((l::SLIDER_BOTTOM - knob_y) / 2).min(hw).max(0);
         scene.pill(
             sx - hw,
             knob_y,
             sx + hw,
             l::SLIDER_BOTTOM,
-            hw,
+            fill_radius,
             C_FORCE,
             alpha,
         );
