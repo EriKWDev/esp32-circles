@@ -97,6 +97,9 @@ fn main() -> ! {
 
     let mut lcd = Display::new(spi, transmit_buffer, packing_buffer);
     lcd.init(&delay);
+    // Dark before the first pixels land, so boot is a fade-up rather than a
+    // flash of half-drawn frame.
+    lcd.set_brightness(0);
     lcd.fill_black();
 
     let mut state = State::new();
@@ -106,11 +109,34 @@ fn main() -> ! {
     let mut scene = Scene::new();
     let mut touch = Touch::new();
 
+    // First frame while still dark, then ease the backlight up. This uses the
+    // panel's brightness register, so it transfers no pixels at all - the fade
+    // cannot stutter no matter what the renderer is doing, and it costs nothing.
+    ui.build(&mut scene, &state, now_ms());
+    lcd.present(&scene);
+    {
+        const BOOT_FADE_MS: u32 = 200;
+        let start = now_ms();
+        loop {
+            let elapsed = now_ms().wrapping_sub(start);
+            if elapsed >= BOOT_FADE_MS {
+                break;
+            }
+            // Smoothstep, so it arrives gently instead of stopping dead.
+            let t = elapsed * 32_768 / BOOT_FADE_MS;
+            let eased = (t * t >> 15) * (3 * 32_768 - 2 * t) >> 15;
+            lcd.set_brightness((eased * 255 / 32_768) as u8);
+        }
+        lcd.set_brightness(255);
+    }
+
     let mut last_ms = now_ms();
     let mut last_drawn_second = u32::MAX;
     let mut last_touch_ms = 0u32;
     let mut last_beat_ms = now_ms();
     let mut frames = 0u32;
+    let mut build_us = 0u32;
+    let mut present_us = 0u32;
     let mut dirty = true;
 
     loop {
@@ -171,8 +197,15 @@ fn main() -> ! {
         }
 
         if dirty {
+            // Measured in raw SYSTIMER ticks (16 MHz) so the numbers below are
+            // real microseconds, not derived from the millisecond clock.
+            let started = SystemTimer::unit_value(Unit::Unit0) as u32;
             ui.build(&mut scene, &state, t);
+            let built = SystemTimer::unit_value(Unit::Unit0) as u32;
             lcd.present(&scene);
+            let done = SystemTimer::unit_value(Unit::Unit0) as u32;
+            build_us += built.wrapping_sub(started) / 16;
+            present_us += done.wrapping_sub(built) / 16;
             dirty = false;
             frames += 1;
         } else {
@@ -185,15 +218,23 @@ fn main() -> ! {
         // distinction that is otherwise invisible from the outside.
         if t.wrapping_sub(last_beat_ms) >= 1_000 {
             last_beat_ms = t;
+            // build_us is CPU compositing, present_us is compositing overlapped
+            // with the DMA transfer. The panel's 80 MHz four-bit link cannot beat
+            // ~11.5 ms for a full frame, so present_us at or near that means the
+            // transfer is the limit and the CPU is keeping up.
+            let n = frames.max(1);
             esp_println::println!(
-                "up={}s fps={} screen={} touch={} run={} left={}",
+                "up={}s fps={} build={}us present={}us screen={} touch={} run={} left={}",
                 t / 1000,
                 frames,
+                build_us / n,
+                present_us / n,
                 match ui.screen {
                     ui::Screen::Home => "home",
                     ui::Screen::Inspect => "inspect",
                     ui::Screen::Force => "force",
                     ui::Screen::Running => "run",
+                    ui::Screen::Detail => "detail",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
@@ -203,6 +244,8 @@ fn main() -> ! {
                 state.left_s,
             );
             frames = 0;
+            build_us = 0;
+            present_us = 0;
         }
     }
 }
@@ -294,9 +337,11 @@ fn seed_mock(state: &mut State) {
     state.n_starts = 3;
 
     state.analogs[0] = model::Analog {
-        port: 2,
-        level: 1018,
-        name: Text::new("I2"),
+        // I1 is the input this installation actually has a sensor on, and it is
+        // the first record the controller reports, so it is the default readout.
+        port: 1,
+        level: 1017,
+        name: Text::new("I1"),
     };
     state.n_analogs = 1;
 

@@ -60,9 +60,16 @@ fn blend(dst: u16, src: u16, cov: u8) -> u16 {
     ((r as u16) << 11) | ((g as u16) << 5) | b as u16
 }
 
+// The single-pixel accessors bounds-check against the row they were handed
+// rather than against W. Callers already clamp, so this never fires in normal
+// operation; it exists so that a future geometry mistake costs one missing pixel
+// instead of a panic on a wall-mounted panel or a corrupted DMA buffer.
 #[inline(always)]
 fn put(row: &mut [u8], x: usize, color: u16) {
     let byte = x * 2;
+    if byte + 1 >= row.len() {
+        return;
+    }
     row[byte] = (color >> 8) as u8;
     row[byte + 1] = color as u8;
 }
@@ -70,6 +77,9 @@ fn put(row: &mut [u8], x: usize, color: u16) {
 #[inline(always)]
 fn get(row: &[u8], x: usize) -> u16 {
     let byte = x * 2;
+    if byte + 1 >= row.len() {
+        return 0;
+    }
     ((row[byte] as u16) << 8) | row[byte + 1] as u16
 }
 
@@ -89,14 +99,23 @@ fn blend_at(row: &mut [u8], x: usize, color: u16, cov: u8) {
 /// Lifted from the circles demo - it is the single hottest loop in the renderer.
 #[inline]
 fn fill_span(row: &mut [u8], left: i32, right: i32, color: u16) {
+    // Clamp entirely in signed space, and only then convert.
+    //
+    // This used to cast before comparing, which was badly wrong for a span that
+    // lies off-screen to the left: `right` is negative there, the `right < left`
+    // test passes because both sides are negative, and `-20 as usize` becomes
+    // about four billion - so the loop below walked straight off the end of the
+    // DMA buffer. In `fill_span` that corrupted memory silently through the
+    // unchecked stores; in `blend_span` it panicked. Shapes drift off-screen
+    // constantly here (every ripple and every transition disc), so this was
+    // reachable in normal use.
+    let left = left.max(0);
+    let right = right.min(W as i32 - 1);
     if right < left {
         return;
     }
-    let left = left.max(0) as usize;
-    let right = (right.min(W as i32 - 1)) as usize;
-    if right < left {
-        return;
-    }
+    let left = left as usize;
+    let right = right as usize;
     let hi = (color >> 8) as u8;
     let lo = color as u8;
     let pair = u32::from_le_bytes([hi, lo, hi, lo]);
@@ -105,7 +124,11 @@ fn fill_span(row: &mut [u8], left: i32, right: i32, color: u16) {
         put(row, x, color);
         x += 1;
     }
-    while x + 1 <= right {
+    // The paired store is the renderer's hottest instruction, so it stays
+    // unchecked - but it is bounded by `limit` derived from the row's own length,
+    // not from W, so a wrong W or a short slice cannot turn it into a stray write.
+    let limit = row.len() / 2;
+    while x + 1 <= right && x + 1 < limit {
         // x is even here, so row + x*2 is 4-byte aligned within the stripe.
         unsafe { (row.as_mut_ptr().add(x * 2) as *mut u32).write(pair) };
         x += 2;
@@ -122,12 +145,16 @@ fn blend_span(row: &mut [u8], left: i32, right: i32, color: u16, cov: u8) {
         fill_span(row, left, right, color);
         return;
     }
-    if cov == 0 || right < left {
+    if cov == 0 {
         return;
     }
-    let left = left.max(0) as usize;
-    let right = (right.min(W as i32 - 1)) as usize;
-    for x in left..=right {
+    // Signed clamp before conversion - see fill_span.
+    let left = left.max(0);
+    let right = right.min(W as i32 - 1);
+    if right < left {
+        return;
+    }
+    for x in left as usize..=right as usize {
         blend_at(row, x, color, cov);
     }
 }
@@ -396,31 +423,65 @@ fn ring_row(row: &mut [u8], cx: i32, outer_q: i32, inner_q: i32, color: u16, alp
     }
 }
 
-/// Turn angle of (dx, dy) measured clockwise from 12 o'clock, in Q12 turns.
-/// Uses an integer octant approximation - accurate to well under a pixel at
-/// these radii and far cheaper than atan2 without an FPU.
+/// Quarter-wave sine, Q12 (4096 == 1.0), indexed by turn/16 over 0..=1024.
+/// 65 entries with linear interpolation is accurate to about 0.05% - far finer
+/// than a pixel at this panel's radii.
+static SIN_Q12: [i16; 65] = [
+    0, 100, 201, 301, 401, 501, 601, 700, 799, 897, 995, 1092, 1189, 1285, 1380,
+    1474, 1567, 1660, 1751, 1842, 1931, 2019, 2106, 2191, 2276, 2359, 2440, 2520,
+    2598, 2675, 2751, 2824, 2896, 2967, 3035, 3102, 3166, 3229, 3290, 3349, 3406,
+    3461, 3513, 3564, 3612, 3659, 3703, 3745, 3784, 3822, 3857, 3889, 3920, 3948,
+    3973, 3996, 4017, 4036, 4052, 4065, 4076, 4085, 4091, 4095, 4096,
+];
+
+/// sin of a Q12 turn (0..4096 == full circle), returned in Q12.
 #[inline]
-fn turn_q12(dx: i32, dy: i32) -> i32 {
-    // Screen y grows downward; 12 o'clock is (0, -1).
-    let (ax, ay) = (dx.abs(), dy.abs());
-    if ax == 0 && ay == 0 {
-        return 0;
-    }
-    // Fraction within the octant, 0..512.
-    let frac = if ax > ay { (ay * 512) / ax } else { (ax * 512) / ay };
-    // Approximate the arctangent of frac/512 over one octant (0..512 Q12).
-    let oct = (frac * 512) / (512 + ((frac * frac) / 1536));
-    let t = match (dx >= 0, dy < 0, ax > ay) {
-        (true, true, false) => oct,               // 0..45   (up, then right)
-        (true, true, true) => 1024 - oct,         // 45..90
-        (true, false, true) => 1024 + oct,        // 90..135 (right, then down)
-        (true, false, false) => 2048 - oct,       // 135..180
-        (false, false, false) => 2048 + oct,      // 180..225
-        (false, false, true) => 3072 - oct,       // 225..270
-        (false, true, true) => 3072 + oct,        // 270..315
-        (false, true, false) => 4096 - oct,       // 315..360
+fn sin_q12(turn: i32) -> i32 {
+    let t = turn & 4095;
+    let (quadrant, within) = (t >> 10, t & 1023);
+    let idx = (within >> 4) as usize;
+    let frac = within & 15;
+    let lerp = |i: usize| -> i32 {
+        let a = SIN_Q12[i] as i32;
+        let b = SIN_Q12[(i + 1).min(64)] as i32;
+        a + (b - a) * frac / 16
     };
-    t & 4095
+    match quadrant {
+        0 => lerp(idx),
+        1 => lerp(64 - idx - if frac > 0 { 1 } else { 0 }).max(0),
+        2 => -lerp(idx),
+        _ => -lerp(64 - idx - if frac > 0 { 1 } else { 0 }).max(0),
+    }
+}
+
+#[inline]
+fn cos_q12(turn: i32) -> i32 {
+    sin_q12(turn + 1024)
+}
+
+/// Unit direction of a clockwise turn from 12 o'clock, in Q12 screen coords
+/// (y grows downward, so 12 o'clock is (0, -1)).
+#[inline]
+fn dir_q12(turn: i32) -> (i32, i32) {
+    (sin_q12(turn), -cos_q12(turn))
+}
+
+/// Is (dx, dy) inside the clockwise sector from `a` to `b`?
+///
+/// Pure cross products, so there is not a single division in the inner loop.
+/// The previous version derived each pixel's angle with an integer arctangent -
+/// two divisions per pixel, over roughly 17k pixels for a ring this size, which
+/// cost milliseconds per frame and was exactly why the sweep looked stuttery.
+#[inline(always)]
+fn in_sector(dx: i32, dy: i32, a: (i32, i32), b: (i32, i32), span_over_half: bool) -> bool {
+    // cross(u, p) > 0 means p is clockwise of u, in screen coordinates.
+    let ca = a.0 * dy - a.1 * dx;
+    let cb = b.0 * dy - b.1 * dx;
+    if span_over_half {
+        ca >= 0 || cb <= 0
+    } else {
+        ca >= 0 && cb <= 0
+    }
 }
 
 #[inline]
@@ -441,27 +502,37 @@ fn arc_row(
     if outer_q < 0 {
         return;
     }
-    // The angular test is per-pixel, so walk the ring's spans directly rather
-    // than reusing ring_row. Arcs are thin and short-lived (progress sweep),
-    // so this stays cheap.
-    let x_from = ((cx << 4) - outer_q) >> 4;
-    let x_to = ((cx << 4) + outer_q) >> 4;
-    for x in x_from.max(0)..=x_to.min(W as i32 - 1) {
-        let dx = x - cx;
-        let dist2 = (dx * dx + dy * dy) as u32;
-        let outer2 = (r_outer * r_outer) as u32;
-        let inner2 = (r_inner * r_inner) as u32;
-        if dist2 > outer2 || dist2 < inner2 {
+    let inner_q = half_extent_q(r_inner << 4, dy << 4);
+    let a = dir_q12(from);
+    let b = dir_q12(to);
+    let span_over_half = ((to - from) & 4095) > 2048;
+    let outer2 = (r_outer * r_outer) as u32;
+    let inner2 = (r_inner * r_inner) as u32;
+
+    // Walk only the two bands the annulus actually occupies on this row, so the
+    // hole in the middle costs nothing.
+    let outer_left = ((cx << 4) - outer_q) >> 4;
+    let outer_right = ((cx << 4) + outer_q) >> 4;
+    let mut bands: [(i32, i32); 2] = [(outer_left, outer_right), (0, -1)];
+    if inner_q >= 0 {
+        let inner_left = ((cx << 4) - inner_q) >> 4;
+        let inner_right = ((cx << 4) + inner_q) >> 4;
+        bands = [(outer_left, inner_left), (inner_right, outer_right)];
+    }
+
+    for (lo, hi) in bands {
+        if hi < lo {
             continue;
         }
-        let t = turn_q12(dx, dy);
-        let inside = if from <= to {
-            t >= from && t <= to
-        } else {
-            t >= from || t <= to
-        };
-        if inside {
-            blend_at(row, x as usize, color, alpha);
+        for x in lo.max(0)..=hi.min(W as i32 - 1) {
+            let dx = x - cx;
+            let dist2 = (dx * dx + dy * dy) as u32;
+            if dist2 > outer2 || dist2 < inner2 {
+                continue;
+            }
+            if in_sector(dx, dy, a, b, span_over_half) {
+                blend_at(row, x as usize, color, alpha);
+            }
         }
     }
 }

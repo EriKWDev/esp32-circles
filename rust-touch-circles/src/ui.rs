@@ -45,11 +45,18 @@ mod l {
     pub const HOME_FORCE: (i32, i32, i32, i32) = (84, 330, 396, 402);
     pub const HOME_PILL_R: i32 = 36;
 
-    /// (cx, cy, r)
-    pub const BACK: (i32, i32, i32) = (108, 106, 36);
-    pub const GO: (i32, i32, i32) = (392, 302, 56);
-    /// (x0, y0, x1, y1)
-    pub const CANCEL: (i32, i32, i32, i32) = (152, 386, 328, 442);
+    /// (cx, cy, r). The panel is square with rounded corners, not round, so this
+    /// sits properly in the top-left instead of being pulled toward the middle.
+    pub const BACK: (i32, i32, i32) = (58, 58, 40);
+    /// Clear of the relay list, which ends at RELAY_X1.
+    pub const GO: (i32, i32, i32) = (406, 302, 58);
+    /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
+    /// inside RING_INNER, so it never crosses the ring.
+    pub const CANCEL: (i32, i32, i32, i32) = (150, 356, 330, 418);
+
+    /// Progress ring: a closed circle, swept clockwise from 12 o'clock.
+    pub const RING_OUTER: i32 = 232;
+    pub const RING_INNER: i32 = 218;
 
     pub const SLIDER_X: i32 = 88;
     pub const SLIDER_TOP: i32 = 176;
@@ -62,6 +69,20 @@ mod l {
     pub const RELAY_PITCH: i32 = 48;
     pub const RELAY_HALF_H: i32 = 22;
     pub const RELAY_MAX_ROWS: usize = 5;
+
+    /// Schedule rows use nearly the full panel width. They were inset by 66 px a
+    /// side, which squeezed the clock and the zone summary into each other for no
+    /// reason - the panel is square, so that margin was pure waste.
+    pub const SCHED_X0: i32 = 26;
+    pub const SCHED_X1: i32 = 454;
+    pub const SCHED_FIRST_CY: i32 = 186;
+    pub const SCHED_PITCH: i32 = 76;
+    pub const SCHED_HALF_H: i32 = 30;
+    pub const SCHED_MAX_ROWS: usize = 4;
+
+    pub const DETAIL_FIRST_CY: i32 = 200;
+    pub const DETAIL_PITCH: i32 = 48;
+    pub const DETAIL_MAX_ROWS: usize = 5;
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -97,6 +118,8 @@ pub enum Screen {
     Inspect,
     Force,
     Running,
+    /// One schedule's running order, opened from the schedules list.
+    Detail,
 }
 
 impl Screen {
@@ -106,6 +129,7 @@ impl Screen {
             Screen::Inspect => BG_INSPECT,
             Screen::Force => BG_FORCE,
             Screen::Running => BG_RUN,
+            Screen::Detail => BG_INSPECT,
         }
     }
     fn accent(self) -> u16 {
@@ -114,6 +138,7 @@ impl Screen {
             Screen::Inspect => C_INSPECT,
             Screen::Force => C_FORCE,
             Screen::Running => C_RUN,
+            Screen::Detail => C_INSPECT,
         }
     }
 }
@@ -127,6 +152,7 @@ enum Target {
     Cancel,
     Relay(usize),
     Slider,
+    Schedule(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +231,17 @@ pub struct Ui {
     pub minutes: u32,
     pub selected: usize,
     dragging_slider: bool,
+    /// When the current slider drag began. A drag is abandoned after
+    /// DRAG_MAX_MS so a touch controller that latches a contact - and therefore
+    /// never reports a release - cannot strand the UI in drag mode.
+    drag_started_ms: u32,
+    /// Which schedule the detail screen is showing.
+    pub detail: usize,
+    /// The knob's *displayed* position, eased toward the selected minute. Values
+    /// that snap look mechanical, so the knob chases its target - the same reason
+    /// the progress sweep is driven from fractional time. Q4 for smooth easing at
+    /// sub-pixel steps.
+    knob_q4: i32,
     /// Previous `state.running`, so entering and leaving the countdown is driven
     /// by the *edges* of that flag.
     ///
@@ -231,6 +268,9 @@ impl Ui {
             minutes: 3,
             selected: 0,
             dragging_slider: false,
+            drag_started_ms: 0,
+            detail: 0,
+            knob_q4: 0,
             last_running: false,
         }
     }
@@ -268,8 +308,17 @@ impl Ui {
     }
 
     /// Feed one touch event. Returns the action the network layer should take.
+    ///
+    /// Buttons act on PRESS, not release. Release is only knowable after
+    /// RELEASE_MS of silence from the touch controller, so acting on it charged
+    /// every tap a fixed latency before anything happened at all - which is most
+    /// of why this felt sluggish. It was also a liveness hazard: if the
+    /// controller ever latched a contact, the release never arrived and the UI
+    /// stopped accepting input entirely. Acting on press removes both, at the
+    /// cost of not being able to slide off a button to cancel it - a trade worth
+    /// making for a panel whose buttons are this large.
     pub fn input(&mut self, ev: Event, state: &State, now_ms: u32) -> Action {
-        // Ignore input while a transition is running: the target that was hit is
+        // Ignore input while a transition runs: the target that was hit is
         // already leaving, and letting a second tap through mid-animation is how
         // you end up two screens deep by accident.
         if self.wipe.is_some() {
@@ -278,43 +327,37 @@ impl Ui {
 
         match ev {
             Event::Press(x, y) => {
-                if let Some(target) = self.hit(x, y) {
-                    if target == Target::Slider {
-                        self.dragging_slider = true;
-                        self.minutes = minutes_from_y(y);
-                        return Action::None;
-                    }
-                    // Immediate feedback on press; the action fires on release,
-                    // so sliding off a button still cancels it.
-                    let color = match target {
-                        Target::Inspect => C_INSPECT,
-                        Target::Force => C_FORCE,
-                        Target::Go => C_RUN,
-                        Target::Cancel => C_CANCEL,
-                        _ => self.screen.accent(),
-                    };
-                    self.ripple(x, y, color, now_ms);
-                }
-                Action::None
-            }
-            Event::Drag(_, y) => {
-                if self.dragging_slider {
-                    self.minutes = minutes_from_y(y);
-                }
-                Action::None
-            }
-            Event::Release { x, y, tap } => {
-                if self.dragging_slider {
-                    self.dragging_slider = false;
-                    return Action::None;
-                }
-                if !tap {
-                    return Action::None;
-                }
                 let Some(target) = self.hit(x, y) else { return Action::None };
+                if target == Target::Slider {
+                    self.dragging_slider = true;
+                    self.drag_started_ms = now_ms;
+                    self.minutes = minutes_from_y(y);
+                    return Action::None;
+                }
+                let color = match target {
+                    Target::Inspect => C_INSPECT,
+                    Target::Force => C_FORCE,
+                    Target::Go => C_RUN,
+                    Target::Cancel => C_CANCEL,
+                    _ => self.screen.accent(),
+                };
+                self.ripple(x, y, color, now_ms);
+
                 match target {
                     Target::Back => {
-                        self.start_wipe(Screen::Home, x, y, now_ms);
+                        // Detail belongs to the schedules list, so Back steps up
+                        // one level there rather than jumping straight home.
+                        let to = if self.screen == Screen::Detail {
+                            Screen::Inspect
+                        } else {
+                            Screen::Home
+                        };
+                        self.start_wipe(to, x, y, now_ms);
+                        Action::None
+                    }
+                    Target::Schedule(index) => {
+                        self.detail = index;
+                        self.start_wipe(Screen::Detail, x, y, now_ms);
                         Action::None
                     }
                     Target::Inspect => {
@@ -329,7 +372,6 @@ impl Ui {
                     }
                     Target::Relay(index) => {
                         self.selected = index;
-                        self.ripple(x, y, C_FORCE, now_ms);
                         Action::None
                     }
                     Target::Go => {
@@ -354,6 +396,16 @@ impl Ui {
                     Target::Slider => Action::None,
                 }
             }
+            Event::Drag(_, y) => {
+                if self.dragging_slider {
+                    self.minutes = minutes_from_y(y);
+                }
+                Action::None
+            }
+            Event::Release { .. } => {
+                self.dragging_slider = false;
+                Action::None
+            }
             Event::None => Action::None,
         }
     }
@@ -372,6 +424,22 @@ impl Ui {
                 r.active = false;
             }
         }
+        // A drag cannot outlive this. See `drag_started_ms`.
+        const DRAG_MAX_MS: u32 = 8_000;
+        if self.dragging_slider && now_ms.wrapping_sub(self.drag_started_ms) > DRAG_MAX_MS {
+            self.dragging_slider = false;
+        }
+
+        // Ease the knob toward the selected minute. A quarter of the remaining
+        // distance per frame is a critically-damped-looking approach that settles
+        // in about six frames without ever overshooting.
+        let target_q4 = y_from_minutes(self.minutes) << 4;
+        if self.knob_q4 == 0 {
+            self.knob_q4 = target_q4;
+        } else {
+            let delta = target_q4 - self.knob_q4;
+            self.knob_q4 += if delta.abs() <= 16 { delta } else { delta / 4 };
+        }
 
         // Edge-triggered; see `last_running`.
         let started = state.running && !self.last_running;
@@ -388,8 +456,16 @@ impl Ui {
         }
     }
 
+    /// True while the frame needs to keep being repainted. The countdown counts
+    /// because its progress sweep is driven from fractional time, so it moves
+    /// continuously rather than in one-second jumps.
     pub fn animating(&self) -> bool {
-        self.wipe.is_some() || self.ripples.iter().any(|r| r.active)
+        self.wipe.is_some()
+            || self.ripples.iter().any(|r| r.active)
+            || self.screen == Screen::Running
+            || self.dragging_slider
+            || (self.screen == Screen::Force
+                && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
     /// Build the frame.
@@ -467,6 +543,21 @@ impl Ui {
             }
             Screen::Inspect => {
                 self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
+                    let cy = l::SCHED_FIRST_CY + index as i32 * l::SCHED_PITCH;
+                    self.zone(
+                        Target::Schedule(index),
+                        Zone::Rect {
+                            x0: l::SCHED_X0,
+                            y0: cy - l::SCHED_HALF_H,
+                            x1: l::SCHED_X1,
+                            y1: cy + l::SCHED_HALF_H,
+                        },
+                    );
+                }
+            }
+            Screen::Detail => {
+                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
             }
             Screen::Force => {
                 self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
@@ -509,6 +600,7 @@ impl Ui {
             Screen::Inspect => self.draw_inspect(scene, state, alpha),
             Screen::Force => self.draw_force(scene, state, alpha),
             Screen::Running => self.draw_running(scene, state, alpha),
+            Screen::Detail => self.draw_detail(scene, state, alpha),
         }
     }
 
@@ -592,29 +684,31 @@ impl Ui {
 
     fn draw_inspect(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
-        scene.label(CX, 112, FontId::Caption, MUTED, alpha, Align::Center, "SCHEDULE");
+        // Plural: this page lists every schedule, it is not one schedule's page.
+        scene.label(CX, 116, FontId::Body, INK, alpha, Align::Center, "SCHEDULES");
 
-        let mut row_y = 186;
-        for index in 0..state.n_starts {
+        for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
             let s = state.starts[index];
             let on = s.enabled && s.n_entries > 0;
-            let (x0, x1) = (66, 414);
+            let cy = l::SCHED_FIRST_CY + index as i32 * l::SCHED_PITCH;
+            let (x0, x1) = (l::SCHED_X0, l::SCHED_X1);
             scene.pill(
                 x0,
-                row_y - 33,
+                cy - l::SCHED_HALF_H,
                 x1,
-                row_y + 33,
-                24,
-                if on { rgb(16, 40, 84) } else { rgb(12, 20, 34) },
+                cy + l::SCHED_HALF_H,
+                18,
+                if on { rgb(18, 44, 92) } else { rgb(13, 22, 38) },
                 alpha,
             );
-            scene.disc(x0 + 30, row_y, 9, if on { C_RUN } else { DIM }, alpha);
+            // Armed indicator.
+            scene.disc(x0 + 28, cy, 9, if on { C_RUN } else { DIM }, alpha);
 
             let mut time = Buf::<8>::new();
             let _ = write!(time, "{:02}:{:02}", s.hh, s.mm);
             scene.label(
-                x0 + 54,
-                row_y + 13,
+                x0 + 52,
+                cy + 13,
                 FontId::Body,
                 if on { INK } else { DIM },
                 alpha,
@@ -633,25 +727,110 @@ impl Ui {
                     let _ = write!(summary, "{} ZONES \u{b7} {} S", s.n_entries, total);
                 }
             }
+            // Right-aligned clear of the chevron. The row is now the full width of
+            // the panel, so this no longer has to fight the clock for space.
             scene.label(
-                x1 - 26,
-                row_y + 10,
+                x1 - 44,
+                cy + 10,
                 FontId::Caption,
                 if on { MUTED } else { DIM },
                 alpha,
                 Align::Right,
                 summary.as_str(),
             );
-            row_y += 78;
+            // Chevron, marking the row as something you can open.
+            scene.pill(x1 - 26, cy - 8, x1 - 20, cy + 1, 3, MUTED, alpha);
+            scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
         }
 
-        // Sensor line: the controller exposes several analog inputs; the first is
-        // shown as a liveness cue rather than pretending to interpret it.
+        // Sensor line. The controller reports several analog inputs; the first
+        // record is I1, which is the one wired for this installation.
         if state.n_analogs > 0 {
             let a = state.analogs[0];
             let mut line = Buf::<28>::new();
             let _ = write!(line, "{} {} / 4095", a.name.as_str(), a.level);
-            scene.label(CX, 432, FontId::Caption, DIM, alpha, Align::Center, line.as_str());
+            scene.label(CX, 452, FontId::Caption, DIM, alpha, Align::Center, line.as_str());
+        }
+    }
+
+    /// One schedule's running order: which relay, for how long, in sequence.
+    fn draw_detail(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
+        let index = self.detail.min(state.n_starts.saturating_sub(1));
+        let s = state.starts[index];
+
+        let mut title = Buf::<16>::new();
+        let _ = write!(title, "{:02}:{:02}", s.hh, s.mm);
+        scene.label(CX, 116, FontId::Display, INK, alpha, Align::Center, title.as_str());
+
+        let mut sub = Buf::<28>::new();
+        if s.enabled {
+            let _ = write!(sub, "ARMED \u{b7} {} IN ORDER", s.n_entries);
+        } else {
+            let _ = write!(sub, "DISARMED");
+        }
+        scene.label(CX, 152, FontId::Caption, MUTED, alpha, Align::Center, sub.as_str());
+
+        // Entries run top to bottom in the order the controller will drive them.
+        let rows = s.n_entries.min(l::DETAIL_MAX_ROWS);
+        for i in 0..rows {
+            let e = s.entries[i];
+            let cy = l::DETAIL_FIRST_CY + i as i32 * l::DETAIL_PITCH;
+            scene.pill(
+                l::SCHED_X0,
+                cy - 21,
+                l::SCHED_X1,
+                cy + 21,
+                18,
+                rgb(15, 34, 72),
+                alpha,
+            );
+            // Position in the running order.
+            scene.disc(l::SCHED_X0 + 26, cy, 14, rgb(30, 70, 148), alpha);
+            let mut n = Buf::<4>::new();
+            let _ = write!(n, "{}", i + 1);
+            scene.label(
+                l::SCHED_X0 + 26,
+                cy + 9,
+                FontId::Caption,
+                INK,
+                alpha,
+                Align::Center,
+                n.as_str(),
+            );
+
+            let name = state.relay_by_id(e.relay as i32).map(|r| r.name).unwrap_or(Text::EMPTY);
+            scene.label(
+                l::SCHED_X0 + 52,
+                cy + 9,
+                FontId::Caption,
+                INK,
+                alpha,
+                Align::Left,
+                name.as_str(),
+            );
+
+            let mut dur = Buf::<12>::new();
+            if e.seconds >= 60 {
+                let _ = write!(dur, "{}:{:02}", e.seconds / 60, e.seconds % 60);
+            } else {
+                let _ = write!(dur, "{} S", e.seconds);
+            }
+            scene.label(
+                l::SCHED_X1 - 22,
+                cy + 9,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Right,
+                dur.as_str(),
+            );
+        }
+
+        if s.n_entries > rows {
+            let mut more = Buf::<20>::new();
+            let _ = write!(more, "+{} MORE", s.n_entries - rows);
+            scene.label(CX, 456, FontId::Caption, DIM, alpha, Align::Center, more.as_str());
         }
     }
 
@@ -675,7 +854,8 @@ impl Ui {
             rgb(58, 36, 8),
             alpha,
         );
-        let knob_y = y_from_minutes(self.minutes);
+        // Eased position, not the raw target - see `knob_q4`.
+        let knob_y = (self.knob_q4 >> 4).clamp(l::SLIDER_TOP, l::SLIDER_BOTTOM);
         scene.pill(sx - hw, knob_y, sx + hw, l::SLIDER_BOTTOM, hw, C_FORCE, alpha);
         scene.disc(sx, knob_y, 28, rgb(252, 216, 154), alpha);
 
@@ -710,20 +890,33 @@ impl Ui {
     fn draw_running(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
 
-        // Progress ring: full circumference as track, swept portion as elapsed.
-        scene.ring(CX, CY, 224, 212, rgb(10, 52, 36), alpha);
-        let total = (self.minutes * 60).max(1);
-        let left = state.left_s.min(total);
-        let done = total - left;
-        if done > 0 {
-            let sweep = (done * 4096 / total).min(4095) as i32;
-            scene.arc(CX, CY, 224, 212, 0, sweep, C_RUN, alpha);
+        // Progress gauge. Track first, then the elapsed sweep over it.
+        //
+        // Progress is computed from fractional seconds, not whole ones: driving
+        // it from `left_s` alone moved the arc in one-second steps, which is what
+        // made it look stuttery. With the sub-second remainder folded in, and the
+        // countdown screen repainting continuously, the sweep is smooth.
+        // Closed track, drawn as a ring rather than a full-turn arc: a ring needs
+        // no angular test at all, so the cheap primitive does the cheap job.
+        scene.ring(CX, CY, l::RING_OUTER, l::RING_INNER, rgb(10, 52, 36), alpha);
+
+        let total_ms = (self.minutes * 60 * 1000).max(1);
+        let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
+        let done_ms = total_ms.saturating_sub(left_ms.min(total_ms));
+        if done_ms > 0 {
+            // Scaled down before multiplying so the product stays inside u32.
+            let denom = (total_ms / 8).max(1);
+            let span = ((done_ms / 8).min(denom) * 4096 / denom) as i32;
+            let span = span.clamp(0, 4095);
+            if span > 0 {
+                scene.arc(CX, CY, l::RING_OUTER, l::RING_INNER, 0, span, C_RUN, alpha);
+            }
         }
 
         let name = state.relay_by_id(state.active).map(|r| r.name).unwrap_or(Text::EMPTY);
         scene.label(
             CX,
-            150,
+            168,
             FontId::Body,
             INK,
             alpha,
@@ -735,17 +928,17 @@ impl Ui {
         // type on the device.
         let mut big = Buf::<10>::new();
         let _ = write!(big, "{}:{:02}", state.left_s / 60, state.left_s % 60);
-        scene.label(CX, 326, FontId::Countdown, INK, alpha, Align::Center, big.as_str());
+        scene.label(CX, 320, FontId::Countdown, INK, alpha, Align::Center, big.as_str());
+
+        let (x0, y0, x1, y1) = l::CANCEL;
+        scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CANCEL, alpha);
+        scene.label(CX, (y0 + y1) / 2 + 14, FontId::Body, INK, alpha, Align::Center, "CANCEL");
 
         if state.queued > 0 {
             let mut q = Buf::<24>::new();
             let _ = write!(q, "{} MORE QUEUED", state.queued);
-            scene.label(CX, 364, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
+            scene.label(CX, 446, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
         }
-
-        let (x0, y0, x1, y1) = l::CANCEL;
-        scene.pill(x0, y0, x1, y1, 28, C_CANCEL, alpha);
-        scene.label(CX, (y0 + y1) / 2 + 14, FontId::Body, INK, alpha, Align::Center, "CANCEL");
     }
 }
 
