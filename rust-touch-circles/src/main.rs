@@ -108,6 +108,9 @@ fn main() -> ! {
 
     let mut last_ms = now_ms();
     let mut last_drawn_second = u32::MAX;
+    let mut last_touch_ms = 0u32;
+    let mut last_beat_ms = now_ms();
+    let mut frames = 0u32;
     let mut dirty = true;
 
     loop {
@@ -117,7 +120,19 @@ fn main() -> ! {
 
         state.tick(dt);
 
-        let event = touch.poll(&mut i2c, t);
+        // Touch is polled on a fixed cadence rather than every spin of the loop.
+        // The demo could gate its reads on the CST9220 interrupt line because it
+        // only cared that a contact happened; tracking a drag needs position
+        // while the finger is held, which the interrupt does not give. Polling
+        // unthrottled, though, means an I2C transaction every few microseconds
+        // when the UI is idle - far more traffic than the controller expects, and
+        // pointless besides. TOUCH_POLL_MS is comfortably faster than a finger.
+        const TOUCH_POLL_MS: u32 = 8;
+        let mut event = touch::Event::None;
+        if t.wrapping_sub(last_touch_ms) >= TOUCH_POLL_MS {
+            last_touch_ms = t;
+            event = touch.poll(&mut i2c, t);
+        }
         if event != touch::Event::None {
             dirty = true;
         }
@@ -159,6 +174,35 @@ fn main() -> ! {
             ui.build(&mut scene, &state, t);
             lcd.present(&scene);
             dirty = false;
+            frames += 1;
+        } else {
+            // Nothing to repaint: yield a little rather than spinning flat out.
+            delay.delay_micros(600);
+        }
+
+        // Heartbeat on the serial link. Cheap, once a second, and the fastest way
+        // to tell a genuinely wedged loop from a merely static screen - a
+        // distinction that is otherwise invisible from the outside.
+        if t.wrapping_sub(last_beat_ms) >= 1_000 {
+            last_beat_ms = t;
+            esp_println::println!(
+                "up={}s fps={} screen={} touch={} run={} left={}",
+                t / 1000,
+                frames,
+                match ui.screen {
+                    ui::Screen::Home => "home",
+                    ui::Screen::Inspect => "inspect",
+                    ui::Screen::Force => "force",
+                    ui::Screen::Running => "run",
+                },
+                match touch.phase {
+                    touch::Phase::Idle => "idle",
+                    touch::Phase::Down { .. } => "down",
+                },
+                state.running as u8,
+                state.left_s,
+            );
+            frames = 0;
         }
     }
 }

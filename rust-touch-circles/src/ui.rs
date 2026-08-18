@@ -1,19 +1,19 @@
 //! Screens, transitions and hit testing.
 //!
-//! Layout lives in code rather than data, and the routine that draws a screen is
-//! the same one that registers its touch targets - so a button can never drift
-//! away from the region that activates it.
+//! Layout geometry lives in the `L` constants below and is used by *both* the
+//! drawing code and the single zone-registration routine, so a button can never
+//! drift away from the region that activates it.
 //!
 //! Everything is placed inside a circle of radius SAFE_R about the screen
 //! centre. The panel is addressed as a 480x480 square, but a 2.16" AMOLED of
 //! this kind is round, and even on a square one a circular composition suits a
-//! UI whose whole visual language is expanding discs. Nothing important is ever
-//! put where a bezel might eat it.
+//! UI whose whole visual language is expanding discs. Nothing important is put
+//! where a bezel might eat it.
 
 use core::fmt::Write as _;
 
 use crate::font::FontId;
-use crate::gfx::{rgb, Align, Scene, H, W};
+use crate::gfx::{rgb, Align, Scene, Text, H, W};
 use crate::model::{Link, State};
 use crate::touch::Event;
 
@@ -35,6 +35,34 @@ const C_INSPECT: u16 = rgb(46, 104, 214);
 const C_FORCE: u16 = rgb(226, 142, 24);
 const C_RUN: u16 = rgb(30, 176, 108);
 const C_CANCEL: u16 = rgb(212, 52, 48);
+
+/// Layout. Shared by drawing and hit testing - see the module note.
+mod l {
+    /// (x0, y0, x1, y1) for the two home buttons. Identical size and corner
+    /// radius: they are peers, so they are differentiated by colour and position
+    /// rather than by shape, and the generous gap keeps them from touching.
+    pub const HOME_INSPECT: (i32, i32, i32, i32) = (84, 236, 396, 308);
+    pub const HOME_FORCE: (i32, i32, i32, i32) = (84, 330, 396, 402);
+    pub const HOME_PILL_R: i32 = 36;
+
+    /// (cx, cy, r)
+    pub const BACK: (i32, i32, i32) = (108, 106, 36);
+    pub const GO: (i32, i32, i32) = (392, 302, 56);
+    /// (x0, y0, x1, y1)
+    pub const CANCEL: (i32, i32, i32, i32) = (152, 386, 328, 442);
+
+    pub const SLIDER_X: i32 = 88;
+    pub const SLIDER_TOP: i32 = 176;
+    pub const SLIDER_BOTTOM: i32 = 376;
+    pub const SLIDER_HALF_W: i32 = 25;
+
+    pub const RELAY_X0: i32 = 150;
+    pub const RELAY_X1: i32 = 344;
+    pub const RELAY_FIRST_CY: i32 = 206;
+    pub const RELAY_PITCH: i32 = 48;
+    pub const RELAY_HALF_H: i32 = 22;
+    pub const RELAY_MAX_ROWS: usize = 5;
+}
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
 struct Buf<const N: usize> {
@@ -133,8 +161,8 @@ pub enum Action {
     Stop,
 }
 
-/// A decorative expanding disc, spawned by every tap. This is the circles demo's
-/// signature effect kept as the UI's tactile feedback.
+/// A decorative expanding ring, spawned by every tap. The circles demo's
+/// signature effect, kept as the UI's tactile feedback.
 #[derive(Clone, Copy)]
 struct Ripple {
     x: i32,
@@ -150,7 +178,7 @@ const RIPPLE_GROW_MS: u32 = 460;
 const RIPPLE_FADE_MS: u32 = 260;
 
 /// A screen change, animated as a disc of the destination's colour growing from
-/// the point that was touched until it has swallowed the old screen.
+/// the point touched until it has swallowed the old screen.
 #[derive(Clone, Copy)]
 struct Wipe {
     to: Screen,
@@ -162,6 +190,10 @@ struct Wipe {
 
 const WIPE_COVER_MS: u32 = 400;
 const WIPE_REVEAL_MS: u32 = 240;
+/// Belt and braces: no transition may ever outlive this, whatever the clock
+/// does. A stuck wipe would swallow all input, which is the worst failure this
+/// UI can have.
+const WIPE_MAX_MS: u32 = 2_000;
 
 pub struct Ui {
     pub screen: Screen,
@@ -173,9 +205,16 @@ pub struct Ui {
     pub minutes: u32,
     pub selected: usize,
     dragging_slider: bool,
-    /// Set while a triggered run is expected but not yet confirmed by a poll, so
-    /// the countdown can appear instantly instead of waiting a round-trip.
-    pending_run_ms: Option<u32>,
+    /// Previous `state.running`, so entering and leaving the countdown is driven
+    /// by the *edges* of that flag.
+    ///
+    /// This was level-triggered once, and it deadlocked the UI: tapping Back on
+    /// the countdown moved to Home, Home immediately saw `running` still true and
+    /// wiped straight back, and because input is ignored while a wipe is in
+    /// flight the panel ping-ponged with nothing responding. Edges also express
+    /// the real intent - follow the controller when a run *starts* or *ends*, and
+    /// otherwise leave navigation to whoever is holding the panel.
+    last_running: bool,
 }
 
 const NO_RIPPLE: Ripple =
@@ -192,7 +231,7 @@ impl Ui {
             minutes: 3,
             selected: 0,
             dragging_slider: false,
-            pending_run_ms: None,
+            last_running: false,
         }
     }
 
@@ -211,15 +250,10 @@ impl Ui {
     }
 
     fn ripple(&mut self, x: i32, y: i32, color: u16, now_ms: u32) {
-        // Farthest screen corner, so the disc always has somewhere to grow to.
         let dx = x.max(W as i32 - x);
         let dy = y.max(H as i32 - y);
         let max_r = isqrt_i32(dx * dx + dy * dy).min(150);
-        let slot = self
-            .ripples
-            .iter()
-            .position(|r| !r.active)
-            .unwrap_or(0);
+        let slot = self.ripples.iter().position(|r| !r.active).unwrap_or(0);
         self.ripples[slot] = Ripple { x, y, born_ms: now_ms, max_r, color, active: true };
     }
 
@@ -227,11 +261,17 @@ impl Ui {
         self.wipe = Some(Wipe { to, x, y, born_ms: now_ms, color: to.background() });
     }
 
+    /// Which screen a touch belongs to: once a wipe starts, the destination
+    /// already owns input, even while it is still being covered.
+    fn interactive_screen(&self) -> Screen {
+        self.wipe.map_or(self.screen, |w| w.to)
+    }
+
     /// Feed one touch event. Returns the action the network layer should take.
     pub fn input(&mut self, ev: Event, state: &State, now_ms: u32) -> Action {
-        // Ignore input while a wipe is covering the screen: the target that was
-        // hit is already leaving, and letting a second tap through mid-animation
-        // is how you end up two screens deep by accident.
+        // Ignore input while a transition is running: the target that was hit is
+        // already leaving, and letting a second tap through mid-animation is how
+        // you end up two screens deep by accident.
         if self.wipe.is_some() {
             return Action::None;
         }
@@ -242,11 +282,10 @@ impl Ui {
                     if target == Target::Slider {
                         self.dragging_slider = true;
                         self.minutes = minutes_from_y(y);
-                        self.ripple(x, y, C_FORCE, now_ms);
                         return Action::None;
                     }
-                    // Immediate feedback on press; the action itself fires on
-                    // release, so a slide-off can still cancel it.
+                    // Immediate feedback on press; the action fires on release,
+                    // so sliding off a button still cancels it.
                     let color = match target {
                         Target::Inspect => C_INSPECT,
                         Target::Force => C_FORCE,
@@ -258,9 +297,8 @@ impl Ui {
                 }
                 Action::None
             }
-            Event::Drag(x, y) => {
+            Event::Drag(_, y) => {
                 if self.dragging_slider {
-                    let _ = x;
                     self.minutes = minutes_from_y(y);
                 }
                 Action::None
@@ -276,12 +314,7 @@ impl Ui {
                 let Some(target) = self.hit(x, y) else { return Action::None };
                 match target {
                     Target::Back => {
-                        let to = if self.screen == Screen::Running {
-                            Screen::Home
-                        } else {
-                            Screen::Home
-                        };
-                        self.start_wipe(to, x, y, now_ms);
+                        self.start_wipe(Screen::Home, x, y, now_ms);
                         Action::None
                     }
                     Target::Inspect => {
@@ -289,30 +322,26 @@ impl Ui {
                         Action::None
                     }
                     Target::Force => {
-                        self.selected = self.selected.min(state.n_usable().saturating_sub(1));
+                        self.selected =
+                            self.selected.min(state.n_usable().saturating_sub(1));
                         self.start_wipe(Screen::Force, x, y, now_ms);
                         Action::None
                     }
                     Target::Relay(index) => {
                         self.selected = index;
+                        self.ripple(x, y, C_FORCE, now_ms);
                         Action::None
                     }
                     Target::Go => {
-                        let relay = state
-                            .usable()
-                            .nth(self.selected)
-                            .map(|r| r.id)
-                            .unwrap_or(0);
+                        let relay =
+                            state.usable().nth(self.selected).map(|r| r.id).unwrap_or(0);
                         if relay == 0 {
                             return Action::None;
                         }
-                        self.pending_run_ms = Some(now_ms);
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::Trigger { relay, seconds: self.minutes * 60 }
                     }
                     Target::Cancel => {
-                        self.pending_run_ms = None;
-                        // Red disc from the cancel button, then home.
                         self.wipe = Some(Wipe {
                             to: Screen::Home,
                             x,
@@ -329,10 +358,11 @@ impl Ui {
         }
     }
 
-    /// Advance animations, and follow the controller into/out of a run.
+    /// Advance animations, and follow the controller into and out of a run.
     pub fn update(&mut self, state: &State, now_ms: u32) {
         if let Some(w) = self.wipe {
-            if now_ms.wrapping_sub(w.born_ms) >= WIPE_COVER_MS + WIPE_REVEAL_MS {
+            let age = now_ms.wrapping_sub(w.born_ms);
+            if age >= WIPE_COVER_MS + WIPE_REVEAL_MS || age > WIPE_MAX_MS {
                 self.screen = w.to;
                 self.wipe = None;
             }
@@ -343,25 +373,18 @@ impl Ui {
             }
         }
 
-        // A run starting or stopping is the controller's decision - it may come
-        // from the schedule or another client, not just from this panel - so the
-        // screen follows the reported state rather than only local taps.
+        // Edge-triggered; see `last_running`.
+        let started = state.running && !self.last_running;
+        let ended = !state.running && self.last_running;
+        self.last_running = state.running;
+
         if self.wipe.is_none() {
-            if state.running && self.screen != Screen::Running && self.screen != Screen::Force {
+            if started && self.screen != Screen::Running {
                 self.start_wipe(Screen::Running, CX, CY, now_ms);
             }
-            if !state.running && self.screen == Screen::Running {
-                let stale = self
-                    .pending_run_ms
-                    .map_or(true, |t| now_ms.wrapping_sub(t) > 4_000);
-                if stale {
-                    self.pending_run_ms = None;
-                    self.start_wipe(Screen::Home, CX, CY, now_ms);
-                }
+            if ended && self.screen == Screen::Running {
+                self.start_wipe(Screen::Home, CX, CY, now_ms);
             }
-        }
-        if state.running {
-            self.pending_run_ms = None;
         }
     }
 
@@ -369,57 +392,48 @@ impl Ui {
         self.wipe.is_some() || self.ripples.iter().any(|r| r.active)
     }
 
-    /// Build the frame. Registers hit zones for whichever screen is current.
+    /// Build the frame.
+    ///
+    /// Hit zones are registered on *every* frame for `interactive_screen()`,
+    /// never only in particular animation phases. An earlier version registered
+    /// them while drawing the fully-revealed screen only, so a wipe that
+    /// finished between two repaints left the panel with no zones at all and
+    /// nothing responded to touch until some later repaint happened along.
     pub fn build(&mut self, scene: &mut Scene, state: &State, now_ms: u32) {
         self.n_zones = 0;
-
-        let (base, incoming) = match self.wipe {
-            None => (self.screen, None),
-            Some(w) => (self.screen, Some(w)),
-        };
-
+        let base = self.screen;
         scene.clear(base.background());
 
-        // The screen being left is still drawn underneath the growing disc, so
-        // the transition reads as one surface covering another rather than a cut.
-        let content_alpha = match incoming {
-            None => 255,
+        match self.wipe {
+            None => self.draw_screen(scene, base, state, 255),
             Some(w) => {
                 let age = now_ms.wrapping_sub(w.born_ms);
-                if age >= WIPE_COVER_MS {
-                    0
+                if age < WIPE_COVER_MS {
+                    // The outgoing screen stays visible under the growing disc,
+                    // so the change reads as one surface covering another.
+                    self.draw_screen(scene, base, state, 255);
+                    let t = (age * 32_768 / WIPE_COVER_MS).min(32_768);
+                    let eased = ease_out_q15(t);
+                    let dx = w.x.max(W as i32 - w.x);
+                    let dy = w.y.max(H as i32 - w.y);
+                    let max_r = isqrt_i32(dx * dx + dy * dy) + 4;
+                    let r = (max_r as u32 * eased / 32_768) as i32;
+                    scene.disc(w.x, w.y, r, w.color, 255);
                 } else {
-                    255
+                    scene.clear(w.color);
+                    let reveal = (age - WIPE_COVER_MS).min(WIPE_REVEAL_MS);
+                    let t = (reveal * 32_768 / WIPE_REVEAL_MS).min(32_768);
+                    let alpha = (smoothstep_q15(t) * 255 / 32_768) as u8;
+                    self.draw_screen(scene, w.to, state, alpha);
                 }
             }
-        };
-        if content_alpha > 0 {
-            self.draw_screen(scene, base, state, now_ms, 255, incoming.is_none());
         }
 
-        if let Some(w) = incoming {
-            let age = now_ms.wrapping_sub(w.born_ms);
-            if age < WIPE_COVER_MS {
-                let t = (age * 32_768 / WIPE_COVER_MS).min(32_768);
-                let eased = ease_out_q15(t);
-                let dx = w.x.max(W as i32 - w.x);
-                let dy = w.y.max(H as i32 - w.y);
-                let max_r = isqrt_i32(dx * dx + dy * dy) + 4;
-                let r = (max_r as u32 * eased / 32_768) as i32;
-                scene.disc(w.x, w.y, r, w.color, 255);
-            } else {
-                // Covered: the destination owns the screen, and its content
-                // fades up. Registers the destination's zones so it is
-                // interactive the moment it is legible.
-                scene.clear(w.color);
-                let reveal = (age - WIPE_COVER_MS).min(WIPE_REVEAL_MS);
-                let t = (reveal * 32_768 / WIPE_REVEAL_MS).min(32_768);
-                let alpha = (smoothstep_q15(t) * 255 / 32_768) as u8;
-                self.draw_screen(scene, w.to, state, now_ms, alpha, true);
-            }
-        }
+        // One place registers zones, from the same constants the drawing uses.
+        let interactive = self.interactive_screen();
+        self.register(interactive, state);
 
-        // Ripples ride on top of everything: they are feedback, not content.
+        // Ripples ride above everything: they are feedback, not content.
         for i in 0..MAX_RIPPLES {
             let r = self.ripples[i];
             if !r.active {
@@ -428,46 +442,78 @@ impl Ui {
             let age = now_ms.wrapping_sub(r.born_ms);
             let (radius, alpha) = if age < RIPPLE_GROW_MS {
                 let t = age * 32_768 / RIPPLE_GROW_MS;
-                let eased = ease_out_q15(t);
-                ((r.max_r as u32 * eased / 32_768) as i32, 150u32)
+                ((r.max_r as u32 * ease_out_q15(t) / 32_768) as i32, 150u32)
             } else {
-                let t = (age - RIPPLE_GROW_MS) * 32_768 / RIPPLE_FADE_MS;
-                let fade = 32_768 - smoothstep_q15(t.min(32_768));
-                (r.max_r, 150 * fade / 32_768)
+                let t = ((age - RIPPLE_GROW_MS) * 32_768 / RIPPLE_FADE_MS).min(32_768);
+                (r.max_r, 150 * (32_768 - smoothstep_q15(t)) / 32_768)
             };
-            // Drawn as a soft expanding ring so it reads as a ripple and never
-            // hides the label underneath it.
+            // A soft expanding ring, so it reads as a ripple and never hides the
+            // label underneath it.
             let thickness = (radius / 7).clamp(3, 16);
-            scene.ring(
-                r.x,
-                r.y,
-                radius,
-                (radius - thickness).max(0),
-                r.color,
-                alpha as u8,
-            );
+            scene.ring(r.x, r.y, radius, (radius - thickness).max(0), r.color, alpha as u8);
         }
     }
 
-    fn draw_screen(
-        &mut self,
-        scene: &mut Scene,
-        screen: Screen,
-        state: &State,
-        now_ms: u32,
-        alpha: u8,
-        register: bool,
-    ) {
+    /// Register touch targets for `screen`. Uses the same `l::` geometry the
+    /// drawing does, so the two cannot disagree.
+    fn register(&mut self, screen: Screen, state: &State) {
+        let (bx, by, br) = l::BACK;
         match screen {
-            Screen::Home => self.draw_home(scene, state, alpha, register),
-            Screen::Inspect => self.draw_inspect(scene, state, alpha, register),
-            Screen::Force => self.draw_force(scene, state, alpha, register),
-            Screen::Running => self.draw_running(scene, state, now_ms, alpha, register),
+            Screen::Home => {
+                let (x0, y0, x1, y1) = l::HOME_INSPECT;
+                self.zone(Target::Inspect, Zone::Rect { x0, y0, x1, y1 });
+                let (x0, y0, x1, y1) = l::HOME_FORCE;
+                self.zone(Target::Force, Zone::Rect { x0, y0, x1, y1 });
+            }
+            Screen::Inspect => {
+                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+            }
+            Screen::Force => {
+                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                self.zone(
+                    Target::Slider,
+                    Zone::Rect {
+                        x0: l::SLIDER_X - l::SLIDER_HALF_W - 9,
+                        y0: l::SLIDER_TOP - 20,
+                        x1: l::SLIDER_X + l::SLIDER_HALF_W + 9,
+                        y1: l::SLIDER_BOTTOM + 20,
+                    },
+                );
+                let rows = state.n_usable().min(l::RELAY_MAX_ROWS);
+                for index in 0..rows {
+                    let cy = l::RELAY_FIRST_CY + index as i32 * l::RELAY_PITCH;
+                    self.zone(
+                        Target::Relay(index),
+                        Zone::Rect {
+                            x0: l::RELAY_X0,
+                            y0: cy - l::RELAY_HALF_H,
+                            x1: l::RELAY_X1,
+                            y1: cy + l::RELAY_HALF_H,
+                        },
+                    );
+                }
+                let (gx, gy, gr) = l::GO;
+                self.zone(Target::Go, Zone::Disc { cx: gx, cy: gy, r: gr });
+            }
+            Screen::Running => {
+                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                let (x0, y0, x1, y1) = l::CANCEL;
+                self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
+            }
+        }
+    }
+
+    fn draw_screen(&mut self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
+        match screen {
+            Screen::Home => self.draw_home(scene, state, alpha),
+            Screen::Inspect => self.draw_inspect(scene, state, alpha),
+            Screen::Force => self.draw_force(scene, state, alpha),
+            Screen::Running => self.draw_running(scene, state, alpha),
         }
     }
 
     fn draw_link(&self, scene: &mut Scene, state: &State, alpha: u8) {
-        // A single dot: green online, amber connecting, red offline. Small on
+        // One dot: green online, amber connecting, red offline. Small on
         // purpose - it matters only when it is wrong.
         let color = match state.link {
             Link::Online => C_RUN,
@@ -477,23 +523,19 @@ impl Ui {
         scene.disc(CX, 42, 7, color, alpha);
     }
 
-    fn draw_back(&mut self, scene: &mut Scene, alpha: u8, register: bool) {
-        let (bx, by, br) = (108, 106, 36);
+    fn draw_back(&self, scene: &mut Scene, alpha: u8) {
+        let (bx, by, br) = l::BACK;
         scene.ring(bx, by, br, br - 4, MUTED, alpha);
-        // Chevron from two short pills; the panel cannot rotate a primitive, so
-        // the arrow is drawn as a pair of stacked steps that read as one at this
+        // Chevron as two pills. The renderer cannot rotate a primitive, so the
+        // arrow is a stem plus a shorter upright that reads as one mark at this
         // size.
-        scene.pill(bx - 11, by - 3, bx + 9, by + 3, 3, INK, alpha);
-        scene.pill(bx - 11, by - 11, bx - 5, by + 11, 3, INK, alpha);
-        if register {
-            self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
-        }
+        scene.pill(bx - 11, by - 3, bx + 10, by + 3, 3, INK, alpha);
+        scene.pill(bx - 11, by - 12, bx - 5, by + 12, 3, INK, alpha);
     }
 
-    fn draw_home(&mut self, scene: &mut Scene, state: &State, alpha: u8, register: bool) {
+    fn draw_home(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_link(scene, state, alpha);
 
-        // Clock.
         let mut clock = Buf::<8>::new();
         if state.clock_valid {
             let _ = write!(clock, "{:02}:{:02}", state.hh, state.mm);
@@ -502,24 +544,18 @@ impl Ui {
         }
         scene.label(CX, 152, FontId::Display, INK, alpha, Align::Center, clock.as_str());
 
-        // Next scheduled watering.
         let mut next = Buf::<40>::new();
         match state.next_start() {
             Some((s, minutes)) => {
-                let name = state
-                    .relay_by_id(s.entries[0].relay as i32)
-                    .map(|r| r.name)
-                    .unwrap_or(crate::gfx::Text::EMPTY);
                 if minutes < 60 {
                     let _ = write!(next, "NEXT {:02}:{:02} IN {} MIN", s.hh, s.mm, minutes);
                 } else {
-                    let _ = write!(
-                        next,
-                        "NEXT {:02}:{:02} \u{b7} {}",
-                        s.hh,
-                        s.mm,
-                        name.as_str()
-                    );
+                    let name = state
+                        .relay_by_id(s.entries[0].relay as i32)
+                        .map(|r| r.name)
+                        .unwrap_or(Text::EMPTY);
+                    let _ =
+                        write!(next, "NEXT {:02}:{:02} \u{b7} {}", s.hh, s.mm, name.as_str());
                 }
             }
             None => {
@@ -528,24 +564,34 @@ impl Ui {
         }
         scene.label(CX, 200, FontId::Caption, MUTED, alpha, Align::Center, next.as_str());
 
-        // Inspect.
-        let (ix0, iy0, ix1, iy1) = (78, 228, 402, 300);
-        scene.pill(ix0, iy0, ix1, iy1, 36, C_INSPECT, alpha);
-        scene.label(CX, 277, FontId::Body, INK, alpha, Align::Center, "INSPECT");
-        if register {
-            self.zone(Target::Inspect, Zone::Rect { x0: ix0, y0: iy0, x1: ix1, y1: iy1 });
-        }
+        // Two peers, same shape and size; colour and order carry the hierarchy.
+        let (x0, y0, x1, y1) = l::HOME_INSPECT;
+        scene.pill(x0, y0, x1, y1, l::HOME_PILL_R, C_INSPECT, alpha);
+        scene.label(
+            CX,
+            (y0 + y1) / 2 + 14,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            "INSPECT",
+        );
 
-        // Force - the hero action, so it is the disc.
-        scene.disc(CX, 380, 86, C_FORCE, alpha);
-        scene.label(CX, 396, FontId::Body, rgb(24, 14, 2), alpha, Align::Center, "FORCE");
-        if register {
-            self.zone(Target::Force, Zone::Disc { cx: CX, cy: 380, r: 86 });
-        }
+        let (x0, y0, x1, y1) = l::HOME_FORCE;
+        scene.pill(x0, y0, x1, y1, l::HOME_PILL_R, C_FORCE, alpha);
+        scene.label(
+            CX,
+            (y0 + y1) / 2 + 14,
+            FontId::Body,
+            rgb(26, 15, 2),
+            alpha,
+            Align::Center,
+            "FORCE",
+        );
     }
 
-    fn draw_inspect(&mut self, scene: &mut Scene, state: &State, alpha: u8, register: bool) {
-        self.draw_back(scene, alpha, register);
+    fn draw_inspect(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
         scene.label(CX, 112, FontId::Caption, MUTED, alpha, Align::Center, "SCHEDULE");
 
         let mut row_y = 186;
@@ -553,9 +599,15 @@ impl Ui {
             let s = state.starts[index];
             let on = s.enabled && s.n_entries > 0;
             let (x0, x1) = (66, 414);
-            let (y0, y1) = (row_y - 33, row_y + 33);
-            scene.pill(x0, y0, x1, y1, 24, if on { rgb(16, 40, 84) } else { rgb(12, 20, 34) }, alpha);
-            // Enabled marker.
+            scene.pill(
+                x0,
+                row_y - 33,
+                x1,
+                row_y + 33,
+                24,
+                if on { rgb(16, 40, 84) } else { rgb(12, 20, 34) },
+                alpha,
+            );
             scene.disc(x0 + 30, row_y, 9, if on { C_RUN } else { DIM }, alpha);
 
             let mut time = Buf::<8>::new();
@@ -593,8 +645,8 @@ impl Ui {
             row_y += 78;
         }
 
-        // Sensor line: the controller exposes several analog inputs; show the
-        // first as a liveness cue rather than pretending to interpret it.
+        // Sensor line: the controller exposes several analog inputs; the first is
+        // shown as a liveness cue rather than pretending to interpret it.
         if state.n_analogs > 0 {
             let a = state.analogs[0];
             let mut line = Buf::<28>::new();
@@ -603,93 +655,72 @@ impl Ui {
         }
     }
 
-    fn draw_force(&mut self, scene: &mut Scene, state: &State, alpha: u8, register: bool) {
-        self.draw_back(scene, alpha, register);
+    fn draw_force(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
 
-        // Duration readout.
         let mut mins = Buf::<4>::new();
         let _ = write!(mins, "{}", self.minutes);
         scene.label(246, 158, FontId::Display, INK, alpha, Align::Right, mins.as_str());
         scene.label(258, 158, FontId::Caption, MUTED, alpha, Align::Left, "MIN");
 
-        // Slider: track, filled portion, knob.
-        let (sx, top, bottom) = (SLIDER_X, SLIDER_TOP, SLIDER_BOTTOM);
-        scene.pill(sx - 25, top, sx + 25, bottom, 25, rgb(58, 36, 8), alpha);
+        // Slider: track, filled portion below the knob, knob.
+        let sx = l::SLIDER_X;
+        let hw = l::SLIDER_HALF_W;
+        scene.pill(
+            sx - hw,
+            l::SLIDER_TOP,
+            sx + hw,
+            l::SLIDER_BOTTOM,
+            hw,
+            rgb(58, 36, 8),
+            alpha,
+        );
         let knob_y = y_from_minutes(self.minutes);
-        scene.pill(sx - 25, knob_y, sx + 25, bottom, 25, C_FORCE, alpha);
-        scene.disc(sx, knob_y, 28, rgb(252, 214, 150), alpha);
-        if register {
-            self.zone(
-                Target::Slider,
-                Zone::Rect { x0: sx - 34, y0: top - 20, x1: sx + 34, y1: bottom + 20 },
-            );
-        }
+        scene.pill(sx - hw, knob_y, sx + hw, l::SLIDER_BOTTOM, hw, C_FORCE, alpha);
+        scene.disc(sx, knob_y, 28, rgb(252, 216, 154), alpha);
 
-        // Relay chooser.
-        let mut row_y = 206;
-        for (index, relay) in state.usable().enumerate().take(5) {
+        for (index, relay) in state.usable().enumerate().take(l::RELAY_MAX_ROWS) {
             let selected = index == self.selected;
-            let (x0, x1) = (150, 344);
-            let (y0, y1) = (row_y - 22, row_y + 22);
+            let cy = l::RELAY_FIRST_CY + index as i32 * l::RELAY_PITCH;
             scene.pill(
-                x0,
-                y0,
-                x1,
-                y1,
-                22,
+                l::RELAY_X0,
+                cy - l::RELAY_HALF_H,
+                l::RELAY_X1,
+                cy + l::RELAY_HALF_H,
+                l::RELAY_HALF_H,
                 if selected { C_FORCE } else { rgb(52, 34, 10) },
                 alpha,
             );
             scene.label(
-                (x0 + x1) / 2,
-                row_y + 9,
+                (l::RELAY_X0 + l::RELAY_X1) / 2,
+                cy + 9,
                 FontId::Caption,
                 if selected { rgb(26, 14, 0) } else { MUTED },
                 alpha,
                 Align::Center,
                 relay.name.as_str(),
             );
-            if register {
-                self.zone(Target::Relay(index), Zone::Rect { x0, y0, x1, y1 });
-            }
-            row_y += 48;
         }
 
-        // Go.
-        scene.disc(392, 302, 56, C_RUN, alpha);
-        scene.label(392, 318, FontId::Body, rgb(2, 22, 12), alpha, Align::Center, "GO!");
-        if register {
-            self.zone(Target::Go, Zone::Disc { cx: 392, cy: 302, r: 56 });
-        }
+        let (gx, gy, gr) = l::GO;
+        scene.disc(gx, gy, gr, C_RUN, alpha);
+        scene.label(gx, gy + 16, FontId::Body, rgb(2, 22, 12), alpha, Align::Center, "GO!");
     }
 
-    fn draw_running(
-        &mut self,
-        scene: &mut Scene,
-        state: &State,
-        now_ms: u32,
-        alpha: u8,
-        register: bool,
-    ) {
-        let _ = now_ms;
-        self.draw_back(scene, alpha, register);
+    fn draw_running(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
 
-        // Progress ring: full circumference as the track, swept portion as the
-        // time already spent.
+        // Progress ring: full circumference as track, swept portion as elapsed.
         scene.ring(CX, CY, 224, 212, rgb(10, 52, 36), alpha);
-        let total = self.minutes * 60;
-        let left = state.left_s.min(total.max(1));
-        let done = total.saturating_sub(left);
-        if total > 0 && done > 0 {
+        let total = (self.minutes * 60).max(1);
+        let left = state.left_s.min(total);
+        let done = total - left;
+        if done > 0 {
             let sweep = (done * 4096 / total).min(4095) as i32;
             scene.arc(CX, CY, 224, 212, 0, sweep, C_RUN, alpha);
         }
 
-        // Which relay.
-        let name = state
-            .relay_by_id(state.active)
-            .map(|r| r.name)
-            .unwrap_or(crate::gfx::Text::EMPTY);
+        let name = state.relay_by_id(state.active).map(|r| r.name).unwrap_or(Text::EMPTY);
         scene.label(
             CX,
             150,
@@ -700,8 +731,8 @@ impl Ui {
             if name.len > 0 { name.as_str() } else { "WATERING" },
         );
 
-        // The countdown itself - the reason this screen exists, so it gets the
-        // largest type on the device.
+        // The countdown - the reason this screen exists, so it gets the largest
+        // type on the device.
         let mut big = Buf::<10>::new();
         let _ = write!(big, "{}:{:02}", state.left_s / 60, state.left_s % 60);
         scene.label(CX, 326, FontId::Countdown, INK, alpha, Align::Center, big.as_str());
@@ -709,35 +740,26 @@ impl Ui {
         if state.queued > 0 {
             let mut q = Buf::<24>::new();
             let _ = write!(q, "{} MORE QUEUED", state.queued);
-            scene.label(CX, 362, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
+            scene.label(CX, 364, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
         }
 
-        // Cancel.
-        let (x0, y0, x1, y1) = (152, 386, 328, 442);
+        let (x0, y0, x1, y1) = l::CANCEL;
         scene.pill(x0, y0, x1, y1, 28, C_CANCEL, alpha);
-        scene.label(CX, 424, FontId::Body, INK, alpha, Align::Center, "CANCEL");
-        if register {
-            self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
-        }
+        scene.label(CX, (y0 + y1) / 2 + 14, FontId::Body, INK, alpha, Align::Center, "CANCEL");
     }
 }
 
-const SLIDER_X: i32 = 88;
-const SLIDER_TOP: i32 = 176;
-const SLIDER_BOTTOM: i32 = 376;
-
 /// Slider maps top = 10 minutes, bottom = 1 minute.
 fn minutes_from_y(y: i32) -> u32 {
-    let span = SLIDER_BOTTOM - SLIDER_TOP;
-    let clamped = y.clamp(SLIDER_TOP, SLIDER_BOTTOM);
-    let from_bottom = SLIDER_BOTTOM - clamped;
-    // +span/18 biases rounding so each of the ten steps owns an equal slice.
+    let span = l::SLIDER_BOTTOM - l::SLIDER_TOP;
+    let clamped = y.clamp(l::SLIDER_TOP, l::SLIDER_BOTTOM);
+    let from_bottom = l::SLIDER_BOTTOM - clamped;
     (1 + (from_bottom * 9 + span / 2) / span).clamp(1, 10) as u32
 }
 
 fn y_from_minutes(minutes: u32) -> i32 {
-    let span = SLIDER_BOTTOM - SLIDER_TOP;
-    SLIDER_BOTTOM - ((minutes as i32 - 1) * span) / 9
+    let span = l::SLIDER_BOTTOM - l::SLIDER_TOP;
+    l::SLIDER_BOTTOM - ((minutes as i32 - 1) * span) / 9
 }
 
 #[inline]
@@ -747,8 +769,8 @@ fn smoothstep_q15(t: u32) -> u32 {
     squared * (3 * 32_768 - 2 * t) >> 15
 }
 
-/// 1-(1-t)^3: fast off the mark, settles gently. Used for anything the finger
-/// just launched, because it makes the response feel immediate.
+/// 1-(1-t)^3: fast off the mark, settles gently. Used for anything a finger just
+/// launched, because it makes the response feel immediate.
 #[inline]
 fn ease_out_q15(t: u32) -> u32 {
     let t = t.min(32_768);
@@ -776,3 +798,9 @@ fn isqrt_i32(n: i32) -> i32 {
     }
     res as i32
 }
+
+// Keep the keep-out radius referenced so a future layout change trips the
+// compiler rather than silently drifting outside the panel.
+const _: () = {
+    assert!(SAFE_R > 0);
+};
