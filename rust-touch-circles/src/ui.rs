@@ -1041,6 +1041,7 @@ impl Ui {
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
         }
+        self.draw_power(scene, screen, state, alpha);
     }
 
     fn draw_bubbles(&self, scene: &mut Scene, screen: Screen, now_ms: u32, alpha: u8) {
@@ -1080,7 +1081,57 @@ impl Ui {
             Link::Connecting => C_FORCE,
             Link::Offline => C_CANCEL,
         };
-        scene.disc(CX, 42, 7, color, alpha);
+        let x = if !state.external_power && state.battery_percent.is_some() {
+            CX - 48
+        } else {
+            CX
+        };
+        scene.disc(x, 42, 7, color, alpha);
+    }
+
+    fn draw_power(&self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
+        let Some(percent) = state.battery_percent.filter(|_| !state.external_power) else {
+            return;
+        };
+        const X0: i32 = CX - 32;
+        const X1: i32 = CX + 28;
+        const Y0: i32 = 28;
+        const Y1: i32 = 55;
+        let color = if percent <= 15 {
+            C_CANCEL
+        } else if percent <= 30 {
+            C_FORCE
+        } else {
+            C_RUN
+        };
+        // A proper battery silhouette with a small terminal. The inset uses
+        // the page background, leaving a crisp three-pixel outline.
+        scene.pill(X1 - 1, Y0 + 8, X1 + 7, Y1 - 8, 3, MUTED, alpha);
+        scene.pill(X0, Y0, X1, Y1, 7, MUTED, alpha);
+        scene.pill(
+            X0 + 3,
+            Y0 + 3,
+            X1 - 3,
+            Y1 - 3,
+            4,
+            screen.background(),
+            alpha,
+        );
+        let fill_right = X0 + 4 + (X1 - X0 - 8) * percent as i32 / 100;
+        if fill_right > X0 + 4 {
+            scene.pill(X0 + 4, Y0 + 4, fill_right, Y1 - 4, 3, color, alpha);
+        }
+        let mut value = Buf::<6>::new();
+        let _ = write!(value, "{percent}%");
+        scene.label(
+            (X0 + X1) / 2,
+            49,
+            FontId::Micro,
+            INK,
+            alpha,
+            Align::Center,
+            value.as_str(),
+        );
     }
 
     fn draw_back(&self, scene: &mut Scene, alpha: u8) {

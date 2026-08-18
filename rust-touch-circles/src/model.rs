@@ -117,6 +117,9 @@ pub struct State {
     pub controller_ips: [[u8; 4]; MAX_CONTROLLERS],
     pub controller_online: [bool; MAX_CONTROLLERS],
     pub n_controllers: usize,
+    /// Local AXP2101 power state; unrelated to controller snapshots.
+    pub external_power: bool,
+    pub battery_percent: Option<u8>,
 
     /// Controller-reported wall clock, ticked locally between polls.
     pub hh: u8,
@@ -149,6 +152,8 @@ impl State {
             controller_ips: [[0; 4]; MAX_CONTROLLERS],
             controller_online: [false; MAX_CONTROLLERS],
             n_controllers: 0,
+            external_power: true,
+            battery_percent: None,
             hh: 0,
             mm: 0,
             ss: 0,
@@ -230,10 +235,13 @@ impl State {
         best
     }
 
-    /// Time-derived progress for a schedule whose daily window contains the
-    /// controller clock. Returns (elapsed, total, active entry, entry elapsed).
-    /// This is intentionally independent of UI state, so it also works after a
-    /// panel reboot; `run:` remains the authority for the persistent run badge.
+    /// Progress for a schedule the controller is actually executing. Returns
+    /// (elapsed, total, active entry, entry elapsed).
+    ///
+    /// The active relay and its reported `left` value are authoritative while a
+    /// valve is energized; clock arithmetic is used only during an inter-relay
+    /// gap, when `run` is false but `queued` remains non-zero. This avoids both
+    /// false RUNNING bars for a skipped schedule and drift from delayed starts.
     pub fn schedule_progress(&self, index: usize) -> Option<(u32, u32, usize, u32)> {
         let schedule = self.starts.get(index)?;
         if !self.clock_valid || !schedule.enabled || schedule.n_entries == 0 {
@@ -243,25 +251,54 @@ impl State {
         if total == 0 || total >= 24 * 60 * 60 {
             return None;
         }
+        let visibly_active = self.running && (self.left_s > 0 || self.queued > 0);
+        if visibly_active {
+            let entries = &schedule.entries[..schedule.n_entries];
+            let active = entries
+                .iter()
+                .enumerate()
+                .find(|(i, entry)| {
+                    entry.relay as i32 == self.active
+                        && schedule.n_entries - *i - 1 == self.queued as usize
+                })
+                .map(|(i, _)| i)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .position(|entry| entry.relay as i32 == self.active)
+                })?;
+            let duration = schedule.entries[active].seconds as u32;
+            let entry_elapsed = duration.saturating_sub(self.left_s.min(duration));
+            let before = schedule.entries[..active]
+                .iter()
+                .map(|entry| entry.seconds as u32)
+                .sum::<u32>()
+                + schedule.gap_s as u32 * active as u32;
+            return Some((before + entry_elapsed, total, active, entry_elapsed));
+        }
+        if self.queued == 0 {
+            return None;
+        }
+
+        // A sequence can briefly have no energized relay during `relaygap`.
+        // Locate that gap from the shared controller clock, then require its
+        // remaining-entry count to agree with the dump before displaying it.
         let now = self.hh as u32 * 3600 + self.mm as u32 * 60 + self.ss as u32;
         let start = schedule.hh as u32 * 3600 + schedule.mm as u32 * 60;
         let elapsed = (now + 24 * 60 * 60 - start) % (24 * 60 * 60);
-        if elapsed >= total {
-            return None;
-        }
         let mut before = 0;
         for (entry, item) in schedule.entries[..schedule.n_entries].iter().enumerate() {
             let end = before + item.seconds as u32;
-            if elapsed < end {
-                return Some((elapsed, total, entry, elapsed - before));
-            }
             let gap_end = end
                 + if entry + 1 < schedule.n_entries {
                     schedule.gap_s as u32
                 } else {
                     0
                 };
-            if elapsed < gap_end {
+            if elapsed >= end
+                && elapsed < gap_end
+                && schedule.n_entries - entry - 1 == self.queued as usize
+            {
                 return Some((elapsed, total, entry, item.seconds as u32));
             }
             before = gap_end;

@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DIGITS: &str = "0123456789:";
+const MICRO_CHARS: &str = "0123456789:%";
 // Relay names come from the irrigation controller's config and are arbitrary
 // Swedish free text, so the body sizes need the full latin set plus åäö.
 const BODY: &str = "\
@@ -41,7 +42,7 @@ const FONTS: &[FontSpec] = &[
         ident: "MICRO",
         ttf: "Barlow-SemiBold.ttf",
         px: 20.0,
-        charset: DIGITS,
+        charset: MICRO_CHARS,
     },
     // Hero countdown digits.
     // Sized so "12:34" fits inside the countdown ring's inner radius with room

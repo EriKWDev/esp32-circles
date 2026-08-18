@@ -126,6 +126,7 @@ fn main() -> ! {
 
     let mut state = State::new();
     seed_mock(&mut state);
+    let _ = update_power_state(&mut i2c, &mut state);
 
     // Bring up the radio. A failure here is not fatal: the panel stays usable on
     // its bench model, with the link dot showing red, which is far better than a
@@ -181,6 +182,7 @@ fn main() -> ! {
     let mut build_us = 0u32;
     let mut present_us = 0u32;
     let mut last_poll_ms = 0u32;
+    let mut last_power_poll_ms = now_ms();
     let mut dirty = true;
 
     loop {
@@ -189,6 +191,15 @@ fn main() -> ! {
         last_ms = t;
 
         state.tick(dt);
+
+        // PMIC state changes slowly. Two tiny I2C reads every two seconds keep
+        // battery UI current without putting bus traffic in the frame path.
+        if t.wrapping_sub(last_power_poll_ms) >= 2_000 {
+            last_power_poll_ms = t;
+            if update_power_state(&mut i2c, &mut state) {
+                dirty = true;
+            }
+        }
 
         // Touch is polled on a fixed cadence rather than every spin of the loop.
         // The demo could gate its reads on the CST9220 interrupt line because it
@@ -360,6 +371,31 @@ fn pmic_set_aldo3(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
         let nv = if on { v[0] | 4 } else { v[0] & !4 };
         let _ = i2c.write(PMIC_ADDR, &[LDO_ONOFF_CTRL0, nv]);
     }
+}
+
+/// Read AXP2101 VBUS presence and its hardware fuel-gauge percentage.
+/// Returns whether visible state changed; failed reads retain the last sample.
+fn update_power_state(i2c: &mut I2c<'_, esp_hal::Blocking>, state: &mut State) -> bool {
+    const STATUS1: u8 = 0x00;
+    const BAT_PERCENT: u8 = 0xa4;
+    let mut status = [0u8; 2];
+    let mut percent = [0u8; 1];
+    if i2c.write_read(PMIC_ADDR, &[STATUS1], &mut status).is_err()
+        || i2c
+            .write_read(PMIC_ADDR, &[BAT_PERCENT], &mut percent)
+            .is_err()
+    {
+        return false;
+    }
+    // XPowersLib's AXP2101 definitions: VBUS is valid when STATUS1[5]
+    // is set and STATUS2[3] is clear; STATUS1[3] reports battery presence.
+    let external_power = status[0] & (1 << 5) != 0 && status[1] & (1 << 3) == 0;
+    let battery_percent = (status[0] & (1 << 3) != 0 && percent[0] <= 100).then_some(percent[0]);
+    let changed =
+        state.external_power != external_power || state.battery_percent != battery_percent;
+    state.external_power = external_power;
+    state.battery_percent = battery_percent;
+    changed
 }
 
 fn apply_local_trigger(state: &mut State, relay: u8, seconds: u32) {
