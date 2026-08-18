@@ -1041,7 +1041,12 @@ impl Ui {
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
         }
-        self.draw_power(scene, screen, state, alpha);
+        // The battery is drawn by draw_home, not here. It occupies the top centre
+        // strip, which every other screen uses for its own heading - the minutes
+        // readout on Force, the schedule time on Detail - so drawing it globally
+        // put two things in one place. Home is also where it belongs: it is
+        // ambient status, not something you consult mid-task, and the link dot it
+        // shares that strip with is already Home-only.
     }
 
     fn draw_bubbles(&self, scene: &mut Scene, screen: Screen, now_ms: u32, alpha: u8) {
@@ -1213,7 +1218,10 @@ impl Ui {
     }
 
     fn draw_home(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        // Status chrome. These two share the top centre strip and the link dot
+        // shifts aside when a battery is present, so they are drawn together.
         self.draw_link(scene, state, alpha);
+        self.draw_power(scene, Screen::Home, state, alpha);
         self.draw_cog(scene, alpha);
 
         let mut clock = Buf::<8>::new();
