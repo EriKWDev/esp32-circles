@@ -38,7 +38,9 @@ struct FontSpec {
 // for one.
 const FONTS: &[FontSpec] = &[
     // Hero countdown digits.
-    FontSpec { ident: "COUNTDOWN", ttf: "Barlow-Bold.ttf", px: 176.0, charset: DIGITS },
+    // Sized so "12:34" fits inside the countdown ring's inner radius with room
+    // to spare, while staying the largest type on the device.
+    FontSpec { ident: "COUNTDOWN", ttf: "Barlow-Bold.ttf", px: 146.0, charset: DIGITS },
     // Clock, and the big in-button words (GO!, CANCEL).
     FontSpec { ident: "DISPLAY", ttf: "Barlow-Bold.ttf", px: 76.0, charset: "0123456789:!ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ " },
     // Menu labels and relay names.

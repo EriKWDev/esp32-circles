@@ -48,20 +48,32 @@ mod l {
     /// (cx, cy, r). The panel is square with rounded corners, not round, so this
     /// sits properly in the top-left instead of being pulled toward the middle.
     pub const BACK: (i32, i32, i32) = (58, 58, 40);
-    /// Clear of the relay list, which ends at RELAY_X1.
-    pub const GO: (i32, i32, i32) = (406, 302, 58);
+    /// Clear of the relay list, vertically centred on the panel.
+    pub const GO: (i32, i32, i32) = (406, 240, 50);
     /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
     /// inside RING_INNER, so it never crosses the ring.
-    pub const CANCEL: (i32, i32, i32, i32) = (150, 356, 330, 418);
+    pub const CANCEL: (i32, i32, i32, i32) = (152, 316, 328, 374);
 
     /// Progress ring: a closed circle, swept clockwise from 12 o'clock.
-    pub const RING_OUTER: i32 = 232;
-    pub const RING_INNER: i32 = 218;
+    ///
+    /// Pulled in from 232/218 so the ring clears the Back button in the corner -
+    /// at 232 the band ran straight through it, since Back's disc reaches to
+    /// within 217 px of centre. Everything else on this screen is composed inside
+    /// RING_INNER and vertically balanced about the panel centre.
+    pub const RING_OUTER: i32 = 208;
+    pub const RING_INNER: i32 = 194;
+    /// Baselines for the countdown stack.
+    pub const RUN_NAME_BASELINE: i32 = 152;
+    pub const RUN_DIGITS_BASELINE: i32 = 284;
 
     pub const SLIDER_X: i32 = 88;
-    pub const SLIDER_TOP: i32 = 176;
-    pub const SLIDER_BOTTOM: i32 = 376;
+    pub const SLIDER_TOP: i32 = 148;
+    pub const SLIDER_BOTTOM: i32 = 404;
     pub const SLIDER_HALF_W: i32 = 25;
+    /// Duration range, in minutes. 20 steps over 256 px of travel is about 13 px
+    /// per minute - still comfortably larger than a fingertip's precision.
+    pub const MINUTES_MIN: u32 = 1;
+    pub const MINUTES_MAX: u32 = 20;
 
     pub const RELAY_X0: i32 = 150;
     pub const RELAY_X1: i32 = 344;
@@ -345,12 +357,12 @@ impl Ui {
 
                 match target {
                     Target::Back => {
-                        // Detail belongs to the schedules list, so Back steps up
-                        // one level there rather than jumping straight home.
-                        let to = if self.screen == Screen::Detail {
-                            Screen::Inspect
-                        } else {
-                            Screen::Home
+                        // Back steps up one level, to wherever you came from,
+                        // rather than always jumping home.
+                        let to = match self.screen {
+                            Screen::Detail => Screen::Inspect,
+                            Screen::Running => Screen::Force,
+                            _ => Screen::Home,
                         };
                         self.start_wipe(to, x, y, now_ms);
                         Action::None
@@ -384,8 +396,12 @@ impl Ui {
                         Action::Trigger { relay, seconds: self.minutes * 60 }
                     }
                     Target::Cancel => {
+                        // Back to Force, where the run was started - cancelling is
+                        // usually a prelude to starting a different one, and being
+                        // thrown out to Home means navigating back in every time.
+                        // The red disc is the cancel's own feedback.
                         self.wipe = Some(Wipe {
-                            to: Screen::Home,
+                            to: Screen::Force,
                             x,
                             y,
                             born_ms: now_ms,
@@ -916,7 +932,7 @@ impl Ui {
         let name = state.relay_by_id(state.active).map(|r| r.name).unwrap_or(Text::EMPTY);
         scene.label(
             CX,
-            168,
+            l::RUN_NAME_BASELINE,
             FontId::Body,
             INK,
             alpha,
@@ -928,7 +944,15 @@ impl Ui {
         // type on the device.
         let mut big = Buf::<10>::new();
         let _ = write!(big, "{}:{:02}", state.left_s / 60, state.left_s % 60);
-        scene.label(CX, 320, FontId::Countdown, INK, alpha, Align::Center, big.as_str());
+        scene.label(
+            CX,
+            l::RUN_DIGITS_BASELINE,
+            FontId::Countdown,
+            INK,
+            alpha,
+            Align::Center,
+            big.as_str(),
+        );
 
         let (x0, y0, x1, y1) = l::CANCEL;
         scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CANCEL, alpha);
@@ -937,22 +961,27 @@ impl Ui {
         if state.queued > 0 {
             let mut q = Buf::<24>::new();
             let _ = write!(q, "{} MORE QUEUED", state.queued);
-            scene.label(CX, 446, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
+            scene.label(CX, 402, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
         }
     }
 }
 
-/// Slider maps top = 10 minutes, bottom = 1 minute.
+/// Slider maps bottom = MINUTES_MIN, top = MINUTES_MAX.
 fn minutes_from_y(y: i32) -> u32 {
     let span = l::SLIDER_BOTTOM - l::SLIDER_TOP;
+    let steps = (l::MINUTES_MAX - l::MINUTES_MIN) as i32;
     let clamped = y.clamp(l::SLIDER_TOP, l::SLIDER_BOTTOM);
     let from_bottom = l::SLIDER_BOTTOM - clamped;
-    (1 + (from_bottom * 9 + span / 2) / span).clamp(1, 10) as u32
+    // Round to nearest step, so each minute owns an equal slice of travel.
+    let step = (from_bottom * steps + span / 2) / span;
+    (l::MINUTES_MIN as i32 + step).clamp(l::MINUTES_MIN as i32, l::MINUTES_MAX as i32) as u32
 }
 
 fn y_from_minutes(minutes: u32) -> i32 {
     let span = l::SLIDER_BOTTOM - l::SLIDER_TOP;
-    l::SLIDER_BOTTOM - ((minutes as i32 - 1) * span) / 9
+    let steps = (l::MINUTES_MAX - l::MINUTES_MIN).max(1) as i32;
+    let step = (minutes.clamp(l::MINUTES_MIN, l::MINUTES_MAX) - l::MINUTES_MIN) as i32;
+    l::SLIDER_BOTTOM - (step * span) / steps
 }
 
 #[inline]
