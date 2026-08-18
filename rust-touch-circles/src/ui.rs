@@ -38,6 +38,13 @@ const C_RUN: u16 = rgb(30, 176, 108);
 const C_CANCEL: u16 = rgb(212, 52, 48);
 const C_INFO: u16 = rgb(142, 104, 226);
 
+/// Controllers can report `run=1` for one final poll after the countdown and
+/// queue have both drained. Treat that as completed activity everywhere; the
+/// separate acknowledgment latch decides whether its 00:00 badge remains.
+fn run_is_active(state: &State) -> bool {
+    state.running && (state.left_s > 0 || state.queued > 0)
+}
+
 /// Layout. Shared by drawing and hit testing - see the module note.
 mod l {
     /// (x0, y0, x1, y1) for the two home buttons. Identical size and corner
@@ -319,6 +326,8 @@ pub struct Ui {
     /// Screen that opened the full timer; makes Back a true stack pop.
     run_return: Screen,
     run_finished: bool,
+    /// A completed run remains available as a 00:00 badge until DONE is used.
+    completion_pending: bool,
     dragging_list: bool,
     list_start_y: i32,
     list_start_offset: i32,
@@ -361,6 +370,7 @@ impl Ui {
             observed_run_total_s: 0,
             run_return: Screen::Force,
             run_finished: false,
+            completion_pending: false,
             dragging_list: false,
             list_start_y: 0,
             list_start_offset: 0,
@@ -518,7 +528,7 @@ impl Ui {
                     }
                     Target::RunningBadge => {
                         self.run_return = self.screen;
-                        self.run_finished = false;
+                        self.run_finished = self.completion_pending;
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::None
                     }
@@ -563,6 +573,7 @@ impl Ui {
                             born_ms: now_ms,
                             color: if self.run_finished { C_RUN } else { C_CANCEL },
                         });
+                        self.completion_pending = false;
                         if self.run_finished {
                             Action::None
                         } else {
@@ -706,17 +717,34 @@ impl Ui {
             self.observed_run_total_s = 0;
         }
 
-        // Ending a run may dismiss the dedicated timer, but starting one never
-        // steals navigation. The persistent badge is the explicit way back in.
-        let ended = !state.running && self.last_running;
-        self.last_running = state.running;
-        if ended && self.screen == Screen::Running {
-            self.run_finished = true;
+        // `last_running` tracks user-visible activity, rather than the raw run
+        // bit: some controller revisions leave that bit asserted for one final
+        // poll after both the countdown and queue have drained.
+        let active = run_is_active(state);
+        let started = active && !self.last_running;
+        let ended = !active && self.last_running;
+        self.last_running = active;
+        if started {
+            self.run_finished = false;
+            self.completion_pending = false;
         }
-        // Some controller revisions leave `run:1` asserted for the final poll
-        // even though the last countdown has reached zero. With no queued step,
-        // zero remaining time is the user-visible completion boundary.
-        if self.screen == Screen::Running && state.left_s == 0 && state.queued == 0 {
+        if ended {
+            self.run_finished = true;
+            self.completion_pending = true;
+            // Let completion grow out of the same top-right affordance the user
+            // would tap, and remember the current page so DONE pops back to it.
+            if self.interactive_screen() != Screen::Running && self.wipe.is_none() {
+                self.run_return = self.screen;
+                let (x, y, _) = l::RUN_BADGE;
+                self.start_wipe(Screen::Running, x, y, now_ms);
+            }
+        } else if self.screen == Screen::Running
+            && state.left_s == 0
+            && state.queued == 0
+            && state.running
+        {
+            // Also cover booting directly into the controller's stale final
+            // poll while the timer page is already open.
             self.run_finished = true;
         }
     }
@@ -773,7 +801,9 @@ impl Ui {
         // Keep the compact run affordance out of wipe frames. Popping it onto
         // the outgoing screen on the same frame a manual run starts made it
         // briefly intersect the expanding transition disc.
-        if state.running && self.interactive_screen() != Screen::Running {
+        if (run_is_active(state) || self.completion_pending)
+            && self.interactive_screen() != Screen::Running
+        {
             self.draw_running_badge(scene, state, 255);
         }
 
@@ -980,7 +1010,7 @@ impl Ui {
                 self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
             }
         }
-        if state.running && screen != Screen::Running {
+        if (run_is_active(state) || self.completion_pending) && screen != Screen::Running {
             let (cx, cy, r) = l::RUN_BADGE;
             self.zone(Target::RunningBadge, Zone::Disc { cx, cy, r });
         }
