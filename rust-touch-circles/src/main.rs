@@ -29,15 +29,15 @@ use esp_hal::{
     i2c::master::{Config as I2cConfig, I2c},
     main,
     spi::{
-        master::{Config as SpiConfig, Spi},
         Mode,
+        master::{Config as SpiConfig, Spi},
     },
     time::Rate,
     timer::systimer::{SystemTimer, Unit},
 };
 
 use display::Display;
-use gfx::{Scene, STRIPE_BYTES};
+use gfx::{STRIPE_BYTES, Scene};
 use model::{Link, State};
 use touch::Touch;
 use ui::{Action, Ui};
@@ -47,6 +47,7 @@ const PMIC_ADDR: u8 = 0x34;
 /// How often to re-read `/api/dump`. Only honoured while the UI is idle, so a
 /// transfer can never interrupt an animation - see `net`.
 const POLL_INTERVAL_MS: u32 = 2_000;
+const INFO_POLL_INTERVAL_MS: u32 = 500;
 
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
@@ -64,9 +65,8 @@ fn now_ms() -> u32 {
 
 #[main]
 fn main() -> ! {
-    let p = esp_hal::init(
-        esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()),
-    );
+    let p =
+        esp_hal::init(esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max()));
     let delay = Delay::new();
 
     let mut i2c = I2c::new(
@@ -167,7 +167,7 @@ fn main() -> ! {
             }
             // Smoothstep, so it arrives gently instead of stopping dead.
             let t = elapsed * 32_768 / BOOT_FADE_MS;
-            let eased = (t * t >> 15) * (3 * 32_768 - 2 * t) >> 15;
+            let eased = (((t * t) >> 15) * (3 * 32_768 - 2 * t)) >> 15;
             lcd.set_brightness((eased * 255 / 32_768) as u8);
         }
         lcd.set_brightness(255);
@@ -207,13 +207,18 @@ fn main() -> ! {
             dirty = true;
         }
         match ui.input(event, &state, t) {
-            Action::Trigger { relay, seconds } => {
+            Action::Trigger {
+                relay,
+                controller,
+                remote_relay,
+                seconds,
+            } => {
                 // Applied locally first so the countdown starts on the same frame
                 // as the tap; the controller confirms it on the next poll, and its
                 // reply is authoritative if the two ever disagree.
                 apply_local_trigger(&mut state, relay, seconds);
                 if let Some(net) = net.as_mut() {
-                    net.trigger(relay, seconds, t);
+                    net.trigger(controller, remote_relay, seconds, t);
                 }
                 dirty = true;
             }
@@ -240,9 +245,12 @@ fn main() -> ! {
         // comparatively rare dump requests.
         if let Some(n) = net.as_mut() {
             n.step(t);
-            state.link = if n.ip.is_some() && n.last_error.is_none() {
+            if n.service(&mut state, t) {
+                dirty = true;
+            }
+            state.link = if n.ip.is_some() {
                 Link::Online
-            } else if n.is_connected() || n.ip.is_some() {
+            } else if n.is_connected() {
                 Link::Connecting
             } else {
                 Link::Offline
@@ -252,10 +260,12 @@ fn main() -> ! {
             // never stutter a transition. present() already blocks ~20 ms a frame,
             // which is longer than smoltcp likes to be ignored, so this is the
             // conservative placement until the stack is pumped between stripes.
-            if !ui.animating()
-                && n.ip.is_some()
-                && t.wrapping_sub(last_poll_ms) >= POLL_INTERVAL_MS
-            {
+            let poll_interval = if ui.screen == ui::Screen::Info {
+                INFO_POLL_INTERVAL_MS
+            } else {
+                POLL_INTERVAL_MS
+            };
+            if !ui.animating() && n.ip.is_some() && t.wrapping_sub(last_poll_ms) >= poll_interval {
                 last_poll_ms = t;
                 n.poll_dump(&mut state, t);
                 dirty = true;
@@ -304,7 +314,7 @@ fn main() -> ! {
             // transfer is the limit and the CPU is keeping up.
             let n = frames.max(1);
             esp_println::println!(
-                "up={}s fps={} build={}us present={}us screen={} touch={} run={} left={}",
+                "up={}s fps={} build={}us present={}us screen={} touch={} run={} left={} ip={:?} neterr={:?}",
                 t / 1000,
                 frames,
                 build_us / n,
@@ -315,6 +325,7 @@ fn main() -> ! {
                     ui::Screen::Force => "force",
                     ui::Screen::Running => "run",
                     ui::Screen::Detail => "detail",
+                    ui::Screen::Info => "info",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
@@ -322,6 +333,8 @@ fn main() -> ! {
                 },
                 state.running as u8,
                 state.left_s,
+                state.local_ip,
+                net.as_ref().and_then(|n| n.last_error),
             );
             frames = 0;
             build_us = 0;
@@ -340,7 +353,10 @@ fn pmic_set_aldo3(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
             let _ = i2c.write(PMIC_ADDR, &[LDO_VOL2_CTRL, (v[0] & 0xe0) | 28]);
         }
     }
-    if i2c.write_read(PMIC_ADDR, &[LDO_ONOFF_CTRL0], &mut v).is_ok() {
+    if i2c
+        .write_read(PMIC_ADDR, &[LDO_ONOFF_CTRL0], &mut v)
+        .is_ok()
+    {
         let nv = if on { v[0] | 4 } else { v[0] & !4 };
         let _ = i2c.write(PMIC_ADDR, &[LDO_ONOFF_CTRL0, nv]);
     }
@@ -352,7 +368,10 @@ fn apply_local_trigger(state: &mut State, relay: u8, seconds: u32) {
     for r in state.relays.iter_mut() {
         r.on = false;
     }
-    if let Some(r) = state.relays[..state.n_relays].iter_mut().find(|r| r.id == relay) {
+    if let Some(r) = state.relays[..state.n_relays]
+        .iter_mut()
+        .find(|r| r.id == relay)
+    {
         r.on = true;
     }
     state.running = true;
@@ -377,6 +396,8 @@ fn seed_mock(state: &mut State) {
     for (index, (name, id, port)) in NAMES.iter().enumerate() {
         state.relays[index] = Relay {
             id: *id,
+            remote_id: *id,
+            controller: 0,
             port: *port,
             enabled: true,
             on: false,
@@ -390,11 +411,17 @@ fn seed_mock(state: &mut State) {
         enabled: true,
         hh: 6,
         mm: 0,
-        entries: [Entry { relay: 0, seconds: 0 }; model::MAX_ENTRIES],
+        entries: [Entry {
+            relay: 0,
+            seconds: 0,
+        }; model::MAX_ENTRIES],
         n_entries: 0,
     };
     for (index, seconds) in [300u16, 240, 180, 240, 300].iter().enumerate() {
-        first.entries[index] = Entry { relay: index as u8 + 1, seconds: *seconds };
+        first.entries[index] = Entry {
+            relay: index as u8 + 1,
+            seconds: *seconds,
+        };
         first.n_entries += 1;
     }
     state.starts[0] = first;
@@ -403,7 +430,10 @@ fn seed_mock(state: &mut State) {
         enabled: false,
         hh: 12,
         mm: 0,
-        entries: [Entry { relay: 0, seconds: 0 }; model::MAX_ENTRIES],
+        entries: [Entry {
+            relay: 0,
+            seconds: 0,
+        }; model::MAX_ENTRIES],
         n_entries: 0,
     };
     state.starts[2] = StartTime {
@@ -411,7 +441,10 @@ fn seed_mock(state: &mut State) {
         enabled: true,
         hh: 21,
         mm: 30,
-        entries: [Entry { relay: 2, seconds: 600 }; model::MAX_ENTRIES],
+        entries: [Entry {
+            relay: 2,
+            seconds: 600,
+        }; model::MAX_ENTRIES],
         n_entries: 2,
     };
     state.n_starts = 3;
@@ -425,10 +458,9 @@ fn seed_mock(state: &mut State) {
     };
     state.n_analogs = 1;
 
-    state.hh = 14;
-    state.mm = 32;
-    state.ss = 0;
-    state.clock_valid = true;
+    // A plausible fake clock is worse than no clock. The first successful
+    // /api/dump seeds the real controller time, then State::tick advances it.
+    state.clock_valid = false;
     state.link = Link::Connecting;
     state.max_run_s = 3600;
 }

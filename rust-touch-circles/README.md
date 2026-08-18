@@ -1,8 +1,27 @@
 # Touch Circles (bare-metal Rust)
 
 Minimal, low-latency firmware for the Waveshare ESP32-C6-Touch-AMOLED-2.16.
-It uses no RTOS, allocator, LVGL, Wi-Fi, or Bluetooth. Touch is read over a
-400 kHz I2C link, and the CO5300 panel runs at 80 MHz quad-SPI using SPI2/GDMA.
+It uses no LVGL or framebuffer. Touch is read over a 400 kHz I2C link, the
+CO5300 panel runs at 80 MHz quad-SPI using SPI2/GDMA, and a small RTOS-backed
+Wi-Fi stack polls the Rainbird ACAP API with HTTP Digest authentication.
+
+## Network configuration
+
+Create an ignored `wifi.txt` beside `Cargo.toml` before building:
+
+```text
+ssid=your-wifi-name
+pass=your-wifi-password
+host=192.168.4.200
+user=axis-admin-user
+apipass=axis-admin-password
+```
+
+For multiple Rainbird ACAPs, make `host` a comma-separated list. Relay,
+schedule, and analog data are consolidated in the normal UI; controller
+addresses and reachability appear only on INFO. The same Axis credentials are
+used for every configured host. Environment variables `WIFI_SSID`, `WIFI_PASS`,
+`RB_HOST`, `RB_USER`, and `RB_PASS` provide the equivalent CI configuration.
 
 ## Install and flash
 

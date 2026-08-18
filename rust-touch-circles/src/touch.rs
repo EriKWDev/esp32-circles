@@ -24,7 +24,9 @@ const TAP_SLOP: i32 = 18;
 pub enum Phase {
     Idle,
     /// Finger is down; `moved` distinguishes a drag from a tap in progress.
-    Down { moved: bool },
+    Down {
+        moved: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,7 +37,11 @@ pub enum Event {
     /// Finger moved while down.
     Drag(i32, i32),
     /// Finger lifted. `tap` is true when it never travelled beyond the slop.
-    Release { x: i32, y: i32, tap: bool },
+    Release {
+        x: i32,
+        y: i32,
+        tap: bool,
+    },
 }
 
 pub struct Touch {
@@ -86,11 +92,15 @@ impl Touch {
             }
         }
 
-        if let Phase::Down { moved } = self.phase {
-            if now_ms.wrapping_sub(self.last_report_ms) >= RELEASE_MS {
-                self.phase = Phase::Idle;
-                return Event::Release { x: self.x, y: self.y, tap: !moved };
-            }
+        if let Phase::Down { moved } = self.phase
+            && now_ms.wrapping_sub(self.last_report_ms) >= RELEASE_MS
+        {
+            self.phase = Phase::Idle;
+            return Event::Release {
+                x: self.x,
+                y: self.y,
+                tap: !moved,
+            };
         }
         Event::None
     }

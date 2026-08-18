@@ -23,7 +23,6 @@ pub struct Font {
     pub glyphs: &'static [Glyph],
     pub coverage: &'static [u8],
     pub ascent: i32,
-    pub line_height: i32,
     pub px: i32,
 }
 
@@ -59,6 +58,7 @@ include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FontId {
+    Icon,
     Countdown,
     Display,
     Body,
@@ -68,6 +68,7 @@ pub enum FontId {
 impl FontId {
     pub fn get(self) -> &'static Font {
         match self {
+            FontId::Icon => &ICON,
             FontId::Countdown => &COUNTDOWN,
             FontId::Display => &DISPLAY,
             FontId::Body => &BODY,

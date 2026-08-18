@@ -13,15 +13,14 @@
 //! text regardless, and a genuinely smooth edge is worth the few cycles on the
 //! dozen or so boundary pixels per shape per row.
 
+#![allow(clippy::too_many_arguments)] // primitive APIs mirror their geometry directly
+
 use crate::font::FontId;
 
 pub const W: usize = 480;
 pub const H: usize = 480;
 pub const STRIPE_ROWS: usize = 32;
 pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
-
-/// Fixed-point fraction used for geometry, matching the demo's Q4 convention.
-pub const Q: i32 = 16;
 
 pub const MAX_PRIMS: usize = 64;
 /// Longest string any single text primitive can hold. Relay names are the only
@@ -128,7 +127,7 @@ fn fill_span(row: &mut [u8], left: i32, right: i32, color: u16) {
     // unchecked - but it is bounded by `limit` derived from the row's own length,
     // not from W, so a wrong W or a short slice cannot turn it into a stray write.
     let limit = row.len() / 2;
-    while x + 1 <= right && x + 1 < limit {
+    while x < right && x + 1 < limit {
         // x is even here, so row + x*2 is 4-byte aligned within the stripe.
         unsafe { (row.as_mut_ptr().add(x * 2) as *mut u32).write(pair) };
         x += 2;
@@ -180,12 +179,15 @@ fn isqrt(mut n: u32) -> u32 {
 
 #[derive(Clone, Copy)]
 pub struct Text {
-    pub bytes: [u8; MAX_TEXT],
+    bytes: [u8; MAX_TEXT],
     pub len: u8,
 }
 
 impl Text {
-    pub const EMPTY: Text = Text { bytes: [0; MAX_TEXT], len: 0 };
+    pub const EMPTY: Text = Text {
+        bytes: [0; MAX_TEXT],
+        len: 0,
+    };
 
     pub fn new(s: &str) -> Self {
         let mut t = Text::EMPTY;
@@ -211,7 +213,11 @@ impl Text {
     }
 
     pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+        // SAFETY: `Text::new` copies only through a UTF-8 char boundary and
+        // `EMPTY` has length zero. The bytes are private and therefore can only
+        // be produced by those constructors; avoiding validation here matters because
+        // the scanline renderer asks for this slice on every glyph row.
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len as usize]) }
     }
 }
 
@@ -225,11 +231,32 @@ pub enum Align {
 #[derive(Clone, Copy)]
 pub enum Prim {
     /// Filled circle. Doubles as the screen-covering transition wipe.
-    Disc { cx: i32, cy: i32, r: i32, color: u16, alpha: u8 },
+    Disc {
+        cx: i32,
+        cy: i32,
+        r: i32,
+        color: u16,
+        alpha: u8,
+    },
     /// Annulus - selection rings and the countdown progress track.
-    Ring { cx: i32, cy: i32, r_outer: i32, r_inner: i32, color: u16, alpha: u8 },
+    Ring {
+        cx: i32,
+        cy: i32,
+        r_outer: i32,
+        r_inner: i32,
+        color: u16,
+        alpha: u8,
+    },
     /// Rounded rectangle / pill. `r` is the corner radius.
-    Pill { x0: i32, y0: i32, x1: i32, y1: i32, r: i32, color: u16, alpha: u8 },
+    Pill {
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        r: i32,
+        color: u16,
+        alpha: u8,
+    },
     /// A circular-arc wedge of a ring, for the countdown progress sweep.
     /// `from`/`to` are in turns, Q12 (0..4096 == full circle), measured
     /// clockwise from 12 o'clock.
@@ -244,12 +271,13 @@ pub enum Prim {
         alpha: u8,
     },
     Label {
+        /// Left edge of the laid-out text. Alignment is resolved once when the
+        /// scene is built, never redundantly on each covered scanline.
         x: i32,
         baseline: i32,
         font: FontId,
         color: u16,
         alpha: u8,
-        align: Align,
         text: Text,
     },
 }
@@ -260,11 +288,21 @@ pub struct Scene {
     pub background: u16,
 }
 
-const NOTHING: Prim = Prim::Disc { cx: 0, cy: 0, r: 0, color: 0, alpha: 0 };
+const NOTHING: Prim = Prim::Disc {
+    cx: 0,
+    cy: 0,
+    r: 0,
+    color: 0,
+    alpha: 0,
+};
 
 impl Scene {
     pub fn new() -> Self {
-        Self { prims: [NOTHING; MAX_PRIMS], len: 0, background: 0 }
+        Self {
+            prims: [NOTHING; MAX_PRIMS],
+            len: 0,
+            background: 0,
+        }
     }
 
     pub fn clear(&mut self, background: u16) {
@@ -281,15 +319,36 @@ impl Scene {
     }
 
     pub fn disc(&mut self, cx: i32, cy: i32, r: i32, color: u16, alpha: u8) {
-        self.push(Prim::Disc { cx, cy, r, color, alpha });
+        self.push(Prim::Disc {
+            cx,
+            cy,
+            r,
+            color,
+            alpha,
+        });
     }
 
     pub fn ring(&mut self, cx: i32, cy: i32, r_outer: i32, r_inner: i32, color: u16, alpha: u8) {
-        self.push(Prim::Ring { cx, cy, r_outer, r_inner, color, alpha });
+        self.push(Prim::Ring {
+            cx,
+            cy,
+            r_outer,
+            r_inner,
+            color,
+            alpha,
+        });
     }
 
     pub fn pill(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, r: i32, color: u16, alpha: u8) {
-        self.push(Prim::Pill { x0, y0, x1, y1, r, color, alpha });
+        self.push(Prim::Pill {
+            x0,
+            y0,
+            x1,
+            y1,
+            r,
+            color,
+            alpha,
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -304,7 +363,16 @@ impl Scene {
         color: u16,
         alpha: u8,
     ) {
-        self.push(Prim::Arc { cx, cy, r_outer, r_inner, from, to, color, alpha });
+        self.push(Prim::Arc {
+            cx,
+            cy,
+            r_outer,
+            r_inner,
+            from,
+            to,
+            color,
+            alpha,
+        });
     }
 
     pub fn label(
@@ -317,14 +385,19 @@ impl Scene {
         align: Align,
         text: &str,
     ) {
+        let text = Text::new(text);
+        let x = match align {
+            Align::Left => x,
+            Align::Center => x - font.get().width(text.as_str()) / 2,
+            Align::Right => x - font.get().width(text.as_str()),
+        };
         self.push(Prim::Label {
             x,
             baseline,
             font,
             color,
             alpha,
-            align,
-            text: Text::new(text),
+            text,
         });
     }
 }
@@ -427,11 +500,10 @@ fn ring_row(row: &mut [u8], cx: i32, outer_q: i32, inner_q: i32, color: u16, alp
 /// 65 entries with linear interpolation is accurate to about 0.05% - far finer
 /// than a pixel at this panel's radii.
 static SIN_Q12: [i16; 65] = [
-    0, 100, 201, 301, 401, 501, 601, 700, 799, 897, 995, 1092, 1189, 1285, 1380,
-    1474, 1567, 1660, 1751, 1842, 1931, 2019, 2106, 2191, 2276, 2359, 2440, 2520,
-    2598, 2675, 2751, 2824, 2896, 2967, 3035, 3102, 3166, 3229, 3290, 3349, 3406,
-    3461, 3513, 3564, 3612, 3659, 3703, 3745, 3784, 3822, 3857, 3889, 3920, 3948,
-    3973, 3996, 4017, 4036, 4052, 4065, 4076, 4085, 4091, 4095, 4096,
+    0, 100, 201, 301, 401, 501, 601, 700, 799, 897, 995, 1092, 1189, 1285, 1380, 1474, 1567, 1660,
+    1751, 1842, 1931, 2019, 2106, 2191, 2276, 2359, 2440, 2520, 2598, 2675, 2751, 2824, 2896, 2967,
+    3035, 3102, 3166, 3229, 3290, 3349, 3406, 3461, 3513, 3564, 3612, 3659, 3703, 3745, 3784, 3822,
+    3857, 3889, 3920, 3948, 3973, 3996, 4017, 4036, 4052, 4065, 4076, 4085, 4091, 4095, 4096,
 ];
 
 /// sin of a Q12 turn (0..4096 == full circle), returned in Q12.
@@ -591,15 +663,10 @@ fn label_row(
     font: FontId,
     color: u16,
     alpha: u8,
-    align: Align,
     text: &str,
 ) {
     let f = font.get();
-    let mut pen = match align {
-        Align::Left => x,
-        Align::Center => x - f.width(text) / 2,
-        Align::Right => x - f.width(text),
-    };
+    let mut pen = x;
     for ch in text.chars() {
         let Some(g) = f.glyph(ch) else {
             pen += f.px / 3;
@@ -644,24 +711,61 @@ pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
                 continue;
             }
             match *p {
-                Prim::Disc { cx, cy, r, color, alpha } => {
+                Prim::Disc {
+                    cx,
+                    cy,
+                    r,
+                    color,
+                    alpha,
+                } => {
                     let e = half_extent_q(r << 4, (y - cy) << 4);
                     circle_row(row, cx, e, color, alpha);
                 }
-                Prim::Ring { cx, cy, r_outer, r_inner, color, alpha } => {
+                Prim::Ring {
+                    cx,
+                    cy,
+                    r_outer,
+                    r_inner,
+                    color,
+                    alpha,
+                } => {
                     let dy = (y - cy) << 4;
                     let o = half_extent_q(r_outer << 4, dy);
                     let i = half_extent_q(r_inner << 4, dy);
                     ring_row(row, cx, o, i, color, alpha);
                 }
-                Prim::Arc { cx, cy, r_outer, r_inner, from, to, color, alpha } => {
+                Prim::Arc {
+                    cx,
+                    cy,
+                    r_outer,
+                    r_inner,
+                    from,
+                    to,
+                    color,
+                    alpha,
+                } => {
                     arc_row(row, cx, cy, y, r_outer, r_inner, from, to, color, alpha);
                 }
-                Prim::Pill { x0, y0: py0, x1, y1, r, color, alpha } => {
+                Prim::Pill {
+                    x0,
+                    y0: py0,
+                    x1,
+                    y1,
+                    r,
+                    color,
+                    alpha,
+                } => {
                     pill_row(row, y, x0, py0, x1, y1, r, color, alpha);
                 }
-                Prim::Label { x, baseline, font, color, alpha, align, ref text } => {
-                    label_row(row, y, x, baseline, font, color, alpha, align, text.as_str());
+                Prim::Label {
+                    x,
+                    baseline,
+                    font,
+                    color,
+                    alpha,
+                    ref text,
+                } => {
+                    label_row(row, y, x, baseline, font, color, alpha, text.as_str());
                 }
             }
         }

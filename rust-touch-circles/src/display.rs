@@ -11,7 +11,7 @@ use esp_hal::{
     time::Duration,
 };
 
-use crate::gfx::{self, Scene, H, STRIPE_BYTES, STRIPE_ROWS, W};
+use crate::gfx::{self, H, STRIPE_BYTES, STRIPE_ROWS, Scene, W};
 
 pub struct Display<'d> {
     spi: Option<SpiDma<'d, esp_hal::Blocking>>,
@@ -21,7 +21,11 @@ pub struct Display<'d> {
 
 impl<'d> Display<'d> {
     pub fn new(spi: SpiDma<'d, esp_hal::Blocking>, tx: DmaTxBuf, spare: DmaTxBuf) -> Self {
-        Self { spi: Some(spi), tx: Some(tx), spare: Some(spare) }
+        Self {
+            spi: Some(spi),
+            tx: Some(tx),
+            spare: Some(spare),
+        }
     }
 
     #[inline]

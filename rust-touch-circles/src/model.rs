@@ -10,14 +10,20 @@
 
 use crate::gfx::Text;
 
-pub const MAX_RELAYS: usize = 8;
-pub const MAX_STARTS: usize = 4;
+pub const MAX_RELAYS: usize = 24;
+pub const MAX_STARTS: usize = 12;
 pub const MAX_ENTRIES: usize = 12;
-pub const MAX_ANALOGS: usize = 8;
+pub const MAX_ANALOGS: usize = 24;
+pub const MAX_CONTROLLERS: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct Relay {
+    /// Consolidated id used by schedules and the UI.
     pub id: u8,
+    /// Controller-local routing identity; deliberately not shown outside INFO.
+    pub remote_id: u8,
+    pub controller: u8,
+    #[allow(dead_code)] // retained for wiring diagnostics / future INFO detail
     pub port: u8,
     pub enabled: bool,
     pub on: bool,
@@ -25,8 +31,15 @@ pub struct Relay {
 }
 
 impl Relay {
-    const EMPTY: Relay =
-        Relay { id: 0, port: 0, enabled: false, on: false, name: Text::EMPTY };
+    const EMPTY: Relay = Relay {
+        id: 0,
+        remote_id: 0,
+        controller: 0,
+        port: 0,
+        enabled: false,
+        on: false,
+        name: Text::EMPTY,
+    };
 }
 
 #[derive(Clone, Copy)]
@@ -51,7 +64,10 @@ impl StartTime {
         enabled: false,
         hh: 0,
         mm: 0,
-        entries: [Entry { relay: 0, seconds: 0 }; MAX_ENTRIES],
+        entries: [Entry {
+            relay: 0,
+            seconds: 0,
+        }; MAX_ENTRIES],
         n_entries: 0,
     };
 
@@ -66,13 +82,18 @@ impl StartTime {
 
 #[derive(Clone, Copy)]
 pub struct Analog {
+    #[allow(dead_code)] // stable hardware identity even when names are edited
     pub port: u8,
     pub level: u16,
     pub name: Text,
 }
 
 impl Analog {
-    const EMPTY: Analog = Analog { port: 0, level: 0, name: Text::EMPTY };
+    const EMPTY: Analog = Analog {
+        port: 0,
+        level: 0,
+        name: Text::EMPTY,
+    };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +110,10 @@ pub struct State {
     pub n_starts: usize,
     pub analogs: [Analog; MAX_ANALOGS],
     pub n_analogs: usize,
+    pub local_ip: Option<[u8; 4]>,
+    pub controller_ips: [[u8; 4]; MAX_CONTROLLERS],
+    pub controller_online: [bool; MAX_CONTROLLERS],
+    pub n_controllers: usize,
 
     /// Controller-reported wall clock, ticked locally between polls.
     pub hh: u8,
@@ -117,6 +142,10 @@ impl State {
             n_starts: 0,
             analogs: [Analog::EMPTY; MAX_ANALOGS],
             n_analogs: 0,
+            local_ip: None,
+            controller_ips: [[0; 4]; MAX_CONTROLLERS],
+            controller_online: [false; MAX_CONTROLLERS],
+            n_controllers: 0,
             hh: 0,
             mm: 0,
             ss: 0,
@@ -133,7 +162,9 @@ impl State {
     }
 
     pub fn relay_by_id(&self, id: i32) -> Option<&Relay> {
-        self.relays[..self.n_relays].iter().find(|r| r.id as i32 == id)
+        self.relays[..self.n_relays]
+            .iter()
+            .find(|r| r.id as i32 == id)
     }
 
     /// Relays that can actually be driven, in config order.
@@ -184,8 +215,12 @@ impl State {
                 continue;
             }
             let at = s.hh as u32 * 60 + s.mm as u32;
-            let delta = if at >= now { at - now } else { at + 24 * 60 - now };
-            if best.map_or(true, |(_, d)| delta < d) {
+            let delta = if at >= now {
+                at - now
+            } else {
+                at + 24 * 60 - now
+            };
+            if best.is_none_or(|(_, d)| delta < d) {
                 best = Some((s, delta));
             }
         }
@@ -235,7 +270,9 @@ pub fn parse_dump(body: &str, state: &mut State) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some(key) = line.split(':').next() else { continue };
+        let Some(key) = line.split(':').next() else {
+            continue;
+        };
         match key {
             "r" => {
                 if n_relays < MAX_RELAYS {
@@ -243,6 +280,8 @@ pub fn parse_dump(body: &str, state: &mut State) {
                     if id != 0 {
                         state.relays[n_relays] = Relay {
                             id,
+                            remote_id: id,
+                            controller: 0,
                             port: num(line, 2).unwrap_or(0),
                             enabled: num::<u8>(line, 3).unwrap_or(0) != 0,
                             on: num::<u8>(line, 4).unwrap_or(0) != 0,
@@ -259,7 +298,10 @@ pub fn parse_dump(body: &str, state: &mut State) {
                         enabled: num::<u8>(line, 2).unwrap_or(0) != 0,
                         hh: num(line, 3).unwrap_or(0),
                         mm: num(line, 4).unwrap_or(0),
-                        entries: [Entry { relay: 0, seconds: 0 }; MAX_ENTRIES],
+                        entries: [Entry {
+                            relay: 0,
+                            seconds: 0,
+                        }; MAX_ENTRIES],
                         n_entries: 0,
                     };
                     n_starts += 1;
@@ -271,11 +313,11 @@ pub fn parse_dump(body: &str, state: &mut State) {
                 let seconds: u16 = num(line, 3).unwrap_or(0);
                 // The start id is repeated on every entry line, so entries can
                 // be attached without tracking which s: line came before.
-                if let Some(s) = state.starts[..n_starts].iter_mut().find(|s| s.id == sid) {
-                    if s.n_entries < MAX_ENTRIES {
-                        s.entries[s.n_entries] = Entry { relay, seconds };
-                        s.n_entries += 1;
-                    }
+                if let Some(s) = state.starts[..n_starts].iter_mut().find(|s| s.id == sid)
+                    && s.n_entries < MAX_ENTRIES
+                {
+                    s.entries[s.n_entries] = Entry { relay, seconds };
+                    s.n_entries += 1;
                 }
             }
             "a" => {
@@ -293,15 +335,17 @@ pub fn parse_dump(body: &str, state: &mut State) {
                 let hh = num::<u8>(line, 1);
                 let mm = num::<u8>(line, 2);
                 let ss = num::<u8>(line, 3);
-                if let (Some(hh), Some(mm), Some(ss)) = (hh, mm, ss) {
-                    if hh < 24 && mm < 60 && ss < 60 {
-                        state.hh = hh;
-                        state.mm = mm;
-                        state.ss = ss;
-                        state.clock_frac_ms = 0;
-                        state.clock_valid = true;
-                        saw_time = true;
-                    }
+                if let (Some(hh), Some(mm), Some(ss)) = (hh, mm, ss)
+                    && hh < 24
+                    && mm < 60
+                    && ss < 60
+                {
+                    state.hh = hh;
+                    state.mm = mm;
+                    state.ss = ss;
+                    state.clock_frac_ms = 0;
+                    state.clock_valid = true;
+                    saw_time = true;
                 }
             }
             "run" => state.running = num::<u8>(line, 1).unwrap_or(0) != 0,

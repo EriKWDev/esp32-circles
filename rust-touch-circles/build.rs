@@ -14,10 +14,9 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const DIGITS: &str = "0123456789:";
-const UPPER: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ";
 // Relay names come from the irrigation controller's config and are arbitrary
 // Swedish free text, so the body sizes need the full latin set plus åäö.
 const BODY: &str = "\
@@ -40,13 +39,33 @@ const FONTS: &[FontSpec] = &[
     // Hero countdown digits.
     // Sized so "12:34" fits inside the countdown ring's inner radius with room
     // to spare, while staying the largest type on the device.
-    FontSpec { ident: "COUNTDOWN", ttf: "Barlow-Bold.ttf", px: 146.0, charset: DIGITS },
+    FontSpec {
+        ident: "COUNTDOWN",
+        ttf: "Barlow-Bold.ttf",
+        px: 146.0,
+        charset: DIGITS,
+    },
     // Clock, and the big in-button words (GO!, CANCEL).
-    FontSpec { ident: "DISPLAY", ttf: "Barlow-Bold.ttf", px: 76.0, charset: "0123456789:!ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ " },
+    FontSpec {
+        ident: "DISPLAY",
+        ttf: "Barlow-Bold.ttf",
+        px: 76.0,
+        charset: "0123456789:!ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ ",
+    },
     // Menu labels and relay names.
-    FontSpec { ident: "BODY", ttf: "Barlow-SemiBold.ttf", px: 40.0, charset: BODY },
+    FontSpec {
+        ident: "BODY",
+        ttf: "Barlow-SemiBold.ttf",
+        px: 40.0,
+        charset: BODY,
+    },
     // Captions: units, secondary schedule lines.
-    FontSpec { ident: "CAPTION", ttf: "Barlow-SemiBold.ttf", px: 27.0, charset: BODY },
+    FontSpec {
+        ident: "CAPTION",
+        ttf: "Barlow-SemiBold.ttf",
+        px: 27.0,
+        charset: BODY,
+    },
 ];
 
 fn main() {
@@ -62,8 +81,8 @@ fn main() {
     for spec in FONTS {
         let path = assets.join(spec.ttf);
         println!("cargo:rerun-if-changed={}", path.display());
-        let data = fs::read(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let data =
+            fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         let face = fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
             .unwrap_or_else(|e| panic!("cannot parse {}: {e}", path.display()));
 
@@ -112,13 +131,11 @@ fn main() {
                  glyphs: &[\n{entries}    ],\n    \
                  coverage: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{bin}\")),\n    \
                  ascent: {ascent},\n    \
-                 line_height: {line},\n    \
                  px: {px},\n}};\n",
             ident = spec.ident,
             entries = entries,
             bin = bin_name,
             ascent = line_metrics.ascent.round() as i32,
-            line = (line_metrics.ascent - line_metrics.descent + line_metrics.line_gap).round() as i32,
             px = spec.px.round() as i32,
         )
         .unwrap();
@@ -132,6 +149,40 @@ fn main() {
         );
     }
 
+    // One polished settings glyph as a tiny dedicated bitmap font. Keeping it
+    // in the font pipeline gives the same anti-aliased blitter as text without
+    // shipping a second TTF (or rebuilding a cog from runtime primitives).
+    const ICON_SIZE: usize = 48;
+    const SS: usize = 4;
+    let mut gear = vec![0u8; ICON_SIZE * ICON_SIZE];
+    for y in 0..ICON_SIZE {
+        for x in 0..ICON_SIZE {
+            let mut inside = 0u32;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let fx = x as f32 + (sx as f32 + 0.5) / SS as f32 - ICON_SIZE as f32 / 2.0;
+                    let fy = y as f32 + (sy as f32 + 0.5) / SS as f32 - ICON_SIZE as f32 / 2.0;
+                    let radius = (fx * fx + fy * fy).sqrt();
+                    let angle = fy.atan2(fx);
+                    let tooth_phase = (angle * 8.0 / std::f32::consts::TAU).fract().abs();
+                    let tooth = !(0.20..=0.80).contains(&tooth_phase);
+                    let outer = if tooth { 22.0 } else { 18.0 };
+                    if radius >= 7.0 && radius <= outer {
+                        inside += 1;
+                    }
+                }
+            }
+            gear[y * ICON_SIZE + x] = (inside * 255 / (SS * SS) as u32) as u8;
+        }
+    }
+    fs::write(out_dir.join("font_icon.bin"), &gear).unwrap();
+    generated.push_str(
+        "pub static ICON: Font = Font {\n    glyphs: &[\n        \
+         Glyph { ch: '\\u{2699}', w: 48, h: 48, left: 0, top: -48, advance: 48, offset: 0 },\n    ],\n    \
+         coverage: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/font_icon.bin\")),\n    \
+         ascent: 48,\n    px: 48,\n};\n",
+    );
+
     fs::write(out_dir.join("fonts.rs"), generated).unwrap();
     emit_secrets(&manifest, &out_dir);
 }
@@ -143,7 +194,7 @@ fn main() {
 /// Keeping them out of tracked source is the whole point: the repository is
 /// public, and a Wi-Fi PSK plus an Axis admin password is exactly the pair you
 /// do not want in a commit.
-fn emit_secrets(manifest: &PathBuf, out_dir: &PathBuf) {
+fn emit_secrets(manifest: &Path, out_dir: &Path) {
     let path = manifest.join("wifi.txt");
     println!("cargo:rerun-if-changed={}", path.display());
     for key in ["WIFI_SSID", "WIFI_PASS", "RB_HOST", "RB_USER", "RB_PASS"] {

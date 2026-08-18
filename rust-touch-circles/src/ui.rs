@@ -13,7 +13,7 @@
 use core::fmt::Write as _;
 
 use crate::font::FontId;
-use crate::gfx::{rgb, Align, Scene, Text, H, W};
+use crate::gfx::{Align, H, Scene, Text, W, rgb};
 use crate::model::{Link, State};
 use crate::touch::Event;
 
@@ -30,11 +30,13 @@ const BG_HOME: u16 = rgb(9, 13, 17);
 const BG_INSPECT: u16 = rgb(8, 22, 48);
 const BG_FORCE: u16 = rgb(38, 22, 4);
 const BG_RUN: u16 = rgb(5, 30, 20);
+const BG_INFO: u16 = rgb(18, 15, 36);
 
 const C_INSPECT: u16 = rgb(46, 104, 214);
 const C_FORCE: u16 = rgb(226, 142, 24);
 const C_RUN: u16 = rgb(30, 176, 108);
 const C_CANCEL: u16 = rgb(212, 52, 48);
+const C_INFO: u16 = rgb(142, 104, 226);
 
 /// Layout. Shared by drawing and hit testing - see the module note.
 mod l {
@@ -48,6 +50,7 @@ mod l {
     /// (cx, cy, r). The panel is square with rounded corners, not round, so this
     /// sits properly in the top-left instead of being pulled toward the middle.
     pub const BACK: (i32, i32, i32) = (58, 58, 40);
+    pub const INFO: (i32, i32, i32) = (422, 58, 40);
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
     /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
@@ -95,6 +98,11 @@ mod l {
     pub const DETAIL_FIRST_CY: i32 = 200;
     pub const DETAIL_PITCH: i32 = 48;
     pub const DETAIL_MAX_ROWS: usize = 5;
+    pub const ANALOG_X0: i32 = 132;
+    pub const ANALOG_X1: i32 = 438;
+    pub const ANALOG_FIRST_CY: i32 = 183;
+    pub const ANALOG_PITCH: i32 = 42;
+    pub const ANALOG_MAX_ROWS: usize = 7;
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -105,7 +113,10 @@ struct Buf<const N: usize> {
 
 impl<const N: usize> Buf<N> {
     fn new() -> Self {
-        Self { bytes: [0; N], len: 0 }
+        Self {
+            bytes: [0; N],
+            len: 0,
+        }
     }
     fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
@@ -132,6 +143,7 @@ pub enum Screen {
     Running,
     /// One schedule's running order, opened from the schedules list.
     Detail,
+    Info,
 }
 
 impl Screen {
@@ -142,6 +154,7 @@ impl Screen {
             Screen::Force => BG_FORCE,
             Screen::Running => BG_RUN,
             Screen::Detail => BG_INSPECT,
+            Screen::Info => BG_INFO,
         }
     }
     fn accent(self) -> u16 {
@@ -151,6 +164,7 @@ impl Screen {
             Screen::Force => C_FORCE,
             Screen::Running => C_RUN,
             Screen::Detail => C_INSPECT,
+            Screen::Info => C_INFO,
         }
     }
 }
@@ -165,6 +179,11 @@ enum Target {
     Relay(usize),
     Slider,
     Schedule(usize),
+    Info,
+    RelayPrev,
+    RelayNext,
+    InfoPrev,
+    InfoNext,
 }
 
 #[derive(Clone, Copy)]
@@ -195,7 +214,12 @@ const MAX_ZONES: usize = 16;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     None,
-    Trigger { relay: u8, seconds: u32 },
+    Trigger {
+        relay: u8,
+        controller: u8,
+        remote_relay: u8,
+        seconds: u32,
+    },
     Stop,
 }
 
@@ -242,6 +266,8 @@ pub struct Ui {
     /// Force menu: minutes 1..=10, and which usable relay is selected.
     pub minutes: u32,
     pub selected: usize,
+    relay_page: usize,
+    info_page: usize,
     dragging_slider: bool,
     /// When the current slider drag began. A drag is abandoned after
     /// DRAG_MAX_MS so a touch controller that latches a contact - and therefore
@@ -266,8 +292,14 @@ pub struct Ui {
     last_running: bool,
 }
 
-const NO_RIPPLE: Ripple =
-    Ripple { x: 0, y: 0, born_ms: 0, max_r: 0, color: 0, active: false };
+const NO_RIPPLE: Ripple = Ripple {
+    x: 0,
+    y: 0,
+    born_ms: 0,
+    max_r: 0,
+    color: 0,
+    active: false,
+};
 
 impl Ui {
     pub const fn new() -> Self {
@@ -279,6 +311,8 @@ impl Ui {
             n_zones: 0,
             minutes: 3,
             selected: 0,
+            relay_page: 0,
+            info_page: 0,
             dragging_slider: false,
             drag_started_ms: 0,
             detail: 0,
@@ -306,11 +340,24 @@ impl Ui {
         let dy = y.max(H as i32 - y);
         let max_r = isqrt_i32(dx * dx + dy * dy).min(150);
         let slot = self.ripples.iter().position(|r| !r.active).unwrap_or(0);
-        self.ripples[slot] = Ripple { x, y, born_ms: now_ms, max_r, color, active: true };
+        self.ripples[slot] = Ripple {
+            x,
+            y,
+            born_ms: now_ms,
+            max_r,
+            color,
+            active: true,
+        };
     }
 
     fn start_wipe(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
-        self.wipe = Some(Wipe { to, x, y, born_ms: now_ms, color: to.background() });
+        self.wipe = Some(Wipe {
+            to,
+            x,
+            y,
+            born_ms: now_ms,
+            color: to.background(),
+        });
     }
 
     /// Which screen a touch belongs to: once a wipe starts, the destination
@@ -339,7 +386,9 @@ impl Ui {
 
         match ev {
             Event::Press(x, y) => {
-                let Some(target) = self.hit(x, y) else { return Action::None };
+                let Some(target) = self.hit(x, y) else {
+                    return Action::None;
+                };
                 if target == Target::Slider {
                     self.dragging_slider = true;
                     self.drag_started_ms = now_ms;
@@ -351,6 +400,7 @@ impl Ui {
                     Target::Force => C_FORCE,
                     Target::Go => C_RUN,
                     Target::Cancel => C_CANCEL,
+                    Target::Info => C_INFO,
                     _ => self.screen.accent(),
                 };
                 self.ripple(x, y, color, now_ms);
@@ -376,9 +426,12 @@ impl Ui {
                         self.start_wipe(Screen::Inspect, x, y, now_ms);
                         Action::None
                     }
+                    Target::Info => {
+                        self.start_wipe(Screen::Info, x, y, now_ms);
+                        Action::None
+                    }
                     Target::Force => {
-                        self.selected =
-                            self.selected.min(state.n_usable().saturating_sub(1));
+                        self.selected = self.selected.min(state.n_usable().saturating_sub(1));
                         self.start_wipe(Screen::Force, x, y, now_ms);
                         Action::None
                     }
@@ -386,14 +439,35 @@ impl Ui {
                         self.selected = index;
                         Action::None
                     }
+                    Target::RelayPrev => {
+                        self.relay_page = self.relay_page.saturating_sub(1);
+                        Action::None
+                    }
+                    Target::RelayNext => {
+                        let pages = state.n_usable().saturating_sub(1) / l::RELAY_MAX_ROWS + 1;
+                        self.relay_page = (self.relay_page + 1).min(pages.saturating_sub(1));
+                        Action::None
+                    }
+                    Target::InfoPrev => {
+                        self.info_page = self.info_page.saturating_sub(1);
+                        Action::None
+                    }
+                    Target::InfoNext => {
+                        let pages = state.n_analogs.saturating_sub(1) / l::ANALOG_MAX_ROWS + 1;
+                        self.info_page = (self.info_page + 1).min(pages.saturating_sub(1));
+                        Action::None
+                    }
                     Target::Go => {
-                        let relay =
-                            state.usable().nth(self.selected).map(|r| r.id).unwrap_or(0);
-                        if relay == 0 {
+                        let Some(relay) = state.usable().nth(self.selected) else {
                             return Action::None;
-                        }
+                        };
                         self.start_wipe(Screen::Running, x, y, now_ms);
-                        Action::Trigger { relay, seconds: self.minutes * 60 }
+                        Action::Trigger {
+                            relay: relay.id,
+                            controller: relay.controller,
+                            remote_relay: relay.remote_id,
+                            seconds: self.minutes * 60,
+                        }
                     }
                     Target::Cancel => {
                         // Back to Force, where the run was started - cancelling is
@@ -480,8 +554,7 @@ impl Ui {
             || self.ripples.iter().any(|r| r.active)
             || self.screen == Screen::Running
             || self.dragging_slider
-            || (self.screen == Screen::Force
-                && self.knob_q4 != y_from_minutes(self.minutes) << 4)
+            || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
     /// Build the frame.
@@ -542,7 +615,14 @@ impl Ui {
             // A soft expanding ring, so it reads as a ripple and never hides the
             // label underneath it.
             let thickness = (radius / 7).clamp(3, 16);
-            scene.ring(r.x, r.y, radius, (radius - thickness).max(0), r.color, alpha as u8);
+            scene.ring(
+                r.x,
+                r.y,
+                radius,
+                (radius - thickness).max(0),
+                r.color,
+                alpha as u8,
+            );
         }
     }
 
@@ -552,13 +632,29 @@ impl Ui {
         let (bx, by, br) = l::BACK;
         match screen {
             Screen::Home => {
+                let (ix, iy, ir) = l::INFO;
+                self.zone(
+                    Target::Info,
+                    Zone::Disc {
+                        cx: ix,
+                        cy: iy,
+                        r: ir,
+                    },
+                );
                 let (x0, y0, x1, y1) = l::HOME_INSPECT;
                 self.zone(Target::Inspect, Zone::Rect { x0, y0, x1, y1 });
                 let (x0, y0, x1, y1) = l::HOME_FORCE;
                 self.zone(Target::Force, Zone::Rect { x0, y0, x1, y1 });
             }
             Screen::Inspect => {
-                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
                 for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
                     let cy = l::SCHED_FIRST_CY + index as i32 * l::SCHED_PITCH;
                     self.zone(
@@ -573,10 +669,55 @@ impl Ui {
                 }
             }
             Screen::Detail => {
-                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+            }
+            Screen::Info => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                let first = self.info_page * l::ANALOG_MAX_ROWS;
+                if self.info_page > 0 {
+                    self.zone(
+                        Target::InfoPrev,
+                        Zone::Disc {
+                            cx: 190,
+                            cy: 462,
+                            r: 22,
+                        },
+                    );
+                }
+                if first + l::ANALOG_MAX_ROWS < state.n_analogs {
+                    self.zone(
+                        Target::InfoNext,
+                        Zone::Disc {
+                            cx: 290,
+                            cy: 462,
+                            r: 22,
+                        },
+                    );
+                }
             }
             Screen::Force => {
-                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
                 self.zone(
                     Target::Slider,
                     Zone::Rect {
@@ -586,9 +727,12 @@ impl Ui {
                         y1: l::SLIDER_BOTTOM + 20,
                     },
                 );
-                let rows = state.n_usable().min(l::RELAY_MAX_ROWS);
-                for index in 0..rows {
-                    let cy = l::RELAY_FIRST_CY + index as i32 * l::RELAY_PITCH;
+                let total = state.n_usable();
+                let first = self.relay_page * l::RELAY_MAX_ROWS;
+                let rows = total.saturating_sub(first).min(l::RELAY_MAX_ROWS);
+                for row in 0..rows {
+                    let index = first + row;
+                    let cy = l::RELAY_FIRST_CY + row as i32 * l::RELAY_PITCH;
                     self.zone(
                         Target::Relay(index),
                         Zone::Rect {
@@ -599,11 +743,45 @@ impl Ui {
                         },
                     );
                 }
+                if self.relay_page > 0 {
+                    self.zone(
+                        Target::RelayPrev,
+                        Zone::Disc {
+                            cx: 190,
+                            cy: 444,
+                            r: 26,
+                        },
+                    );
+                }
+                if first + rows < total {
+                    self.zone(
+                        Target::RelayNext,
+                        Zone::Disc {
+                            cx: 300,
+                            cy: 444,
+                            r: 26,
+                        },
+                    );
+                }
                 let (gx, gy, gr) = l::GO;
-                self.zone(Target::Go, Zone::Disc { cx: gx, cy: gy, r: gr });
+                self.zone(
+                    Target::Go,
+                    Zone::Disc {
+                        cx: gx,
+                        cy: gy,
+                        r: gr,
+                    },
+                );
             }
             Screen::Running => {
-                self.zone(Target::Back, Zone::Disc { cx: bx, cy: by, r: br });
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
                 let (x0, y0, x1, y1) = l::CANCEL;
                 self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
             }
@@ -617,6 +795,7 @@ impl Ui {
             Screen::Force => self.draw_force(scene, state, alpha),
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
+            Screen::Info => self.draw_info(scene, state, alpha),
         }
     }
 
@@ -641,8 +820,15 @@ impl Ui {
         scene.pill(bx - 11, by - 12, bx - 5, by + 12, 3, INK, alpha);
     }
 
+    fn draw_cog(&self, scene: &mut Scene, alpha: u8) {
+        let (x, y, r) = l::INFO;
+        scene.ring(x, y, r, r - 4, MUTED, alpha);
+        scene.label(x, y + 24, FontId::Icon, INK, alpha, Align::Center, "⚙");
+    }
+
     fn draw_home(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_link(scene, state, alpha);
+        self.draw_cog(scene, alpha);
 
         let mut clock = Buf::<8>::new();
         if state.clock_valid {
@@ -650,7 +836,15 @@ impl Ui {
         } else {
             let _ = write!(clock, "--:--");
         }
-        scene.label(CX, 152, FontId::Display, INK, alpha, Align::Center, clock.as_str());
+        scene.label(
+            CX,
+            152,
+            FontId::Display,
+            INK,
+            alpha,
+            Align::Center,
+            clock.as_str(),
+        );
 
         let mut next = Buf::<40>::new();
         match state.next_start() {
@@ -662,15 +856,28 @@ impl Ui {
                         .relay_by_id(s.entries[0].relay as i32)
                         .map(|r| r.name)
                         .unwrap_or(Text::EMPTY);
-                    let _ =
-                        write!(next, "NEXT {:02}:{:02} \u{b7} {}", s.hh, s.mm, name.as_str());
+                    let _ = write!(
+                        next,
+                        "NEXT {:02}:{:02} \u{b7} {}",
+                        s.hh,
+                        s.mm,
+                        name.as_str()
+                    );
                 }
             }
             None => {
                 let _ = write!(next, "NO SCHEDULE ARMED");
             }
         }
-        scene.label(CX, 200, FontId::Caption, MUTED, alpha, Align::Center, next.as_str());
+        scene.label(
+            CX,
+            200,
+            FontId::Caption,
+            MUTED,
+            alpha,
+            Align::Center,
+            next.as_str(),
+        );
 
         // Two peers, same shape and size; colour and order carry the hierarchy.
         let (x0, y0, x1, y1) = l::HOME_INSPECT;
@@ -698,10 +905,134 @@ impl Ui {
         );
     }
 
+    fn draw_info(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
+        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "INFO");
+
+        let mut panel = Buf::<28>::new();
+        match state.local_ip {
+            Some(ip) => {
+                let _ = write!(panel, "PANEL {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+            }
+            None => {
+                let _ = write!(panel, "PANEL CONNECTING");
+            }
+        }
+        scene.label(
+            CX,
+            103,
+            FontId::Caption,
+            MUTED,
+            alpha,
+            Align::Center,
+            panel.as_str(),
+        );
+
+        for i in 0..state.n_controllers {
+            let ip = state.controller_ips[i];
+            let col = i % 2;
+            let row = i / 2;
+            let x = if col == 0 { 28 } else { 254 };
+            let y = 132 + row as i32 * 28;
+            scene.disc(
+                x,
+                y - 7,
+                6,
+                if state.controller_online[i] {
+                    C_RUN
+                } else {
+                    C_CANCEL
+                },
+                alpha,
+            );
+            let mut address = Buf::<24>::new();
+            let _ = write!(address, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+            scene.label(
+                x + 13,
+                y,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Left,
+                address.as_str(),
+            );
+        }
+
+        let first = self.info_page * l::ANALOG_MAX_ROWS;
+        let rows = state
+            .n_analogs
+            .saturating_sub(first)
+            .min(l::ANALOG_MAX_ROWS);
+        for row in 0..rows {
+            let a = state.analogs[first + row];
+            let cy = l::ANALOG_FIRST_CY + row as i32 * l::ANALOG_PITCH;
+            scene.label(
+                28,
+                cy + 8,
+                FontId::Caption,
+                INK,
+                alpha,
+                Align::Left,
+                a.name.as_str(),
+            );
+            let mut value = Buf::<20>::new();
+            let _ = write!(value, "{}  0..4095", a.level);
+            scene.label(
+                l::ANALOG_X1,
+                cy - 8,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Right,
+                value.as_str(),
+            );
+            scene.pill(
+                l::ANALOG_X0,
+                cy,
+                l::ANALOG_X1,
+                cy + 10,
+                5,
+                rgb(48, 39, 76),
+                alpha,
+            );
+            let fill =
+                l::ANALOG_X0 + (l::ANALOG_X1 - l::ANALOG_X0) * a.level.min(4095) as i32 / 4095;
+            if fill > l::ANALOG_X0 {
+                scene.pill(l::ANALOG_X0, cy, fill, cy + 10, 5, C_INFO, alpha);
+            }
+            scene.disc(fill, cy + 5, 8, rgb(218, 198, 252), alpha);
+        }
+        if rows == 0 {
+            scene.label(
+                CX,
+                252,
+                FontId::Caption,
+                DIM,
+                alpha,
+                Align::Center,
+                "NO ANALOG INPUTS",
+            );
+        }
+        if self.info_page > 0 {
+            scene.label(190, 470, FontId::Caption, INK, alpha, Align::Center, "<");
+        }
+        if first + rows < state.n_analogs {
+            scene.label(290, 470, FontId::Caption, INK, alpha, Align::Center, ">");
+        }
+    }
+
     fn draw_inspect(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
         // Plural: this page lists every schedule, it is not one schedule's page.
-        scene.label(CX, 116, FontId::Body, INK, alpha, Align::Center, "SCHEDULES");
+        scene.label(
+            CX,
+            116,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            "SCHEDULES",
+        );
 
         for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
             let s = state.starts[index];
@@ -765,7 +1096,15 @@ impl Ui {
             let a = state.analogs[0];
             let mut line = Buf::<28>::new();
             let _ = write!(line, "{} {} / 4095", a.name.as_str(), a.level);
-            scene.label(CX, 452, FontId::Caption, DIM, alpha, Align::Center, line.as_str());
+            scene.label(
+                CX,
+                452,
+                FontId::Caption,
+                DIM,
+                alpha,
+                Align::Center,
+                line.as_str(),
+            );
         }
     }
 
@@ -777,7 +1116,15 @@ impl Ui {
 
         let mut title = Buf::<16>::new();
         let _ = write!(title, "{:02}:{:02}", s.hh, s.mm);
-        scene.label(CX, 116, FontId::Display, INK, alpha, Align::Center, title.as_str());
+        scene.label(
+            CX,
+            116,
+            FontId::Display,
+            INK,
+            alpha,
+            Align::Center,
+            title.as_str(),
+        );
 
         let mut sub = Buf::<28>::new();
         if s.enabled {
@@ -785,7 +1132,15 @@ impl Ui {
         } else {
             let _ = write!(sub, "DISARMED");
         }
-        scene.label(CX, 152, FontId::Caption, MUTED, alpha, Align::Center, sub.as_str());
+        scene.label(
+            CX,
+            152,
+            FontId::Caption,
+            MUTED,
+            alpha,
+            Align::Center,
+            sub.as_str(),
+        );
 
         // Entries run top to bottom in the order the controller will drive them.
         let rows = s.n_entries.min(l::DETAIL_MAX_ROWS);
@@ -815,7 +1170,10 @@ impl Ui {
                 n.as_str(),
             );
 
-            let name = state.relay_by_id(e.relay as i32).map(|r| r.name).unwrap_or(Text::EMPTY);
+            let name = state
+                .relay_by_id(e.relay as i32)
+                .map(|r| r.name)
+                .unwrap_or(Text::EMPTY);
             scene.label(
                 l::SCHED_X0 + 52,
                 cy + 9,
@@ -846,7 +1204,15 @@ impl Ui {
         if s.n_entries > rows {
             let mut more = Buf::<20>::new();
             let _ = write!(more, "+{} MORE", s.n_entries - rows);
-            scene.label(CX, 456, FontId::Caption, DIM, alpha, Align::Center, more.as_str());
+            scene.label(
+                CX,
+                456,
+                FontId::Caption,
+                DIM,
+                alpha,
+                Align::Center,
+                more.as_str(),
+            );
         }
     }
 
@@ -855,7 +1221,15 @@ impl Ui {
 
         let mut mins = Buf::<4>::new();
         let _ = write!(mins, "{}", self.minutes);
-        scene.label(246, 158, FontId::Display, INK, alpha, Align::Right, mins.as_str());
+        scene.label(
+            246,
+            158,
+            FontId::Display,
+            INK,
+            alpha,
+            Align::Right,
+            mins.as_str(),
+        );
         scene.label(258, 158, FontId::Caption, MUTED, alpha, Align::Left, "MIN");
 
         // Slider: track, filled portion below the knob, knob.
@@ -872,12 +1246,27 @@ impl Ui {
         );
         // Eased position, not the raw target - see `knob_q4`.
         let knob_y = (self.knob_q4 >> 4).clamp(l::SLIDER_TOP, l::SLIDER_BOTTOM);
-        scene.pill(sx - hw, knob_y, sx + hw, l::SLIDER_BOTTOM, hw, C_FORCE, alpha);
+        scene.pill(
+            sx - hw,
+            knob_y,
+            sx + hw,
+            l::SLIDER_BOTTOM,
+            hw,
+            C_FORCE,
+            alpha,
+        );
         scene.disc(sx, knob_y, 28, rgb(252, 216, 154), alpha);
 
-        for (index, relay) in state.usable().enumerate().take(l::RELAY_MAX_ROWS) {
+        let first = self.relay_page * l::RELAY_MAX_ROWS;
+        for (row, (index, relay)) in state
+            .usable()
+            .enumerate()
+            .skip(first)
+            .take(l::RELAY_MAX_ROWS)
+            .enumerate()
+        {
             let selected = index == self.selected;
-            let cy = l::RELAY_FIRST_CY + index as i32 * l::RELAY_PITCH;
+            let cy = l::RELAY_FIRST_CY + row as i32 * l::RELAY_PITCH;
             scene.pill(
                 l::RELAY_X0,
                 cy - l::RELAY_HALF_H,
@@ -898,9 +1287,27 @@ impl Ui {
             );
         }
 
+        let total = state.n_usable();
+        if self.relay_page > 0 {
+            scene.disc(190, 444, 24, rgb(52, 34, 10), alpha);
+            scene.label(190, 453, FontId::Caption, INK, alpha, Align::Center, "<");
+        }
+        if first + l::RELAY_MAX_ROWS < total {
+            scene.disc(300, 444, 24, rgb(52, 34, 10), alpha);
+            scene.label(300, 453, FontId::Caption, INK, alpha, Align::Center, ">");
+        }
+
         let (gx, gy, gr) = l::GO;
         scene.disc(gx, gy, gr, C_RUN, alpha);
-        scene.label(gx, gy + 16, FontId::Body, rgb(2, 22, 12), alpha, Align::Center, "GO!");
+        scene.label(
+            gx,
+            gy + 16,
+            FontId::Body,
+            rgb(2, 22, 12),
+            alpha,
+            Align::Center,
+            "GO!",
+        );
     }
 
     fn draw_running(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
@@ -929,7 +1336,10 @@ impl Ui {
             }
         }
 
-        let name = state.relay_by_id(state.active).map(|r| r.name).unwrap_or(Text::EMPTY);
+        let name = state
+            .relay_by_id(state.active)
+            .map(|r| r.name)
+            .unwrap_or(Text::EMPTY);
         scene.label(
             CX,
             l::RUN_NAME_BASELINE,
@@ -937,7 +1347,11 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            if name.len > 0 { name.as_str() } else { "WATERING" },
+            if name.len > 0 {
+                name.as_str()
+            } else {
+                "WATERING"
+            },
         );
 
         // The countdown - the reason this screen exists, so it gets the largest
@@ -956,12 +1370,28 @@ impl Ui {
 
         let (x0, y0, x1, y1) = l::CANCEL;
         scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CANCEL, alpha);
-        scene.label(CX, (y0 + y1) / 2 + 14, FontId::Body, INK, alpha, Align::Center, "CANCEL");
+        scene.label(
+            CX,
+            (y0 + y1) / 2 + 14,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            "CANCEL",
+        );
 
         if state.queued > 0 {
             let mut q = Buf::<24>::new();
             let _ = write!(q, "{} MORE QUEUED", state.queued);
-            scene.label(CX, 402, FontId::Caption, MUTED, alpha, Align::Center, q.as_str());
+            scene.label(
+                CX,
+                402,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Center,
+                q.as_str(),
+            );
         }
     }
 }
@@ -987,8 +1417,8 @@ fn y_from_minutes(minutes: u32) -> i32 {
 #[inline]
 fn smoothstep_q15(t: u32) -> u32 {
     let t = t.min(32_768);
-    let squared = t * t >> 15;
-    squared * (3 * 32_768 - 2 * t) >> 15
+    let squared = (t * t) >> 15;
+    (squared * (3 * 32_768 - 2 * t)) >> 15
 }
 
 /// 1-(1-t)^3: fast off the mark, settles gently. Used for anything a finger just
@@ -997,7 +1427,7 @@ fn smoothstep_q15(t: u32) -> u32 {
 fn ease_out_q15(t: u32) -> u32 {
     let t = t.min(32_768);
     let inv = 32_768 - t;
-    let cube = ((inv * inv >> 15) * inv) >> 15;
+    let cube = (((inv * inv) >> 15) * inv) >> 15;
     32_768 - cube
 }
 

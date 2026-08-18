@@ -6,14 +6,10 @@
 //! firmware is no longer strictly RTOS-free. The render loop still owns the main
 //! thread; the scheduler exists for the radio's own tasks.
 //!
-//! **Requests are made while the UI is idle.** A request is synchronous here,
-//! pumping smoltcp in its own wait loop until the reply lands. That is far
-//! simpler than a state machine spread across frames, and it costs nothing
-//! visible because `poll_due` is only honoured when nothing is animating - so a
-//! transfer can never interrupt a transition. `present()` already blocks for
-//! ~20 ms per frame, which is longer than smoltcp likes to be ignored, so
-//! interleaving would mean pumping the stack between DMA stripes; deliberately
-//! not done yet.
+//! **Requests are cooperative.** TCP connect, send, receive, Digest retry, and
+//! multi-controller polling advance one step per UI-loop iteration. No network
+//! timeout owns the main thread, so touch and animation remain responsive even
+//! while a controller is offline.
 //!
 //! **The API is behind HTTP Digest.** The Axis device's own web server
 //! authenticates every request to the ACAP, and Digest is the only scheme
@@ -31,7 +27,7 @@ use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 
-use crate::model::{parse_dump, State};
+use crate::model::{MAX_CONTROLLERS, MAX_ENTRIES, State, parse_dump};
 
 include!(concat!(env!("OUT_DIR"), "/secrets.rs"));
 
@@ -65,8 +61,14 @@ impl TxToken for TxTok {
 }
 
 impl Device for Phy {
-    type RxToken<'a> = RxTok where Self: 'a;
-    type TxToken<'a> = TxTok where Self: 'a;
+    type RxToken<'a>
+        = RxTok
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TxTok
+    where
+        Self: 'a;
 
     fn receive(&mut self, _now: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         self.iface.receive().map(|(rx, tx)| (RxTok(rx), TxTok(tx)))
@@ -94,13 +96,11 @@ impl Device for Phy {
 #[derive(Clone, Copy)]
 pub struct Host {
     pub ip: Ipv4Address,
-    pub label: &'static str,
 }
 
-pub const HOSTS: &[Host] = &[Host {
-    ip: parse_ip(RB_HOST),
-    label: RB_HOST,
-}];
+const EMPTY_HOST: Host = Host {
+    ip: Ipv4Address::UNSPECIFIED,
+};
 
 /// `const`-evaluable dotted-quad parser, so HOSTS can be built at compile time
 /// from the string baked in by build.rs.
@@ -144,6 +144,39 @@ pub struct Net {
     nonce: Buf<64>,
     nc: u32,
     body: [u8; RX_BODY],
+    hosts: [Host; MAX_CONTROLLERS],
+    n_hosts: usize,
+    snapshots: [State; MAX_CONTROLLERS],
+    snapshot_valid: [bool; MAX_CONTROLLERS],
+    http: Option<Http>,
+    job: Job,
+}
+
+#[derive(Clone, Copy)]
+enum HttpKind {
+    Dump(usize),
+    Trigger,
+    Stop,
+}
+
+#[derive(Clone, Copy)]
+struct Http {
+    kind: HttpKind,
+    host: usize,
+    post: bool,
+    path: Buf<96>,
+    head: Buf<512>,
+    started_ms: u32,
+    sent: bool,
+    got: usize,
+    attempt: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Job {
+    Idle,
+    Poll { next: usize },
+    StopAll { next: usize },
 }
 
 /// Small fixed string, since there is no allocator budget to spare here.
@@ -155,7 +188,10 @@ pub struct Buf<const N: usize> {
 
 impl<const N: usize> Buf<N> {
     pub const fn new() -> Self {
-        Self { bytes: [0; N], len: 0 }
+        Self {
+            bytes: [0; N],
+            len: 0,
+        }
     }
     pub fn clear(&mut self) {
         self.len = 0;
@@ -204,9 +240,17 @@ impl Net {
             .with_ssid(WIFI_SSID)
             .with_password(alloc::string::String::from(WIFI_PASS));
         let config = esp_radio::wifi::Config::Station(station_config);
-        controller.set_config(&config).map_err(|_| "wifi config rejected")?;
+        controller
+            .set_config(&config)
+            .map_err(|_| "wifi config rejected")?;
+        // set_config starts the station interface but deliberately does not
+        // associate it. In this esp-radio release connection is async-only;
+        // blocking here is safe because it happens once, before the UI loop,
+        // while esp-rtos continues servicing the radio driver.
+        embassy_futures::block_on(controller.connect_async())
+            .map_err(|_| "wifi association failed")?;
 
-        let mut station = WifiIface::station();
+        let station = WifiIface::station();
         let mac = station.mac_address();
         let mut phy = Phy { iface: station };
 
@@ -222,6 +266,23 @@ impl Net {
         );
         let tcp = sockets.add(tcp_socket);
 
+        let mut hosts = [EMPTY_HOST; MAX_CONTROLLERS];
+        let mut n_hosts = 0;
+        for value in RB_HOST.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if n_hosts < MAX_CONTROLLERS {
+                hosts[n_hosts] = Host {
+                    ip: parse_ip(value),
+                };
+                n_hosts += 1;
+            }
+        }
+        if n_hosts == 0 {
+            hosts[0] = Host {
+                ip: parse_ip("192.168.4.200"),
+            };
+            n_hosts = 1;
+        }
+
         Ok(Self {
             controller,
             phy,
@@ -235,6 +296,12 @@ impl Net {
             nonce: Buf::new(),
             nc: 0,
             body: [0; RX_BODY],
+            hosts,
+            n_hosts,
+            snapshots: [const { State::new() }; MAX_CONTROLLERS],
+            snapshot_valid: [false; MAX_CONTROLLERS],
+            http: None,
+            job: Job::Idle,
         })
     }
 
@@ -270,107 +337,255 @@ impl Net {
         }
     }
 
-    /// GET `path` from `host`, following one Digest challenge if offered.
-    ///
-    /// Synchronous, with its own smoltcp pump and a wall-clock deadline. Callers
-    /// only invoke it when the UI is idle - see the module note.
-    fn request(&mut self, method: &str, host: Ipv4Address, path: &str, now_ms: u32) -> Result<usize, &'static str> {
-        // First attempt reuses a cached challenge if we have one; otherwise it
-        // goes out bare and we expect a 401 carrying the parameters.
-        for attempt in 0..2 {
-            let len = self.request_once(method, host, path, now_ms, attempt == 1)?;
-            let status = status_code(&self.body[..len]);
-            if status == 401 && attempt == 0 {
-                if !self.absorb_challenge(len) {
-                    return Err("401 without a usable Digest challenge");
+    /// Advance at most one small piece of HTTP work. This function never waits:
+    /// TCP connect, send, receive, Digest retry, and multi-host traversal are
+    /// spread across ordinary UI-loop iterations.
+    pub fn service(&mut self, state: &mut State, now_ms: u32) -> bool {
+        if self.http.is_none() {
+            match self.job {
+                Job::Poll { next } if next < self.n_hosts => {
+                    let mut path = Buf::new();
+                    path.push_str("/local/rainbird/app/api/dump");
+                    if let Err(e) =
+                        self.start_http(HttpKind::Dump(next), next, false, path, 0, now_ms)
+                    {
+                        self.last_error = Some(e);
+                        state.controller_online[next] = false;
+                        self.job = Job::Poll { next: next + 1 };
+                    }
+                    return false;
                 }
-                continue;
+                Job::Poll { .. } => {
+                    self.job = Job::Idle;
+                    self.rebuild_state(state);
+                    return true;
+                }
+                Job::StopAll { next } if next < self.n_hosts => {
+                    let mut path = Buf::new();
+                    path.push_str("/local/rainbird/app/api/stop");
+                    if let Err(e) = self.start_http(HttpKind::Stop, next, true, path, 0, now_ms) {
+                        self.last_error = Some(e);
+                        self.job = Job::StopAll { next: next + 1 };
+                    }
+                    return false;
+                }
+                Job::StopAll { .. } => {
+                    self.job = Job::Idle;
+                    return false;
+                }
+                Job::Idle => return false,
             }
-            if status == 200 {
-                return Ok(len);
-            }
-            if status == 401 {
-                return Err("authentication rejected");
-            }
-            return Err("unexpected HTTP status");
         }
-        Err("authentication did not converge")
+
+        let mut http = self.http.take().unwrap();
+        if now_ms.wrapping_sub(http.started_ms) > 1_000 {
+            self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+            self.finish_error(http, state, "request timed out");
+            return true;
+        }
+
+        let (complete, closed) = {
+            let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
+            if !http.sent && socket.may_send() {
+                match socket.send_slice(http.head.as_str().as_bytes()) {
+                    Ok(_) => http.sent = true,
+                    Err(_) => {
+                        socket.abort();
+                        self.finish_error(http, state, "send failed");
+                        return true;
+                    }
+                }
+            }
+            if socket.can_recv() && http.got < RX_BODY {
+                let body = &mut self.body;
+                let got = http.got;
+                if let Ok(read) = socket.recv(|data| {
+                    let take = data.len().min(body.len() - got);
+                    body[got..got + take].copy_from_slice(&data[..take]);
+                    (take, take)
+                }) {
+                    http.got += read;
+                }
+            }
+            let complete = response_complete(&self.body[..http.got]);
+            let closed = http.sent && !socket.is_active();
+            if complete {
+                socket.abort();
+            }
+            (complete, closed)
+        };
+
+        if !complete && !closed {
+            self.http = Some(http);
+            return false;
+        }
+
+        let status = status_code(&self.body[..http.got]);
+        if status == 401 && http.attempt == 0 && self.absorb_challenge(http.got) {
+            if let Err(e) = self.start_http(http.kind, http.host, http.post, http.path, 1, now_ms) {
+                self.finish_error(http, state, e);
+            }
+            return false;
+        }
+        if status != 200 {
+            self.finish_error(
+                http,
+                state,
+                if status == 401 {
+                    "authentication rejected"
+                } else {
+                    "unexpected HTTP status"
+                },
+            );
+            return true;
+        }
+        self.finish_success(http, state);
+        // A successful dump is published atomically when the complete
+        // multi-controller poll is rebuilt. Trigger/stop already update the
+        // model optimistically, so neither needs an otherwise wasted redraw.
+        false
     }
 
-    fn request_once(
+    fn start_http(
         &mut self,
-        method: &str,
-        host: Ipv4Address,
-        path: &str,
+        kind: HttpKind,
+        host: usize,
+        post: bool,
+        path: Buf<96>,
+        attempt: u8,
         now_ms: u32,
-        authorize: bool,
-    ) -> Result<usize, &'static str> {
-        const PORT: u16 = 80;
-        const TIMEOUT_MS: u32 = 4_000;
-
-        // Build the request before touching the socket, so a formatting problem
-        // cannot leave a half-open connection behind.
+    ) -> Result<(), &'static str> {
+        let method = if post { "POST" } else { "GET" };
         let mut head = Buf::<512>::new();
-        let _ = write!(head, "GET {path} HTTP/1.1\r\nHost: ");
-        let _ = write!(head, "{host}");
-        let _ = write!(head, "\r\nConnection: close\r\n");
-        if authorize {
-            self.nc += 1;
+        let _ = write!(
+            head,
+            "{method} {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n",
+            path.as_str(),
+            self.hosts[host].ip
+        );
+        if post {
+            let _ = write!(head, "Content-Length: 0\r\n");
+        }
+        if !self.realm.is_empty() || attempt > 0 {
+            self.nc = self.nc.wrapping_add(1);
             let mut auth = Buf::<320>::new();
-            build_digest(&mut auth, method, path, self.realm.as_str(), self.nonce.as_str(), self.nc);
+            build_digest(
+                &mut auth,
+                method,
+                path.as_str(),
+                self.realm.as_str(),
+                self.nonce.as_str(),
+                self.nc,
+            );
             let _ = write!(head, "Authorization: {}\r\n", auth.as_str());
         }
         let _ = write!(head, "\r\n");
+        let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
+        socket.abort();
+        let local_port = 49_152 + (now_ms.wrapping_add(self.nc) % 16_000) as u16;
+        socket
+            .connect(
+                self.iface.context(),
+                (IpAddress::Ipv4(self.hosts[host].ip), 80),
+                local_port,
+            )
+            .map_err(|_| "connect failed")?;
+        self.http = Some(Http {
+            kind,
+            host,
+            post,
+            path,
+            head,
+            started_ms: now_ms,
+            sent: false,
+            got: 0,
+            attempt,
+        });
+        Ok(())
+    }
 
+    fn finish_success(&mut self, http: Http, state: &mut State) {
+        self.last_error = None;
+        match http.kind {
+            HttpKind::Dump(index) => {
+                let split = find_body(&self.body[..http.got]);
+                if let Ok(text) = core::str::from_utf8(&self.body[split..http.got]) {
+                    let mut remote = State::new();
+                    parse_dump(text, &mut remote);
+                    self.snapshots[index] = remote;
+                    self.snapshot_valid[index] = true;
+                    state.controller_online[index] = true;
+                } else {
+                    state.controller_online[index] = false;
+                    self.last_error = Some("dump was not valid UTF-8");
+                }
+                self.job = Job::Poll { next: index + 1 };
+            }
+            HttpKind::Trigger => {}
+            HttpKind::Stop => {
+                if let Job::StopAll { next } = self.job {
+                    self.job = Job::StopAll { next: next + 1 };
+                }
+            }
+        }
+    }
+
+    fn finish_error(&mut self, http: Http, state: &mut State, error: &'static str) {
+        self.last_error = Some(error);
+        match http.kind {
+            HttpKind::Dump(index) => {
+                state.controller_online[index] = false;
+                self.job = Job::Poll { next: index + 1 };
+            }
+            HttpKind::Stop => {
+                if let Job::StopAll { next } = self.job {
+                    self.job = Job::StopAll { next: next + 1 };
+                }
+            }
+            HttpKind::Trigger => {}
+        }
+    }
+
+    fn rebuild_state(&self, state: &mut State) {
+        let old_clock = (
+            state.hh,
+            state.mm,
+            state.ss,
+            state.clock_frac_ms,
+            state.clock_valid,
+        );
+        state.local_ip = self.ip.map(|ip| ip.octets());
+        state.n_controllers = self.n_hosts;
+        if !self.snapshot_valid[..self.n_hosts]
+            .iter()
+            .any(|valid| *valid)
         {
-            let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
-            socket.abort();
+            return;
         }
-        self.step(now_ms);
-        {
-            let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
-            let local_port = 49_152 + (now_ms % 16_000) as u16;
-            socket
-                .connect(self.iface.context(), (IpAddress::Ipv4(host), PORT), local_port)
-                .map_err(|_| "connect failed")?;
-        }
-
-        let mut sent = false;
-        let mut got = 0usize;
-        let started = now_ms;
-        loop {
-            let t = crate::now_ms();
-            if t.wrapping_sub(started) > TIMEOUT_MS {
-                let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
-                socket.abort();
-                return Err("request timed out");
-            }
-            self.step(t);
-
-            let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
-            if !sent && socket.may_send() {
-                socket.send_slice(head.as_str().as_bytes()).map_err(|_| "send failed")?;
-                sent = true;
-            }
-            if socket.can_recv() {
-                let body = &mut self.body;
-                let read = socket
-                    .recv(|data| {
-                        let take = data.len().min(body.len() - got);
-                        body[got..got + take].copy_from_slice(&data[..take]);
-                        (take, take)
-                    })
-                    .map_err(|_| "receive failed")?;
-                got += read;
-            }
-            if sent && !socket.is_active() {
-                break;
-            }
-            if got >= RX_BODY {
-                break;
+        state.n_relays = 0;
+        state.n_starts = 0;
+        state.n_analogs = 0;
+        state.running = false;
+        state.active = 0;
+        state.queued = 0;
+        state.max_run_s = u32::MAX;
+        state.clock_valid = false;
+        for index in 0..self.n_hosts {
+            state.controller_ips[index] = self.hosts[index].ip.octets();
+            if self.snapshot_valid[index] {
+                let online = state.controller_online[index];
+                merge_controller(state, &self.snapshots[index], index as u8, online);
             }
         }
-        Ok(got)
+        if !state.clock_valid {
+            (
+                state.hh,
+                state.mm,
+                state.ss,
+                state.clock_frac_ms,
+                state.clock_valid,
+            ) = old_clock;
+        }
     }
 
     /// Extract realm and nonce from a 401's WWW-Authenticate header.
@@ -396,24 +611,19 @@ impl Net {
 
     /// Fetch `/api/dump` from every configured controller and merge into `state`.
     pub fn poll_dump(&mut self, state: &mut State, now_ms: u32) {
-        for host in HOSTS {
-            match self.request("GET", host.ip, "/local/rainbird/app/api/dump", now_ms) {
-                Ok(len) => {
-                    let split = find_body(&self.body[..len]);
-                    if let Ok(text) = core::str::from_utf8(&self.body[split..len]) {
-                        parse_dump(text, state);
-                        self.last_error = None;
-                    } else {
-                        self.last_error = Some("dump was not valid UTF-8");
-                    }
-                }
-                Err(e) => self.last_error = Some(e),
-            }
+        state.local_ip = self.ip.map(|ip| ip.octets());
+        state.n_controllers = self.n_hosts;
+        for index in 0..self.n_hosts {
+            state.controller_ips[index] = self.hosts[index].ip.octets();
         }
+        if self.job == Job::Idle && self.http.is_none() {
+            self.job = Job::Poll { next: 0 };
+        }
+        let _ = now_ms;
     }
 
     /// Trigger a relay. Path is built into a fixed buffer; no allocation.
-    pub fn trigger(&mut self, relay: u8, seconds: u32, now_ms: u32) {
+    pub fn trigger(&mut self, controller: u8, relay: u8, seconds: u32, now_ms: u32) {
         let mut path = Buf::<96>::new();
         let _ = write!(
             path,
@@ -421,10 +631,21 @@ impl Net {
         );
         // One controller for now; when several are configured the relay id will
         // carry which one it belongs to.
-        if let Some(host) = HOSTS.first() {
-            if let Err(e) = self.request("GET", host.ip, path.as_str(), now_ms) {
-                self.last_error = Some(e);
-            }
+        if controller as usize >= self.n_hosts {
+            return;
+        }
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        if let Err(e) = self.start_http(
+            HttpKind::Trigger,
+            controller as usize,
+            false,
+            path,
+            0,
+            now_ms,
+        ) {
+            self.last_error = Some(e);
         }
     }
 }
@@ -432,7 +653,9 @@ impl Net {
 fn status_code(response: &[u8]) -> u16 {
     // "HTTP/1.1 200 OK"
     let text = core::str::from_utf8(response).unwrap_or("");
-    let Some(first) = text.lines().next() else { return 0 };
+    let Some(first) = text.lines().next() else {
+        return 0;
+    };
     let mut parts = first.split(' ');
     let _ = parts.next();
     parts.next().and_then(|s| s.parse().ok()).unwrap_or(0)
@@ -445,6 +668,23 @@ fn find_body(response: &[u8]) -> usize {
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p + 4)
         .unwrap_or(0)
+}
+
+fn response_complete(response: &[u8]) -> bool {
+    let body = find_body(response);
+    if body == 0 {
+        return false;
+    }
+    let Ok(headers) = core::str::from_utf8(&response[..body]) else {
+        return false;
+    };
+    let length = headers.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    length.is_some_and(|length| response.len() >= body + length)
 }
 
 fn quoted_param<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -493,7 +733,14 @@ fn build_digest(out: &mut Buf<320>, method: &str, uri: &str, realm: &str, nonce:
 
     let mut response = Buf::<32>::new();
     md5_hex(
-        &[ha1.as_str(), nonce, nc_buf.as_str(), cnonce, "auth", ha2.as_str()],
+        &[
+            ha1.as_str(),
+            nonce,
+            nc_buf.as_str(),
+            cnonce,
+            "auth",
+            ha2.as_str(),
+        ],
         &mut response,
     );
 
@@ -514,12 +761,73 @@ fn build_digest(out: &mut Buf<320>, method: &str, uri: &str, realm: &str, nonce:
 impl Net {
     /// POST /api/stop. The controller cancels the whole run, queue included.
     pub fn stop(&mut self, now_ms: u32) {
-        if let Some(host) = HOSTS.first() {
-            // The endpoint is a POST with no body; a GET would be rejected, so
-            // this reuses the digest machinery with the method overridden.
-            if let Err(e) = self.request("POST", host.ip, "/local/rainbird/app/api/stop", now_ms) {
-                self.last_error = Some(e);
-            }
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::StopAll { next: 0 };
+        let _ = now_ms;
+    }
+}
+
+/// Merge one controller into a flat model while retaining private routing ids.
+fn merge_controller(state: &mut State, remote: &State, controller: u8, online: bool) {
+    let relay_base = state.n_relays;
+    for source in remote.relays[..remote.n_relays].iter() {
+        if state.n_relays >= state.relays.len() {
+            break;
         }
+        let mut relay = *source;
+        relay.remote_id = source.id;
+        relay.controller = controller;
+        relay.id = (state.n_relays + 1) as u8;
+        // Keep names/config from the last good snapshot, but never present a
+        // stale energized state for a controller that is currently offline.
+        relay.on = online && source.on;
+        state.relays[state.n_relays] = relay;
+        state.n_relays += 1;
+    }
+
+    let global_id = |remote_id: u8| -> u8 {
+        remote.relays[..remote.n_relays]
+            .iter()
+            .position(|r| r.id == remote_id)
+            .map(|i| (relay_base + i + 1) as u8)
+            .unwrap_or(0)
+    };
+    for source in remote.starts[..remote.n_starts].iter() {
+        if state.n_starts >= state.starts.len() {
+            break;
+        }
+        let mut start = *source;
+        for entry in start.entries[..start.n_entries.min(MAX_ENTRIES)].iter_mut() {
+            entry.relay = global_id(entry.relay);
+        }
+        state.starts[state.n_starts] = start;
+        state.n_starts += 1;
+    }
+    for analog in remote.analogs[..remote.n_analogs].iter() {
+        if state.n_analogs >= state.analogs.len() {
+            break;
+        }
+        state.analogs[state.n_analogs] = *analog;
+        state.n_analogs += 1;
+    }
+    if online && remote.clock_valid && !state.clock_valid {
+        state.hh = remote.hh;
+        state.mm = remote.mm;
+        state.ss = remote.ss;
+        state.clock_frac_ms = 0;
+        state.clock_valid = true;
+    }
+    if online && remote.running {
+        state.running = true;
+        state.active = global_id(remote.active as u8) as i32;
+        state.left_s = remote.left_s;
+    }
+    if online {
+        state.queued = state.queued.saturating_add(remote.queued);
+    }
+    state.max_run_s = state.max_run_s.min(remote.max_run_s);
+    if online && remote.err.len > 0 {
+        state.err = remote.err;
     }
 }
