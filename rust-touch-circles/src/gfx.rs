@@ -22,12 +22,13 @@ pub const H: usize = 480;
 pub const STRIPE_ROWS: usize = 32;
 pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 
-// Worst case is INFO: four controllers, six visible analog rows plus one
-// clipped scrolling row, a running badge, ten ambient bubbles, and foreground
-// tap ripples. Keep fixed storage (and
-// therefore deterministic memory use), but leave enough headroom that playful
-// background effects can never evict functional foreground primitives.
-pub const MAX_PRIMS: usize = 80;
+// Worst case is the schedule editor: six entry rows of six primitives each, the
+// clock adjusters, the six entry controls, and a scrollbar - with ripples and a
+// running badge on top. Fixed storage keeps memory use deterministic; the
+// headroom exists because anything past the cap is silently dropped, so a shortage
+// would present as a button that is simply not drawn. `prims=` in the heartbeat
+// reports the peak against this.
+pub const MAX_PRIMS: usize = 112;
 /// Longest string any single text primitive can hold. Relay names are the only
 /// unbounded input and are truncated to this on the way in.
 pub const MAX_TEXT: usize = 28;
@@ -263,14 +264,10 @@ pub enum Prim {
         alpha: u8,
         text: Text,
     },
-    /// One row of a keyboard: evenly spaced key plates, each with a single
-    /// character centred on it.
+    /// One keyboard row: evenly spaced plates, one character on each.
     ///
-    /// This exists because a keyboard drawn from ordinary primitives costs two
-    /// of them per key - about eighty for a QWERTY layout, which on its own
-    /// would exceed MAX_PRIMS. A key row is a *regular grid*, though, so all of
-    /// its geometry follows from the band plus a character count, and the whole
-    /// row collapses into a single primitive. Four of these draw the keyboard.
+    /// Exists because two primitives per key is about eighty for QWERTY, past
+    /// MAX_PRIMS on its own. A row is a regular grid, so it collapses into one.
     KeyRow {
         x0: i32,
         y0: i32,
@@ -542,12 +539,9 @@ impl Scene {
     }
 }
 
-/// Horizontal bounds of key slot `index` of `n` within a band.
-///
-/// Public, and the only place this arithmetic exists: the renderer places the
-/// plates with it and the UI resolves a touch to a key with it, so a key can
-/// never drift away from the region that presses it - the same discipline the
-/// `l::` layout constants enforce for everything else.
+/// Bounds of key slot `index` of `n`. The only place this arithmetic exists: the
+/// renderer places plates with it and the UI resolves touches with it, so a key
+/// cannot drift from the region that presses it.
 pub fn key_slot(x0: i32, x1: i32, gap: i32, n: usize, index: usize) -> (i32, i32) {
     let span = x1 - x0;
     let n = n.max(1) as i32;
@@ -923,18 +917,12 @@ fn key_row_prim(
     }
 }
 
-/// One scanline of the occluding disc batch.
+/// One scanline of the occluding disc batch: front-to-back, keeping the intervals
+/// already written, so total writes per row are bounded by the row width however
+/// many discs overlap. Painting them back-to-front costs a full-screen fill each.
 ///
-/// Walks the discs front-to-back - newest first - keeping the x-intervals already
-/// written, and fills only the parts of each disc that nothing nearer has
-/// claimed. Total writes per row are therefore bounded by the row's width no
-/// matter how many discs overlap, which is the whole point: painting these
-/// back-to-front costs a full-screen fill *per disc*.
-///
-/// Edges are hard here rather than anti-aliased, as in the demo this came from.
-/// At radii of hundreds of pixels the difference is invisible, and a partially
-/// transparent edge pixel cannot be treated as covering without leaving seams
-/// where discs meet.
+/// Edges are hard rather than anti-aliased, as in the demo: a partly transparent
+/// edge pixel cannot be treated as covering without leaving seams.
 fn discs_row(row: &mut [u8], y: i32, discs: &[Disc]) {
     // Opaque intervals already written, sorted and disjoint.
     let mut covered = [(0i32, 0i32); MAX_DISCS];

@@ -421,14 +421,10 @@ impl Net {
         // A DHCP socket that already holds a lease will not ask for a new one on
         // a different network, so it is reset along with the address.
         self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
-        // Leave the old network *completely* before joining the new one. This one
-        // is driven to completion rather than fired and forgotten: connecting
-        // while a disconnect is still in flight leaves the driver's station
-        // control block invalid, and the next connect then returns
-        // ESP_ERR_WIFI_CONN - which esp-radio turns into a panic rather than an
-        // error, because its error table does not map that code. Bounded, and
-        // only reached when actually associated, so the pause is short and the UI
-        // is already showing its connecting screen.
+        // Driven to completion, not fired and forgotten: connecting while a
+        // disconnect is in flight leaves the station control block invalid, and the
+        // next connect returns ESP_ERR_WIFI_CONN - which esp-radio panics on rather
+        // than reporting, since its error table does not map that code.
         if self.controller.is_connected() {
             let _ = block_on_deadline(self.controller.disconnect_async(), 1_000);
         }
@@ -507,12 +503,9 @@ impl Net {
         // A lost AP must never strand the panel or require a reboot. Retrying is
         // also one-shot/non-blocking for the same reason as initial association.
         //
-        // The interval has to outlast a whole association attempt, not merely be
-        // "often enough". Issuing a connect while one is already in flight makes
-        // the driver return ESP_ERR_WIFI_CONN, and esp-radio panics on that code
-        // instead of reporting it - so a retry that overlaps an attempt takes the
-        // panel down. A wrong password takes about ten seconds to be rejected;
-        // fifteen clears it with room to spare.
+// Must outlast a whole association attempt: an overlapping connect returns
+        // ESP_ERR_WIFI_CONN, which esp-radio panics on. A wrong password takes
+        // about ten seconds to be rejected.
         const RECONNECT_MS: u32 = 15_000;
         if !self.controller.is_connected()
             && now_ms.wrapping_sub(self.last_connect_attempt_ms) >= RECONNECT_MS

@@ -716,17 +716,14 @@ pub struct Ui {
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
     observed_run_total_s: u32,
-    /// Smooth remaining time for the active entry, in milliseconds.
-    ///
-    /// Anchored to the local clock when the entry changes, and then simply
-    /// counted down - never recomputed from a poll. The controller reports whole
-    /// truncated seconds, so its answer disagrees with a smooth prediction by up
-    /// to a second; folding every poll back in made the arcs jump backwards twice
-    /// a second, which is the "glitching back and forth". Polls now decide *which*
-    /// entry is running, not where inside it we are.
+    /// Remaining time for the active entry: anchored to the local clock when the
+    /// entry changes, then counted down, never recomputed from a poll. The
+    /// controller reports truncated whole seconds, so folding each poll back in
+    /// made the arcs jump backwards. Polls decide *which* entry runs, not where
+    /// inside it we are.
     run_left_ms: u32,
-    /// (active relay, entries still queued) - the identity of the entry the
-    /// anchor belongs to. A change here, and nothing else, re-anchors.
+    /// The entry the anchor belongs to; a change to it, and nothing else,
+    /// re-anchors.
     run_key: (i32, u32),
     run_anchor_ms: u32,
     run_anchor_left_ms: u32,
@@ -882,12 +879,9 @@ impl Ui {
 
     /// Go one level deeper: remember where we are, then transition.
     ///
-    /// Every forward move goes through here, and Back is always `back()`. This
-    /// replaced a table of hardcoded parents, which was wrong by construction -
-    /// screens reachable from more than one place needed a remembered caller
-    /// anyway (the countdown had one, the keyboard had another), and any screen
-    /// added without a table entry silently fell through to Home. That is exactly
-    /// how Back on the demo page ended up going home instead of to Extras.
+    /// Replaces a table of hardcoded parents, which was wrong by construction -
+    /// screens reachable from two places needed a remembered caller anyway, and a
+    /// screen added without an entry silently fell through to Home.
     fn open(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
         let from = self.interactive_screen();
         if self.nav_len == NAV_DEPTH {
@@ -913,11 +907,9 @@ impl Ui {
         to
     }
 
-    /// Return to a screen already in the history, dropping everything above it.
-    ///
-    /// For the transitions that finish a task several levels deep and belong back
-    /// where it started - committing an edit, confirming a removal, joining a
-    /// network. Popping one level at a time would land on the keyboard again.
+    /// Return to a screen already in the history, dropping everything above it -
+    /// for the transitions that finish a task several levels deep. Popping one
+    /// level at a time would land back on the keyboard.
     fn unwind_to(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
         if let Some(at) = self.nav[..self.nav_len].iter().rposition(|s| *s == to) {
             self.nav_len = at;
@@ -1428,21 +1420,13 @@ impl Ui {
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
-    /// True only while something is happening that a network transfer would
-    /// visibly disturb: a transition, a tap's feedback, a finger on the panel.
+    /// Something a network transfer would visibly disturb: a transition, a tap's
+    /// feedback, a finger on the panel.
     ///
-    /// Separate from `animating` because that answers a different question -
-    /// "does this frame need repainting" - and using it to gate polling was a
-    /// deadlock. `animating` is true for as long as a run is active, so during a
-    /// multi-entry schedule the panel stopped polling *for the whole run*: the
-    /// first entry's bar filled from the local clock prediction, and then nothing
-    /// ever arrived to say the next entry had started. The countdown sat at 00:00
-    /// and every progress bar froze until the run was stopped by hand.
-    ///
-    /// A continuously repainting countdown is not a reason to withhold a poll. It
-    /// is the moment a poll matters most, and its arc is driven from elapsed time
-    /// rather than accumulated frames, so a transfer costs it nothing but one
-    /// slightly longer frame.
+    /// Deliberately not `animating`, which stays true for as long as a relay runs.
+    /// Gating polls on that deadlocked a multi-entry schedule: nothing could arrive
+    /// to say the next entry had started, so the countdown sat at 00:00 until the
+    /// run was stopped by hand.
     pub fn interaction_active(&self) -> bool {
         self.wipe.is_some()
             || self.ripples.iter().any(|r| r.active)
@@ -1604,19 +1588,18 @@ impl Ui {
                             + 21,
                     },
                 );
-                // EDIT is always there; everything else on the right depends on
-                // the mode - the run button and the edit controls share that
-                // column, which is what gives the controls room.
-                let (ex0, ey0, ex1, ey1) = l::EDIT;
-                self.zone(
-                    Target::EditSave,
-                    Zone::Rect {
-                        x0: ex0,
-                        y0: ey0,
-                        x1: ex1,
-                        y1: ey1,
-                    },
-                );
+                if self.editing || self.can_edit(state) {
+                    let (ex0, ey0, ex1, ey1) = l::EDIT;
+                    self.zone(
+                        Target::EditSave,
+                        Zone::Rect {
+                            x0: ex0,
+                            y0: ey0,
+                            x1: ex1,
+                            y1: ey1,
+                        },
+                    );
+                }
                 if self.editing {
                     let (ax0, ay0, ax1, ay1) = l::ARMED;
                     self.zone(
@@ -2257,14 +2240,9 @@ impl Ui {
         self.menu_scrollbar(scene, Screen::Extras, C_INFO, alpha);
     }
 
-    /// One settings row, built exactly like a schedule row: a plate, a status
-    /// dot, the thing itself on the left in body type, its value on the right in
-    /// caption type, and a chevron if it opens.
-    ///
-    /// One baseline, not a title stacked over a subtitle. The stacked version
-    /// reserved room for a second line whether or not there was one, so rows
-    /// without a value looked top-heavy and mis-centred; here the left label is
-    /// always on the row's centre line and the right one simply may be absent.
+    /// Built exactly like a schedule row, and on one baseline: a title stacked
+    /// over a subtitle reserved room for a second line whether or not there was
+    /// one, which left rows without a value looking mis-centred.
     #[allow(clippy::too_many_arguments)]
     fn menu_row(
         &self,
@@ -2454,6 +2432,23 @@ impl Ui {
         }
     }
 
+    /// The schedule the detail page is showing, clamped once so drawing and
+    /// editing can never disagree about which one that is.
+    fn shown_schedule(&self, state: &State) -> Option<(usize, StartTime)> {
+        if state.n_starts == 0 {
+            return None;
+        }
+        let index = self.detail.min(state.n_starts - 1);
+        Some((index, state.starts[index]))
+    }
+
+    /// Editing is refused while this schedule is watering: the draft would be
+    /// written back over a config the controller is mid-way through using.
+    fn can_edit(&self, state: &State) -> bool {
+        self.shown_schedule(state)
+            .is_some_and(|(_, schedule)| !schedule.running)
+    }
+
     /// Enter edit mode, or leave it by saving.
     fn edit_save(&mut self, state: &State, x: i32, y: i32, now_ms: u32) -> Action {
         if self.editing {
@@ -2461,7 +2456,7 @@ impl Ui {
             self.ripple(x, y, C_RUN, now_ms);
             return Action::SaveSchedule;
         }
-        let Some(schedule) = state.starts.get(self.detail).copied() else {
+        let Some((_, schedule)) = self.shown_schedule(state).filter(|(_, s)| !s.running) else {
             return Action::None;
         };
         self.draft = schedule;
@@ -2613,12 +2608,9 @@ impl Ui {
         self.open(Screen::Connecting, x, y, now_ms);
     }
 
-    /// Drive the connecting screen: give up after a while, and once the network
-    /// has let us in, hold the confirmation briefly and then return by itself.
-    ///
-    /// A timeout is the only way to detect failure here - a rejected password is
-    /// indistinguishable from one that simply has not been answered yet, because
-    /// the driver's disconnect events are not exposed by this release.
+    /// A timeout is the only way to detect failure: a rejected password is
+    /// indistinguishable from one not yet answered, since the driver's disconnect
+    /// events are not exposed by this release.
     fn update_connect(&mut self, state: &State, now_ms: u32) {
         if self.interactive_screen() != Screen::Connecting {
             return;
@@ -3077,12 +3069,8 @@ impl Ui {
         self.menu_scrollbar(scene, Screen::Controller, C_CONFIG, alpha);
     }
 
-    /// The circles demo, given the whole panel.
-    ///
-    /// No heading, no status line, no ambient bubbles, no battery and no run badge
-    /// - see `draw_screen` and `build`. Just the animation and the Back button, so
-    /// the page behaves like the demo it came from rather than like a settings
-    /// page that happens to have circles on it.
+    /// No heading, status line, ambient bubbles, battery or run badge - see
+    /// `draw_screen` and `build`. Just the animation and a way back.
     fn draw_bubbles_game(&mut self, scene: &mut Scene, now_ms: u32, alpha: u8) {
         self.game.draw(scene, now_ms, alpha);
         // Drawn last so it survives whatever lands on the panel: a Back button
@@ -3090,10 +3078,8 @@ impl Ui {
         self.draw_back(scene, alpha);
     }
 
-    /// Confirmation for removing a controller. A full screen rather than a
-    /// dialog: the panel has no notion of a modal, and something this hard to
-    /// undo - the address may have taken a walk to find - deserves the whole
-    /// screen's attention rather than a second small button next to the first.
+    /// A full screen rather than a dialog: the panel has no notion of a modal, and
+    /// an address may have taken a walk to find.
     fn draw_confirm(&mut self, scene: &mut Scene, alpha: u8) {
         let controller = self
             .settings
@@ -3873,15 +3859,17 @@ impl Ui {
         } else {
             let _ = write!(sub, "DISARMED");
         }
-        scene.label(
-            CX,
-            152,
-            FontId::Caption,
-            MUTED,
-            alpha,
-            Align::Center,
-            sub.as_str(),
-        );
+        if !sub.as_str().is_empty() {
+            scene.label(
+                CX,
+                152,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Center,
+                sub.as_str(),
+            );
+        }
 
         // Entries run top to bottom in the order the controller will drive them.
         let first = (self.detail_scroll / l::DETAIL_PITCH) as usize;
@@ -4012,28 +4000,30 @@ impl Ui {
         }
         scene.clip_reset();
 
-        // EDIT, or SAVE while editing - same place either way. The run button
-        // gives up its column to the edit controls, which is what makes room for
-        // them.
-        let (ex0, ey0, ex1, ey1) = l::EDIT;
-        scene.pill(
-            ex0,
-            ey0,
-            ex1,
-            ey1,
-            (ey1 - ey0) / 2,
-            if editing { C_RUN } else { rgb(24, 52, 100) },
-            alpha,
-        );
-        scene.label(
-            (ex0 + ex1) / 2,
-            (ey0 + ey1) / 2 + 10,
-            FontId::Caption,
-            if editing { rgb(4, 22, 14) } else { INK },
-            alpha,
-            Align::Center,
-            if editing { "SAVE" } else { "EDIT" },
-        );
+        // SAVE takes EDIT's place, so the button that finishes is where the one
+        // that started was. Hidden entirely while this schedule waters: the run is
+        // the thing to watch then, and STOP is the only control that makes sense.
+        if editing || self.can_edit(state) {
+            let (ex0, ey0, ex1, ey1) = l::EDIT;
+            scene.pill(
+                ex0,
+                ey0,
+                ex1,
+                ey1,
+                (ey1 - ey0) / 2,
+                if editing { C_RUN } else { rgb(24, 52, 100) },
+                alpha,
+            );
+            scene.label(
+                (ex0 + ex1) / 2,
+                (ey0 + ey1) / 2 + 10,
+                FontId::Caption,
+                if editing { rgb(4, 22, 14) } else { INK },
+                alpha,
+                Align::Center,
+                if editing { "SAVE" } else { "EDIT" },
+            );
+        }
 
         if editing {
             self.draw_edit_controls(scene, state, &s, alpha);

@@ -1,20 +1,13 @@
-//! Settings that survive a reboot, kept in the flash `nvs` partition.
+//! Settings that survive a reboot, in the flash `nvs` partition - which the
+//! partition table already reserves and nothing else here touches.
 //!
-//! The board has no SD card, but it does have 16 MiB of SPI flash, and the
-//! partition table the bootloader prints already reserves `nvs` at 0x9000 for
-//! exactly this. Nothing else in the firmware touches it, so this owns it.
+//! One fixed-size record rather than a key-value store: the blob is a few hundred
+//! bytes and is rewritten as a unit, so a save is one erase and one program, and
+//! wear levelling would buy nothing for a config edited a few times a year.
 //!
-//! Deliberately a single fixed-size record rather than a key-value store. The
-//! whole settings blob is a few hundred bytes, it is rewritten as a unit, and a
-//! flash sector is 4 KiB - so a full-record write is one erase and one program.
-//! `sequential-storage` or a real NVS implementation would buy wear levelling
-//! and partial updates that a config changed by hand a few times a year does not
-//! need.
-//!
-//! Integrity: a magic number, a format version and a CRC over the payload. Any
-//! of those failing means "no saved settings", and the build-time defaults from
-//! `wifi.txt` are used instead - so a corrupt or first-boot sector degrades to
-//! the compiled-in configuration rather than to a broken panel.
+//! A magic number, a format version and a CRC guard it. Any of them failing means
+//! "no saved settings", so a corrupt or first-boot sector degrades to the
+//! compiled-in defaults rather than to a broken panel.
 
 use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
@@ -38,8 +31,8 @@ pub const MAX_SECRET: usize = 64;
 pub const MAX_USER: usize = 32;
 pub const MAX_NAME: usize = 20;
 
-/// A fixed-capacity string stored inline, so the whole record is Copy and has a
-/// stable on-flash layout without any serialization framework.
+/// Inline capacity, so the record stays Copy and its on-flash layout is fixed
+/// without a serialization framework.
 #[derive(Clone, Copy)]
 pub struct FixedStr<const N: usize> {
     pub bytes: [u8; N],
@@ -206,8 +199,7 @@ pub fn parse_ip(s: &str) -> Option<[u8; 4]> {
     Some(octets)
 }
 
-/// CRC-32 (IEEE), computed bitwise. A table would be faster, but this runs twice
-/// per settings change, not per frame.
+/// CRC-32 (IEEE), bitwise: this runs twice per settings change, not per frame.
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in data {
@@ -340,7 +332,6 @@ impl<'d> Store<'d> {
         (Settings::defaults(), false)
     }
 
-    /// Erase the sector and write the record. One erase, one program.
     pub fn save(&mut self, settings: &Settings) -> Result<(), &'static str> {
         let mut raw = [0u8; SECTOR];
         let len = encode(settings, &mut raw);

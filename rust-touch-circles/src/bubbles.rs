@@ -1,37 +1,16 @@
-//! The circles demo this firmware grew out of, kept playable as its own page.
+//! The circles demo from the project's `main` branch, as a page of its own.
 //!
-//! This is the animation from the project's `main` branch: touch anywhere and an
-//! opaque disc of the next palette colour grows from that point to the farthest
-//! corner with a cubic ease, holds, then fades. Drag and you leave a trail of
-//! them, because a new contact more than 28 px from any live circle's origin
-//! starts another one.
+//! The model is reproduced exactly - timings, radii, palette, spawn rule, and the
+//! culling - but drawn through our compositor rather than the original's own
+//! display driver, which owned the panel and cannot coexist with other screens.
 //!
-//! Ported rather than copied. On `main` the demo *is* the firmware, so it owns
-//! the panel: it drives the CO5300's window and stripe commands itself, updates
-//! single 16x32 tiles while one circle grows, and fades the last circle with the
-//! hardware brightness register instead of touching pixels. None of that can
-//! coexist with a UI that composites other screens, so the model - timings,
-//! radii, palette, spawn rule, and the culling that keeps it cheap - is
-//! reproduced exactly and drawn through the ordinary scanline compositor.
-//!
-//! Two deliberate differences, both forced by living inside the UI:
-//!
-//! - The fade is alpha rather than panel brightness. Dimming the backlight would
-//!   dim the Back button with it, and this page keeps one.
-//! - Growth is in whole pixels rather than Q4. At 60 fps a circle gains about
-//!   8 px a frame, so sub-pixel radii were never visible in the first place.
-//!
-//! Cost is bounded by the same trick the original uses: a circle that has
-//! finished growing and is still opaque covers the whole panel, so everything
-//! older is discarded. The live count therefore stays small however hard the
-//! panel is tapped. What remains is cheap because a fully opaque span takes
-//! `fill_span`'s paired-store path - close to a memset - and only the fading
-//! circle, which by that rule is alone, pays for per-pixel blending.
+//! Two differences forced by living inside the UI: the fade is alpha rather than
+//! the panel brightness register, which would dim the Back button with it; and
+//! growth is in whole pixels rather than Q4, which at ~8 px a frame never showed.
 
 use crate::gfx::{H, Scene, W, rgb};
 
-/// As on `main`. The culling below means this is a safety limit rather than a
-/// number the animation normally approaches.
+/// As on `main`; the culling below keeps the live count far under it.
 const MAX_CIRCLES: usize = 32;
 const GROW_MS: u32 = 700;
 const FADE_MS: u32 = 520;
@@ -140,17 +119,11 @@ impl Bubbles {
         }
     }
 
-    /// True while anything is still moving, so the loop knows to keep painting.
     pub fn active(&self) -> bool {
         self.len != 0
     }
 
-    /// Oldest first, so the newest and smallest ends up on top - the layered look
-    /// the original has.
-    ///
-    /// `screen_alpha` is the page transition's own fade, folded in rather than
-    /// applied afterwards, so a circle mid-fade during a transition does not
-    /// briefly become more opaque than the screen carrying it.
+    /// Oldest first, so the newest and smallest ends up on top.
     pub fn draw(&self, scene: &mut Scene, now_ms: u32, screen_alpha: u8) {
         for circle in &self.circles[..self.len] {
             let (radius, alpha) = state(circle, now_ms);
@@ -166,9 +139,8 @@ impl Bubbles {
     }
 }
 
-/// Radius and opacity at `now_ms`: a cubic ease-out to the far corner, then a
-/// smoothstep fade at full size. Both curves, and both durations, are the
-/// original's.
+/// A cubic ease-out to the far corner, then a smoothstep fade at full size -
+/// both curves and both durations are the original's.
 fn state(circle: &Circle, now_ms: u32) -> (i32, u8) {
     let age_ms = now_ms.wrapping_sub(circle.born_ms);
     if age_ms < GROW_MS {
@@ -183,8 +155,7 @@ fn state(circle: &Circle, now_ms: u32) -> (i32, u8) {
     (circle.full_r, (((32_768 - smooth) * 255) >> 15) as u8)
 }
 
-/// Q15 throughout, so every product stays inside a u32 and RV32 never reaches
-/// for multiword arithmetic.
+/// Q15 throughout, so every product stays inside a u32.
 #[inline]
 fn smoothstep_q15(elapsed: u32, duration: u32) -> u32 {
     let t = elapsed * 32_768 / duration;

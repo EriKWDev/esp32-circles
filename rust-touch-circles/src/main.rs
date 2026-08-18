@@ -211,6 +211,10 @@ fn main() -> ! {
     let mut present_us = 0u32;
     let mut last_poll_ms = 0u32;
     let mut last_power_poll_ms = now_ms();
+    // Peak primitives in a frame. The scene silently ignores anything past its
+    // capacity, which would present as a button that is simply not drawn, so the
+    // headroom is worth being able to see.
+    let mut peak_prims = 0usize;
     let mut dirty = true;
 
     loop {
@@ -413,6 +417,7 @@ fn main() -> ! {
             let built = SystemTimer::unit_value(Unit::Unit0) as u32;
             lcd.present(&scene);
             let done = SystemTimer::unit_value(Unit::Unit0) as u32;
+            peak_prims = peak_prims.max(scene.len);
             build_us += built.wrapping_sub(started) / 16;
             present_us += done.wrapping_sub(built) / 16;
             dirty = false;
@@ -433,11 +438,13 @@ fn main() -> ! {
             // transfer is the limit and the CPU is keeping up.
             let n = frames.max(1);
             esp_println::println!(
-                "up={}s fps={} build={}us present={}us screen={} touch={} run={} left={} ip={:?} neterr={:?}",
+                "up={}s fps={} build={}us present={}us prims={}/{} screen={} touch={} run={} left={} ip={:?} neterr={:?}",
                 t / 1000,
                 frames,
                 build_us / n,
                 present_us / n,
+                peak_prims,
+                gfx::MAX_PRIMS,
                 match ui.screen {
                     ui::Screen::Home => "home",
                     ui::Screen::Inspect => "inspect",
@@ -466,6 +473,7 @@ fn main() -> ! {
             frames = 0;
             build_us = 0;
             present_us = 0;
+            peak_prims = 0;
         }
     }
 }
