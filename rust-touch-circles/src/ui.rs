@@ -26,7 +26,9 @@ const INK: u16 = rgb(238, 245, 250);
 const MUTED: u16 = rgb(122, 143, 158);
 const DIM: u16 = rgb(70, 84, 96);
 
-const BG_HOME: u16 = rgb(9, 13, 17);
+/// True black. On an OLED the pixels are simply off, so this is the one
+/// background choice that is also a power decision.
+const BG_HOME: u16 = rgb(0, 0, 0);
 const BG_INSPECT: u16 = rgb(8, 22, 48);
 const BG_FORCE: u16 = rgb(38, 22, 4);
 const BG_RUN: u16 = rgb(5, 30, 20);
@@ -631,6 +633,9 @@ const WIPE_MAX_MS: u32 = 2_000;
 const NAV_DEPTH: usize = 8;
 
 pub struct Ui {
+    /// Dimmed, outlined, black - see `draw_home`. Set by main, which owns the
+    /// idle timer because it also owns the backlight and the radio.
+    pub idle: bool,
     pub screen: Screen,
     /// Screens above this one, oldest first - see `open` and `back`.
     nav: [Screen; NAV_DEPTH],
@@ -755,6 +760,7 @@ const NO_RIPPLE: Ripple = Ripple {
 impl Ui {
     pub const fn new() -> Self {
         Self {
+            idle: false,
             screen: Screen::Home,
             nav: [Screen::Home; NAV_DEPTH],
             nav_len: 0,
@@ -1445,7 +1451,14 @@ impl Ui {
     pub fn build(&mut self, scene: &mut Scene, state: &State, now_ms: u32) {
         self.n_zones = 0;
         let base = self.screen;
-        scene.clear(base.background());
+        // Idle paints on black whatever screen is showing: unlit pixels are the
+        // saving, and the dimmed backlight would make a tinted background muddy
+        // rather than dark.
+        scene.clear(if self.idle {
+            rgb(0, 0, 0)
+        } else {
+            base.background()
+        });
 
         match self.wipe {
             None => self.draw_screen(scene, base, state, now_ms, 255),
@@ -1908,7 +1921,7 @@ impl Ui {
         // The ambient decoration is skipped on the demo page: its own circles are
         // the content there, and a second, different kind of circle drifting
         // behind them would not read as the same animation.
-        if screen != Screen::Bubbles {
+        if screen != Screen::Bubbles && !self.idle {
             self.draw_bubbles(scene, screen, now_ms, alpha);
         }
         match screen {
@@ -2159,28 +2172,44 @@ impl Ui {
         );
 
         // Two peers, same shape and size; colour and order carry the hierarchy.
-        let (x0, y0, x1, y1) = l::HOME_INSPECT;
-        scene.pill(x0, y0, x1, y1, l::HOME_PILL_R, C_INSPECT, alpha);
-        scene.label(
-            CX,
-            (y0 + y1) / 2 + 14,
-            FontId::Body,
-            INK,
-            alpha,
-            Align::Center,
-            "SCHEDULES",
-        );
-
-        let (x0, y0, x1, y1) = l::HOME_FORCE;
-        scene.pill(x0, y0, x1, y1, l::HOME_PILL_R, C_FORCE, alpha);
-        scene.label(
-            CX,
-            (y0 + y1) / 2 + 14,
-            FontId::Body,
+        // Idle turns them inside out - an outline and coloured type on black -
+        // which is both quieter to look at and cheaper to light.
+        self.home_button(scene, l::HOME_INSPECT, C_INSPECT, INK, "SCHEDULES", alpha);
+        self.home_button(
+            scene,
+            l::HOME_FORCE,
+            C_FORCE,
             rgb(26, 15, 2),
+            "MANUAL",
+            alpha,
+        );
+    }
+
+    fn home_button(
+        &self,
+        scene: &mut Scene,
+        rect: (i32, i32, i32, i32),
+        color: u16,
+        ink: u16,
+        caption: &str,
+        alpha: u8,
+    ) {
+        let (x0, y0, x1, y1) = rect;
+        let r = l::HOME_PILL_R;
+        scene.pill(x0, y0, x1, y1, r, color, alpha);
+        if self.idle {
+            // An outline is the filled plate with a black one punched out of it -
+            // two primitives, and no new shape in the renderer.
+            scene.pill(x0 + 3, y0 + 3, x1 - 3, y1 - 3, r - 3, rgb(0, 0, 0), alpha);
+        }
+        scene.label(
+            CX,
+            (y0 + y1) / 2 + 14,
+            FontId::Body,
+            if self.idle { color } else { ink },
             alpha,
             Align::Center,
-            "MANUAL",
+            caption,
         );
     }
 

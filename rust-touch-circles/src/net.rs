@@ -40,6 +40,8 @@ const REQ_BODY: usize = 512;
 /// One `/api/dump` is well under 1 KiB today; this leaves generous headroom for
 /// more controllers' relays without risking a truncated parse.
 const RX_BODY: usize = 4096;
+/// How long one HTTP request may take before it is abandoned.
+const REQUEST_TIMEOUT_MS: u32 = 2_500;
 
 /// smoltcp's `Device` over esp-radio's token pair.
 ///
@@ -494,6 +496,10 @@ impl Net {
         out.scanned = true;
     }
 
+    // Wi-Fi modem sleep was tried here and removed. Maximum put idle polls past
+    // the request timeout outright; Minimum still made them fail more often than
+    // leaving the receiver on. Against an OLED at full brightness the radio is a
+    // rounding error, so it bought little and cost freshness.
     pub fn is_connected(&self) -> bool {
         self.controller.is_connected()
     }
@@ -584,7 +590,11 @@ impl Net {
         }
 
         let mut http = self.http.take().unwrap();
-        if now_ms.wrapping_sub(http.started_ms) > 1_000 {
+        // Generous, because it only ever fires on a request that has already
+        // gone wrong: a slow reply costs nothing here, while a timeout that is
+        // merely impatient drops a good response and marks a live controller
+        // offline.
+        if now_ms.wrapping_sub(http.started_ms) > REQUEST_TIMEOUT_MS {
             self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
             self.finish_error(http, state, "request timed out");
             return true;

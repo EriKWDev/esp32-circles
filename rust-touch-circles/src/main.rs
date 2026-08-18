@@ -54,6 +54,16 @@ const INFO_POLL_INTERVAL_MS: u32 = 500;
 /// the next is only visible through a poll, and at two seconds that reads as the
 /// progress bar sticking and then jumping.
 const RUN_POLL_INTERVAL_MS: u32 = 500;
+/// Idle: the panel is on a wall doing nothing, so it asks less often too.
+const IDLE_POLL_INTERVAL_MS: u32 = 15_000;
+/// How long without a touch before dimming.
+const IDLE_AFTER_MS: u32 = 45_000;
+/// Backlight while idle. Low enough to save real power, high enough to read the
+/// clock across a room.
+const IDLE_BRIGHTNESS: u8 = 14;
+/// Backlight steps per loop pass, which at frame rate is a fade of about a
+/// second either way - the register is free to write, so this costs nothing.
+const BRIGHTNESS_STEP: u8 = 6;
 
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
@@ -215,6 +225,9 @@ fn main() -> ! {
     // capacity, which would present as a button that is simply not drawn, so the
     // headroom is worth being able to see.
     let mut peak_prims = 0usize;
+    let mut last_input_ms = now_ms();
+    let mut idle = false;
+    let mut brightness = 255u8;
     let mut dirty = true;
 
     loop {
@@ -248,7 +261,16 @@ fn main() -> ! {
         }
         if event != touch::Event::None {
             dirty = true;
+            last_input_ms = t;
         }
+        // The touch that wakes the panel is not a button press. Waking on the
+        // press and then acting on it would mean a blind tap on a dim screen
+        // could start watering.
+        let event = if idle {
+            touch::Event::None
+        } else {
+            event
+        };
         match ui.input(event, &state, t) {
             Action::Trigger {
                 relay,
@@ -357,7 +379,9 @@ fn main() -> ! {
             // polling for the whole of a multi-entry schedule, so the countdown
             // stuck at 00:00 and every progress bar froze after the first entry.
             // A running schedule is when fresh state matters most.
-            let poll_interval = if ui.screen == ui::Screen::Info {
+            let poll_interval = if idle {
+                IDLE_POLL_INTERVAL_MS
+            } else if ui.screen == ui::Screen::Info {
                 INFO_POLL_INTERVAL_MS
             } else if state.running || state.queued > 0 {
                 // Following a sequence: the interesting transitions are the
@@ -375,6 +399,30 @@ fn main() -> ! {
                 n.poll_dump(&mut state, t);
                 dirty = true;
             }
+        }
+
+        // Idle after a while untouched, awake the moment anything is touched.
+        // Both the backlight and the radio's beacon interval follow, since those
+        // are what actually draw current - the display far more than the radio.
+        let want_idle = t.wrapping_sub(last_input_ms) >= IDLE_AFTER_MS;
+        if want_idle != idle {
+            idle = want_idle;
+            ui.idle = idle;
+            if !idle {
+                // Show the current state immediately on waking, not up to fifteen
+                // seconds later.
+                last_poll_ms = t.wrapping_sub(IDLE_POLL_INTERVAL_MS);
+            }
+            dirty = true;
+        }
+        let target = if idle { IDLE_BRIGHTNESS } else { 255 };
+        if brightness != target {
+            brightness = if brightness < target {
+                brightness.saturating_add(BRIGHTNESS_STEP).min(target)
+            } else {
+                brightness.saturating_sub(BRIGHTNESS_STEP).max(target)
+            };
+            lcd.set_brightness(brightness);
         }
 
         ui.update(&state, t);
