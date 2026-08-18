@@ -103,7 +103,9 @@ mod l {
     pub const ANALOG_X1: i32 = 438;
     pub const ANALOG_FIRST_CY: i32 = 183;
     pub const ANALOG_PITCH: i32 = 42;
-    pub const ANALOG_MAX_ROWS: usize = 7;
+    // Six rows fit the clipped viewport completely. A seventh row previously
+    // looked like accidental clipping and never enabled the scrollbar.
+    pub const ANALOG_MAX_ROWS: usize = 6;
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -255,7 +257,7 @@ const NO_BUBBLE: Bubble = Bubble {
     active: false,
 };
 const MAX_BUBBLES: usize = 10;
-const BUBBLE_MS: u32 = 760;
+const BUBBLE_MS: u32 = 1_050;
 
 /// A screen change, animated as a disc of the destination's colour growing from
 /// the point touched until it has swallowed the old screen.
@@ -403,7 +405,7 @@ impl Ui {
             x,
             y,
             born_ms: now_ms,
-            max_r: 34 + ((x as u32 ^ y as u32 ^ now_ms) % 23) as i32,
+            max_r: 86 + ((x as u32 ^ y as u32 ^ now_ms) % 55) as i32,
             active: true,
         };
         self.last_bubble_ms = now_ms;
@@ -744,7 +746,7 @@ impl Ui {
         // Keep the compact run affordance out of wipe frames. Popping it onto
         // the outgoing screen on the same frame a manual run starts made it
         // briefly intersect the expanding transition disc.
-        if self.wipe.is_none() && state.running && base != Screen::Running {
+        if state.running && self.interactive_screen() != Screen::Running {
             self.draw_running_badge(scene, state, 255);
         }
 
@@ -983,15 +985,20 @@ impl Ui {
             let age = now_ms.wrapping_sub(bubble.born_ms).min(BUBBLE_MS);
             let t = age * 32_768 / BUBBLE_MS;
             let radius = 3 + (bubble.max_r as u32 * ease_out_q15(t) / 32_768) as i32;
-            let fade = 66 * (32_768 - smoothstep_q15(t)) / 32_768;
+            let fade = 72 * (32_768 - smoothstep_q15(t)) / 32_768;
             let bubble_alpha = (fade * alpha as u32 / 255) as u8;
-            let thickness = if age > BUBBLE_MS * 4 / 5 { 2 } else { 4 };
+            let thickness = if age > BUBBLE_MS * 4 / 5 { 3 } else { 6 };
+            let color = if screen == Screen::Home {
+                rgb(156, 166, 174)
+            } else {
+                screen.accent()
+            };
             scene.ring(
                 bubble.x,
                 bubble.y,
                 radius,
                 (radius - thickness).max(0),
-                screen.accent(),
+                color,
                 bubble_alpha,
             );
         }
