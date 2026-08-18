@@ -226,6 +226,36 @@ impl State {
         }
         best
     }
+
+    /// Time-derived progress for a schedule whose daily window contains the
+    /// controller clock. Returns (elapsed, total, active entry, entry elapsed).
+    /// This is intentionally independent of UI state, so it also works after a
+    /// panel reboot; `run:` remains the authority for the persistent run badge.
+    pub fn schedule_progress(&self, index: usize) -> Option<(u32, u32, usize, u32)> {
+        let schedule = self.starts.get(index)?;
+        if !self.clock_valid || !schedule.enabled || schedule.n_entries == 0 {
+            return None;
+        }
+        let total = schedule.total_seconds();
+        if total == 0 || total >= 24 * 60 * 60 {
+            return None;
+        }
+        let now = self.hh as u32 * 3600 + self.mm as u32 * 60 + self.ss as u32;
+        let start = schedule.hh as u32 * 3600 + schedule.mm as u32 * 60;
+        let elapsed = (now + 24 * 60 * 60 - start) % (24 * 60 * 60);
+        if elapsed >= total {
+            return None;
+        }
+        let mut before = 0;
+        for (entry, item) in schedule.entries[..schedule.n_entries].iter().enumerate() {
+            let end = before + item.seconds as u32;
+            if elapsed < end {
+                return Some((elapsed, total, entry, elapsed - before));
+            }
+            before = end;
+        }
+        None
+    }
 }
 
 /// Split "a:b:c" style records: returns the field at `index` of a line whose

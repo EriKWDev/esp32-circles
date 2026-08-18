@@ -149,43 +149,37 @@ fn main() {
         );
     }
 
-    // One polished settings glyph as a tiny dedicated bitmap font. Keeping it
-    // in the font pipeline gives the same anti-aliased blitter as text without
-    // shipping a second TTF (or rebuilding a cog from runtime primitives).
-    const ICON_SIZE: usize = 48;
-    const SS: usize = 4;
-    let mut gear = vec![0u8; ICON_SIZE * ICON_SIZE];
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let mut inside = 0u32;
-            for sy in 0..SS {
-                for sx in 0..SS {
-                    let fx = x as f32 + (sx as f32 + 0.5) / SS as f32 - ICON_SIZE as f32 / 2.0;
-                    let fy = y as f32 + (sy as f32 + 0.5) / SS as f32 - ICON_SIZE as f32 / 2.0;
-                    let radius = (fx * fx + fy * fy).sqrt();
-                    let angle = fy.atan2(fx);
-                    // Eight broad, symmetric teeth with softly tapered
-                    // shoulders. Unlike the previous binary tooth/notch
-                    // profile this reads as a conventional settings gear at
-                    // both native size and during a wipe transition.
-                    let wave = (angle * 8.0).cos();
-                    let tooth = ((wave - 0.15) / 0.85).clamp(0.0, 1.0);
-                    let outer = 18.5 + tooth * 4.0;
-                    if radius >= 7.0 && radius <= outer {
-                        inside += 1;
-                    }
-                }
-            }
-            gear[y * ICON_SIZE + x] = (inside * 255 / (SS * SS) as u32) as u8;
-        }
+    // Navigation icons come from one professionally drawn typeface so the
+    // borderless settings button and circled back button share weight/style.
+    let icon_path = assets.join("Font-Awesome-7-Free-Solid-900.otf");
+    println!("cargo:rerun-if-changed={}", icon_path.display());
+    let icon_data = fs::read(&icon_path).unwrap();
+    let icon_face = fontdue::Font::from_bytes(icon_data, fontdue::FontSettings::default()).unwrap();
+    let mut icon_bitmap = Vec::new();
+    let mut icon_entries = String::new();
+    for ch in ['\u{f013}', '\u{f104}', '\u{f105}'] {
+        // gear, angle-left/right
+        let (metrics, coverage) = icon_face.rasterize(ch, 42.0);
+        let offset = icon_bitmap.len();
+        icon_bitmap.extend_from_slice(&coverage);
+        let top = -(metrics.ymin + metrics.height as i32);
+        writeln!(
+            generated_entry(&mut icon_entries),
+            "    Glyph {{ ch: '{}', w: {}, h: {}, left: {}, top: {}, advance: {}, offset: {} }},",
+            escape(ch),
+            metrics.width,
+            metrics.height,
+            metrics.xmin,
+            top,
+            metrics.advance_width.round() as i32,
+            offset,
+        )
+        .unwrap();
     }
-    fs::write(out_dir.join("font_icon.bin"), &gear).unwrap();
-    generated.push_str(
-        "pub static ICON: Font = Font {\n    glyphs: &[\n        \
-         Glyph { ch: '\\u{2699}', w: 48, h: 48, left: 0, top: -48, advance: 48, offset: 0 },\n    ],\n    \
-         coverage: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/font_icon.bin\")),\n    \
-         ascent: 48,\n    px: 48,\n};\n",
-    );
+    fs::write(out_dir.join("font_icon.bin"), &icon_bitmap).unwrap();
+    writeln!(generated,
+        "pub static ICON: Font = Font {{\n    glyphs: &[\n{icon_entries}    ],\n    coverage: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/font_icon.bin\")),\n    ascent: 42,\n    px: 42,\n}};\n"
+    ).unwrap();
 
     fs::write(out_dir.join("fonts.rs"), generated).unwrap();
     emit_secrets(&manifest, &out_dir);

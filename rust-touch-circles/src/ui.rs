@@ -50,7 +50,8 @@ mod l {
     /// (cx, cy, r). The panel is square with rounded corners, not round, so this
     /// sits properly in the top-left instead of being pulled toward the middle.
     pub const BACK: (i32, i32, i32) = (58, 58, 40);
-    pub const INFO: (i32, i32, i32) = (422, 58, 40);
+    pub const INFO: (i32, i32, i32) = (58, 58, 40);
+    pub const RUN_BADGE: (i32, i32, i32) = (422, 58, 32);
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
     /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
@@ -184,6 +185,11 @@ enum Target {
     RelayNext,
     InfoPrev,
     InfoNext,
+    SchedulePrev,
+    ScheduleNext,
+    DetailPrev,
+    DetailNext,
+    RunningBadge,
 }
 
 #[derive(Clone, Copy)]
@@ -268,6 +274,8 @@ pub struct Ui {
     pub selected: usize,
     relay_page: usize,
     info_page: usize,
+    schedule_page: usize,
+    detail_page: usize,
     dragging_slider: bool,
     /// When the current slider drag began. A drag is abandoned after
     /// DRAG_MAX_MS so a touch controller that latches a contact - and therefore
@@ -290,6 +298,7 @@ pub struct Ui {
     /// the real intent - follow the controller when a run *starts* or *ends*, and
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
+    observed_run_total_s: u32,
 }
 
 const NO_RIPPLE: Ripple = Ripple {
@@ -313,11 +322,14 @@ impl Ui {
             selected: 0,
             relay_page: 0,
             info_page: 0,
+            schedule_page: 0,
+            detail_page: 0,
             dragging_slider: false,
             drag_started_ms: 0,
             detail: 0,
             knob_q4: 0,
             last_running: false,
+            observed_run_total_s: 0,
         }
     }
 
@@ -419,7 +431,31 @@ impl Ui {
                     }
                     Target::Schedule(index) => {
                         self.detail = index;
+                        self.detail_page = 0;
                         self.start_wipe(Screen::Detail, x, y, now_ms);
+                        Action::None
+                    }
+                    Target::SchedulePrev => {
+                        self.schedule_page = self.schedule_page.saturating_sub(1);
+                        Action::None
+                    }
+                    Target::ScheduleNext => {
+                        let pages = state.n_starts.saturating_sub(1) / l::SCHED_MAX_ROWS + 1;
+                        self.schedule_page = (self.schedule_page + 1).min(pages.saturating_sub(1));
+                        Action::None
+                    }
+                    Target::DetailPrev => {
+                        self.detail_page = self.detail_page.saturating_sub(1);
+                        Action::None
+                    }
+                    Target::DetailNext => {
+                        let count = state.starts.get(self.detail).map_or(0, |s| s.n_entries);
+                        let pages = count.saturating_sub(1) / l::DETAIL_MAX_ROWS + 1;
+                        self.detail_page = (self.detail_page + 1).min(pages.saturating_sub(1));
+                        Action::None
+                    }
+                    Target::RunningBadge => {
+                        self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::None
                     }
                     Target::Inspect => {
@@ -531,18 +567,21 @@ impl Ui {
             self.knob_q4 += if delta.abs() <= 16 { delta } else { delta / 4 };
         }
 
-        // Edge-triggered; see `last_running`.
-        let started = state.running && !self.last_running;
+        // Preserve the largest observed remainder as the denominator for a
+        // manual run. A dump after reboot seeds this immediately.
+        if state.running {
+            self.observed_run_total_s = self.observed_run_total_s.max(state.left_s.max(1));
+        } else {
+            self.observed_run_total_s = 0;
+        }
+
+        // Ending a run may dismiss the dedicated timer, but starting one never
+        // steals navigation. The persistent badge is the explicit way back in.
         let ended = !state.running && self.last_running;
         self.last_running = state.running;
 
-        if self.wipe.is_none() {
-            if started && self.screen != Screen::Running {
-                self.start_wipe(Screen::Running, CX, CY, now_ms);
-            }
-            if ended && self.screen == Screen::Running {
-                self.start_wipe(Screen::Home, CX, CY, now_ms);
-            }
+        if self.wipe.is_none() && ended && self.screen == Screen::Running {
+            self.start_wipe(Screen::Home, CX, CY, now_ms);
         }
     }
 
@@ -553,6 +592,7 @@ impl Ui {
         self.wipe.is_some()
             || self.ripples.iter().any(|r| r.active)
             || self.screen == Screen::Running
+            || self.last_running
             || self.dragging_slider
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
@@ -655,8 +695,11 @@ impl Ui {
                         r: br,
                     },
                 );
-                for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
-                    let cy = l::SCHED_FIRST_CY + index as i32 * l::SCHED_PITCH;
+                let first = self.schedule_page * l::SCHED_MAX_ROWS;
+                let rows = state.n_starts.saturating_sub(first).min(l::SCHED_MAX_ROWS);
+                for row in 0..rows {
+                    let index = first + row;
+                    let cy = l::SCHED_FIRST_CY + row as i32 * l::SCHED_PITCH;
                     self.zone(
                         Target::Schedule(index),
                         Zone::Rect {
@@ -667,6 +710,13 @@ impl Ui {
                         },
                     );
                 }
+                self.register_pager(
+                    first,
+                    rows,
+                    state.n_starts,
+                    Target::SchedulePrev,
+                    Target::ScheduleNext,
+                );
             }
             Screen::Detail => {
                 self.zone(
@@ -676,6 +726,15 @@ impl Ui {
                         cy: by,
                         r: br,
                     },
+                );
+                let count = state.starts.get(self.detail).map_or(0, |s| s.n_entries);
+                let first = self.detail_page * l::DETAIL_MAX_ROWS;
+                self.register_pager(
+                    first,
+                    count.saturating_sub(first).min(l::DETAIL_MAX_ROWS),
+                    count,
+                    Target::DetailPrev,
+                    Target::DetailNext,
                 );
             }
             Screen::Info => {
@@ -786,6 +845,40 @@ impl Ui {
                 self.zone(Target::Cancel, Zone::Rect { x0, y0, x1, y1 });
             }
         }
+        if state.running && screen != Screen::Running {
+            let (cx, cy, r) = l::RUN_BADGE;
+            self.zone(Target::RunningBadge, Zone::Disc { cx, cy, r });
+        }
+    }
+
+    fn register_pager(
+        &mut self,
+        first: usize,
+        rows: usize,
+        total: usize,
+        prev: Target,
+        next: Target,
+    ) {
+        if first > 0 {
+            self.zone(
+                prev,
+                Zone::Disc {
+                    cx: 190,
+                    cy: 456,
+                    r: 24,
+                },
+            );
+        }
+        if first + rows < total {
+            self.zone(
+                next,
+                Zone::Disc {
+                    cx: 290,
+                    cy: 456,
+                    r: 24,
+                },
+            );
+        }
     }
 
     fn draw_screen(&mut self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
@@ -796,6 +889,9 @@ impl Ui {
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
+        }
+        if state.running && screen != Screen::Running {
+            self.draw_running_badge(scene, state, alpha);
         }
     }
 
@@ -811,17 +907,83 @@ impl Ui {
     }
 
     fn draw_back(&self, scene: &mut Scene, alpha: u8) {
-        let (bx, by, _) = l::BACK;
-        // A typographic chevron stays crisp and unambiguous at this size. The
-        // full 80 px touch target remains unchanged and intentionally invisible.
-        scene.label(bx, by + 13, FontId::Body, INK, alpha, Align::Center, "<");
+        let (bx, by, br) = l::BACK;
+        scene.ring(bx, by, br, br - 4, MUTED, alpha);
+        scene.label(
+            bx,
+            by + 14,
+            FontId::Icon,
+            INK,
+            alpha,
+            Align::Center,
+            "\u{f104}",
+        );
     }
 
     fn draw_cog(&self, scene: &mut Scene, alpha: u8) {
         let (x, y, _) = l::INFO;
         // The icon itself is the affordance; the generous invisible hit area
         // does not need another enclosing circle.
-        scene.label(x, y + 24, FontId::Icon, INK, alpha, Align::Center, "⚙");
+        scene.label(
+            x,
+            y + 15,
+            FontId::Icon,
+            INK,
+            alpha,
+            Align::Center,
+            "\u{f013}",
+        );
+    }
+
+    fn draw_running_badge(&self, scene: &mut Scene, state: &State, alpha: u8) {
+        let (cx, cy, r) = l::RUN_BADGE;
+        scene.disc(cx, cy, r, rgb(8, 48, 31), alpha);
+        scene.ring(cx, cy, r, r - 4, rgb(25, 82, 56), alpha);
+        let total = self.observed_run_total_s.max(state.left_s).max(1);
+        let done = total.saturating_sub(state.left_s.min(total));
+        let span = (done * 360 / total) as i32;
+        if span > 0 {
+            scene.arc(cx, cy, r, r - 5, 0, span, C_RUN, alpha);
+        }
+        let mut left = Buf::<8>::new();
+        if state.left_s >= 60 {
+            let _ = write!(left, "{}:{:02}", state.left_s / 60, state.left_s % 60);
+        } else {
+            let _ = write!(left, "{}", state.left_s);
+        }
+        scene.label(
+            cx,
+            cy + 8,
+            FontId::Caption,
+            INK,
+            alpha,
+            Align::Center,
+            left.as_str(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scrollbar(
+        &self,
+        scene: &mut Scene,
+        page: usize,
+        rows_per_page: usize,
+        total: usize,
+        y0: i32,
+        y1: i32,
+        color: u16,
+        alpha: u8,
+    ) {
+        if total <= rows_per_page {
+            return;
+        }
+        let pages = total.div_ceil(rows_per_page);
+        scene.pill(462, y0, 468, y1, 3, DIM, alpha);
+        let track = y1 - y0;
+        let thumb_h = (track / pages as i32).max(18);
+        let travel = track - thumb_h;
+        let thumb_y = y0 + travel * page.min(pages - 1) as i32 / (pages - 1) as i32;
+        scene.pill(460, thumb_y, 470, thumb_y + thumb_h, 5, color, alpha);
     }
 
     fn draw_home(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
@@ -887,7 +1049,7 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            "INSPECT",
+            "SCHEDULES",
         );
 
         let (x0, y0, x1, y1) = l::HOME_FORCE;
@@ -899,7 +1061,7 @@ impl Ui {
             rgb(26, 15, 2),
             alpha,
             Align::Center,
-            "FORCE",
+            "MANUAL",
         );
     }
 
@@ -1012,11 +1174,37 @@ impl Ui {
             );
         }
         if self.info_page > 0 {
-            scene.label(190, 470, FontId::Caption, INK, alpha, Align::Center, "<");
+            scene.label(
+                190,
+                470,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f104}",
+            );
         }
         if first + rows < state.n_analogs {
-            scene.label(290, 470, FontId::Caption, INK, alpha, Align::Center, ">");
+            scene.label(
+                290,
+                470,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f105}",
+            );
         }
+        self.draw_scrollbar(
+            scene,
+            self.info_page,
+            l::ANALOG_MAX_ROWS,
+            state.n_analogs,
+            l::ANALOG_FIRST_CY,
+            438,
+            C_INFO,
+            alpha,
+        );
     }
 
     fn draw_inspect(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
@@ -1032,10 +1220,13 @@ impl Ui {
             "SCHEDULES",
         );
 
-        for index in 0..state.n_starts.min(l::SCHED_MAX_ROWS) {
+        let first = self.schedule_page * l::SCHED_MAX_ROWS;
+        let rows = state.n_starts.saturating_sub(first).min(l::SCHED_MAX_ROWS);
+        for row in 0..rows {
+            let index = first + row;
             let s = state.starts[index];
             let on = s.enabled && s.n_entries > 0;
-            let cy = l::SCHED_FIRST_CY + index as i32 * l::SCHED_PITCH;
+            let cy = l::SCHED_FIRST_CY + row as i32 * l::SCHED_PITCH;
             let (x0, x1) = (l::SCHED_X0, l::SCHED_X1);
             scene.pill(
                 x0,
@@ -1046,6 +1237,12 @@ impl Ui {
                 if on { rgb(18, 44, 92) } else { rgb(13, 22, 38) },
                 alpha,
             );
+            if let Some((elapsed, total, _, _)) = state.schedule_progress(index) {
+                let fill = x0 + (x1 - x0) * elapsed as i32 / total.max(1) as i32;
+                if fill > x0 {
+                    scene.pill(x0, cy + 22, fill, cy + 30, 4, C_RUN, alpha);
+                }
+            }
             // Armed indicator.
             scene.disc(x0 + 28, cy, 9, if on { C_RUN } else { DIM }, alpha);
 
@@ -1062,7 +1259,9 @@ impl Ui {
             );
 
             let mut summary = Buf::<28>::new();
-            if s.n_entries == 0 {
+            if let Some((elapsed, total, _, _)) = state.schedule_progress(index) {
+                let _ = write!(summary, "RUNNING {}%", elapsed * 100 / total.max(1));
+            } else if s.n_entries == 0 {
                 let _ = write!(summary, "EMPTY");
             } else {
                 let total = s.total_seconds();
@@ -1087,6 +1286,39 @@ impl Ui {
             scene.pill(x1 - 26, cy - 8, x1 - 20, cy + 1, 3, MUTED, alpha);
             scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
         }
+
+        if self.schedule_page > 0 {
+            scene.label(
+                190,
+                470,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f104}",
+            );
+        }
+        if first + rows < state.n_starts {
+            scene.label(
+                290,
+                470,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f105}",
+            );
+        }
+        self.draw_scrollbar(
+            scene,
+            self.schedule_page,
+            l::SCHED_MAX_ROWS,
+            state.n_starts,
+            156,
+            438,
+            C_INSPECT,
+            alpha,
+        );
 
         // Sensor line. The controller reports several analog inputs; the first
         // record is I1, which is the one wired for this installation.
@@ -1141,10 +1373,13 @@ impl Ui {
         );
 
         // Entries run top to bottom in the order the controller will drive them.
-        let rows = s.n_entries.min(l::DETAIL_MAX_ROWS);
-        for i in 0..rows {
+        let first = self.detail_page * l::DETAIL_MAX_ROWS;
+        let rows = s.n_entries.saturating_sub(first).min(l::DETAIL_MAX_ROWS);
+        let progress = state.schedule_progress(index);
+        for row in 0..rows {
+            let i = first + row;
             let e = s.entries[i];
-            let cy = l::DETAIL_FIRST_CY + i as i32 * l::DETAIL_PITCH;
+            let cy = l::DETAIL_FIRST_CY + row as i32 * l::DETAIL_PITCH;
             scene.pill(
                 l::SCHED_X0,
                 cy - 21,
@@ -1154,6 +1389,20 @@ impl Ui {
                 rgb(15, 34, 72),
                 alpha,
             );
+            if let Some((_, _, active, entry_elapsed)) = progress {
+                let amount = if i < active {
+                    e.seconds as u32
+                } else if i == active {
+                    entry_elapsed
+                } else {
+                    0
+                };
+                if amount > 0 {
+                    let fill = l::SCHED_X0
+                        + (l::SCHED_X1 - l::SCHED_X0) * amount as i32 / (e.seconds as i32).max(1);
+                    scene.pill(l::SCHED_X0, cy + 15, fill, cy + 21, 3, C_RUN, alpha);
+                }
+            }
             // Position in the running order.
             scene.disc(l::SCHED_X0 + 26, cy, 14, rgb(30, 70, 148), alpha);
             let mut n = Buf::<4>::new();
@@ -1199,19 +1448,38 @@ impl Ui {
             );
         }
 
-        if s.n_entries > rows {
-            let mut more = Buf::<20>::new();
-            let _ = write!(more, "+{} MORE", s.n_entries - rows);
+        if self.detail_page > 0 {
             scene.label(
-                CX,
-                456,
-                FontId::Caption,
-                DIM,
+                190,
+                470,
+                FontId::Icon,
+                INK,
                 alpha,
                 Align::Center,
-                more.as_str(),
+                "\u{f104}",
             );
         }
+        if first + rows < s.n_entries {
+            scene.label(
+                290,
+                470,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f105}",
+            );
+        }
+        self.draw_scrollbar(
+            scene,
+            self.detail_page,
+            l::DETAIL_MAX_ROWS,
+            s.n_entries,
+            178,
+            432,
+            C_INSPECT,
+            alpha,
+        );
     }
 
     fn draw_force(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
@@ -1289,12 +1557,38 @@ impl Ui {
         let total = state.n_usable();
         if self.relay_page > 0 {
             scene.disc(190, 444, 24, rgb(52, 34, 10), alpha);
-            scene.label(190, 453, FontId::Caption, INK, alpha, Align::Center, "<");
+            scene.label(
+                190,
+                458,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f104}",
+            );
         }
         if first + l::RELAY_MAX_ROWS < total {
             scene.disc(300, 444, 24, rgb(52, 34, 10), alpha);
-            scene.label(300, 453, FontId::Caption, INK, alpha, Align::Center, ">");
+            scene.label(
+                300,
+                458,
+                FontId::Icon,
+                INK,
+                alpha,
+                Align::Center,
+                "\u{f105}",
+            );
         }
+        self.draw_scrollbar(
+            scene,
+            self.relay_page,
+            l::RELAY_MAX_ROWS,
+            total,
+            l::RELAY_FIRST_CY - l::RELAY_HALF_H,
+            l::RELAY_FIRST_CY + (l::RELAY_MAX_ROWS as i32 - 1) * l::RELAY_PITCH + l::RELAY_HALF_H,
+            C_FORCE,
+            alpha,
+        );
 
         let (gx, gy, gr) = l::GO;
         scene.disc(gx, gy, gr, C_RUN, alpha);

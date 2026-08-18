@@ -70,3 +70,10 @@ the farthest screen corner.
 - `PALETTE` controls circle colors.
 - The shortened touch/panel startup waits favor boot speed. If touch is unreliable
   only during very cold power-on, raise the final CST reset delay from 30 to 50 ms.
+
+## Fonts
+
+Text uses Barlow under the SIL Open Font License (`assets/LICENSE-Barlow.txt`).
+Navigation glyphs use Font Awesome Free Solid under the SIL Open Font License
+(`assets/LICENSE-Font-Awesome.txt`). Both are rasterized at build time; the
+device ships only the few coverage bitmaps it draws, not either full font.
