@@ -416,6 +416,7 @@ fn seed_mock(state: &mut State) {
             seconds: 0,
         }; model::MAX_ENTRIES],
         n_entries: 0,
+        gap_s: 0,
     };
     for (index, seconds) in [300u16, 240, 180, 240, 300].iter().enumerate() {
         first.entries[index] = Entry {
@@ -435,6 +436,7 @@ fn seed_mock(state: &mut State) {
             seconds: 0,
         }; model::MAX_ENTRIES],
         n_entries: 0,
+        gap_s: 0,
     };
     state.starts[2] = StartTime {
         id: 3,
@@ -446,6 +448,7 @@ fn seed_mock(state: &mut State) {
             seconds: 600,
         }; model::MAX_ENTRIES],
         n_entries: 2,
+        gap_s: 0,
     };
     state.n_starts = 3;
 

@@ -56,6 +56,7 @@ pub struct StartTime {
     pub mm: u8,
     pub entries: [Entry; MAX_ENTRIES],
     pub n_entries: usize,
+    pub gap_s: u16,
 }
 
 impl StartTime {
@@ -69,14 +70,16 @@ impl StartTime {
             seconds: 0,
         }; MAX_ENTRIES],
         n_entries: 0,
+        gap_s: 0,
     };
 
     /// Total watering time this start time represents.
     pub fn total_seconds(&self) -> u32 {
-        self.entries[..self.n_entries]
+        let drive: u32 = self.entries[..self.n_entries]
             .iter()
             .map(|e| e.seconds as u32)
-            .sum()
+            .sum();
+        drive + self.gap_s as u32 * self.n_entries.saturating_sub(1) as u32
     }
 }
 
@@ -252,7 +255,16 @@ impl State {
             if elapsed < end {
                 return Some((elapsed, total, entry, elapsed - before));
             }
-            before = end;
+            let gap_end = end
+                + if entry + 1 < schedule.n_entries {
+                    schedule.gap_s as u32
+                } else {
+                    0
+                };
+            if elapsed < gap_end {
+                return Some((elapsed, total, entry, item.seconds as u32));
+            }
+            before = gap_end;
         }
         None
     }
@@ -333,6 +345,7 @@ pub fn parse_dump(body: &str, state: &mut State) {
                             seconds: 0,
                         }; MAX_ENTRIES],
                         n_entries: 0,
+                        gap_s: 0,
                     };
                     n_starts += 1;
                 }
@@ -383,6 +396,12 @@ pub fn parse_dump(body: &str, state: &mut State) {
             "left" => state.left_s = num(line, 1).unwrap_or(0),
             "queued" => state.queued = num(line, 1).unwrap_or(0),
             "maxrun" => state.max_run_s = num(line, 1).unwrap_or(3600),
+            "relaygap" => {
+                let gap = num(line, 1).unwrap_or(0);
+                for schedule in state.starts[..n_starts].iter_mut() {
+                    schedule.gap_s = gap;
+                }
+            }
             "err" => state.err = Text::new(rest_after(line, 1)),
             _ => {}
         }
