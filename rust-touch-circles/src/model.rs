@@ -72,7 +72,7 @@ pub struct StartTime {
 }
 
 impl StartTime {
-    const EMPTY: StartTime = StartTime {
+    pub const EMPTY: StartTime = StartTime {
         id: 0,
         remote_id: 0,
         controller: 0,

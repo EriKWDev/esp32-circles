@@ -34,6 +34,9 @@ include!(concat!(env!("OUT_DIR"), "/secrets.rs"));
 
 /// Wi-Fi MTU as the driver reports it.
 const MTU: usize = 1514;
+/// Largest request body we send: a whole schedule as s:/e: records is about
+/// twenty bytes per entry, so this has several times the headroom needed.
+const REQ_BODY: usize = 512;
 /// One `/api/dump` is well under 1 KiB today; this leaves generous headroom for
 /// more controllers' relays without risking a truncated parse.
 const RX_BODY: usize = 4096;
@@ -217,6 +220,10 @@ pub struct Net {
     snapshots: [State; MAX_CONTROLLERS],
     snapshot_valid: [bool; MAX_CONTROLLERS],
     http: Option<Http>,
+    /// Body for the request in flight. Kept here rather than inside `Http`
+    /// because that struct is copied on every `service` pass, and only one
+    /// request exists at a time anyway.
+    post_body: Buf<REQ_BODY>,
     job: Job,
     last_connect_attempt_ms: u32,
     /// When the UI last took charge of connecting. While that is recent, `step`
@@ -287,6 +294,9 @@ impl<const N: usize> Buf<N> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+    pub fn len(&self) -> usize {
+        self.len
+    }
     fn push_str(&mut self, s: &str) {
         for &b in s.as_bytes() {
             if self.len < N {
@@ -354,6 +364,7 @@ impl Net {
             snapshots: [const { State::new() }; MAX_CONTROLLERS],
             snapshot_valid: [false; MAX_CONTROLLERS],
             http: None,
+            post_body: Buf::new(),
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
             manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
@@ -589,7 +600,18 @@ impl Net {
         let (complete, closed) = {
             let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp);
             if !http.sent && socket.may_send() {
-                match socket.send_slice(http.head.as_str().as_bytes()) {
+                // Head then body, into a transmit buffer far larger than both, so
+                // this never has to resume a partial write.
+                let sent = socket
+                    .send_slice(http.head.as_str().as_bytes())
+                    .and_then(|_| {
+                        if http.post && !self.post_body.is_empty() {
+                            socket.send_slice(self.post_body.as_str().as_bytes())
+                        } else {
+                            Ok(0)
+                        }
+                    });
+                match sent {
                     Ok(_) => http.sent = true,
                     Err(_) => {
                         socket.abort();
@@ -666,7 +688,7 @@ impl Net {
             self.hosts[host].ip
         );
         if post {
-            let _ = write!(head, "Content-Length: 0\r\n");
+            let _ = write!(head, "Content-Length: {}\r\n", self.post_body.len());
         }
         if !self.hosts[host].realm.is_empty() || attempt > 0 {
             self.hosts[host].nc = self.hosts[host].nc.wrapping_add(1);
@@ -852,6 +874,61 @@ impl Net {
             HttpKind::Trigger,
             controller as usize,
             false,
+            path,
+            0,
+            now_ms,
+        ) {
+            self.last_error = Some(e);
+        }
+    }
+
+    /// Write one schedule back, as the s:/e: records the dump emits.
+    ///
+    /// Relay ids are translated back to the owning controller's own numbering on
+    /// the way out: the model's ids are merged across controllers, and sending
+    /// those would address the wrong valve entirely. An entry whose relay does not
+    /// resolve, or belongs to a different controller, is dropped rather than sent
+    /// wrong - the controller would skip it anyway, and skipping it here means the
+    /// count in the reply matches what was intended.
+    ///
+    /// Only this schedule is named, so the controller leaves its neighbours alone.
+    pub fn post_schedule(&mut self, schedule: &crate::model::StartTime, state: &State, now_ms: u32) {
+        let controller = schedule.controller;
+        if controller as usize >= self.n_hosts {
+            return;
+        }
+        self.post_body.clear();
+        let _ = write!(
+            self.post_body,
+            "s:{}:{}:{:02}:{:02}\n",
+            schedule.remote_id,
+            schedule.enabled as u8,
+            schedule.hh,
+            schedule.mm
+        );
+        for entry in schedule.entries[..schedule.n_entries.min(MAX_ENTRIES)].iter() {
+            let Some(relay) = state
+                .relay_by_id(entry.relay as i32)
+                .filter(|relay| relay.controller == controller)
+            else {
+                continue;
+            };
+            let _ = write!(
+                self.post_body,
+                "e:{}:{}:{}\n",
+                schedule.remote_id, relay.remote_id, entry.seconds
+            );
+        }
+
+        let mut path = Buf::<96>::new();
+        let _ = write!(path, "/local/rainbird/app/api/schedule");
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        if let Err(e) = self.start_http(
+            HttpKind::Schedule,
+            controller as usize,
+            true,
             path,
             0,
             now_ms,

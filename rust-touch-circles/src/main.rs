@@ -316,6 +316,17 @@ fn main() -> ! {
                 last_poll_ms = t.wrapping_sub(RUN_POLL_INTERVAL_MS);
                 dirty = true;
             }
+            Action::SaveSchedule => {
+                if let Some(net) = net.as_mut() {
+                    net.post_schedule(&ui.draft, &state, t);
+                }
+                // The controller is authoritative on what was actually stored - it
+                // clamps durations and skips records it cannot honour - so the
+                // draft is not written into the model. A prompt poll shows what it
+                // really kept.
+                last_poll_ms = t.wrapping_sub(POLL_INTERVAL_MS);
+                dirty = true;
+            }
             Action::None => {}
         }
 

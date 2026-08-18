@@ -134,6 +134,24 @@ mod l {
     pub const DETAIL_X1: i32 = 342;
     /// (cx, cy, r) - vertically centred on the entry list.
     pub const RUN_NOW: (i32, i32, i32) = (408, 296, 54);
+    /// EDIT, top right, opposite Back. Becomes SAVE in edit mode - same place,
+    /// same size, so the thing you press to finish is where the thing you pressed
+    /// to start was.
+    pub const EDIT: (i32, i32, i32, i32) = (360, 30, 464, 86);
+    /// Edit mode: the clock's four adjusters, in a row under it.
+    pub const TIME_HH_DOWN: (i32, i32, i32, i32) = (96, 132, 156, 176);
+    pub const TIME_HH_UP: (i32, i32, i32, i32) = (162, 132, 222, 176);
+    pub const TIME_MM_DOWN: (i32, i32, i32, i32) = (258, 132, 318, 176);
+    pub const TIME_MM_UP: (i32, i32, i32, i32) = (324, 132, 384, 176);
+    /// Edit mode: the armed toggle, left of the adjusters.
+    pub const ARMED: (i32, i32, i32, i32) = (18, 132, 90, 176);
+    /// Edit mode: the selected entry's controls, in the column the run button
+    /// vacates. Six of them, 40 px tall - a comfortable target at this width.
+    pub const EDIT_COL_X0: i32 = 352;
+    pub const EDIT_COL_X1: i32 = 472;
+    pub const EDIT_COL_TOP: i32 = 182;
+    pub const EDIT_COL_PITCH: i32 = 44;
+    pub const EDIT_COL_H: i32 = 40;
     pub const ANALOG_X0: i32 = 132;
     pub const ANALOG_X1: i32 = 438;
     pub const ANALOG_FIRST_CY: i32 = 198;
@@ -396,6 +414,16 @@ enum Target {
     Bubble,
     /// Run this schedule now, or stop it if it is already running.
     RunNow,
+    /// Enter edit mode, or save and leave it.
+    EditSave,
+    /// Edit mode: one entry of the schedule being edited, or the row past the
+    /// end, which appends one.
+    EntryRow(usize),
+    /// Edit mode: one of the clock adjusters, or the armed toggle.
+    TimeAdjust(usize),
+    Armed,
+    /// Edit mode: one of the selected entry's controls.
+    EditCtl(usize),
     /// Go ahead with the destructive action being confirmed.
     Confirm,
     /// Try the failed network join again.
@@ -428,7 +456,10 @@ impl Zone {
     }
 }
 
-const MAX_ZONES: usize = 16;
+/// Zones are registered per frame and an overflow is silently dropped, which
+/// would present as a button that simply does not work. Edit mode needs
+/// fourteen, so this keeps real headroom rather than one spare.
+const MAX_ZONES: usize = 24;
 
 /// What the UI wants the network layer to do.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -447,6 +478,8 @@ pub enum Action {
     ApplyWifi,
     /// Run one schedule immediately. `start` is the id on its own controller.
     RunSchedule { controller: u8, start: u8 },
+    /// Write the edited schedule back. The draft itself is read from the UI.
+    SaveSchedule,
 }
 
 /// What the keyboard is filling in. Held as state rather than as more `Screen`
@@ -518,6 +551,11 @@ impl KeyMode {
         matches!(self, KeyMode::Lower | KeyMode::Upper)
     }
 }
+
+/// The selected entry's controls, top to bottom in the column the run button
+/// vacates. One table, so registration, drawing and the handler cannot disagree
+/// about which button is which.
+const EDIT_CONTROLS: [&str; 6] = ["UP", "DOWN", "RELAY", "LONGER", "SHORTER", "REMOVE"];
 
 /// How long a pressed key stays lit. Long enough to see on a panel refreshing at
 /// 40-60 fps, short enough not to lag a fast typist.
@@ -653,6 +691,15 @@ pub struct Ui {
     drag_started_ms: u32,
     /// Which schedule the detail screen is showing.
     pub detail: usize,
+    /// Edit mode, and the schedule being edited.
+    ///
+    /// A working copy, not a reference into the model: polls overwrite the model
+    /// twice a second, which would undo every keystroke. The draft is what the
+    /// page draws while editing, and what SAVE posts.
+    editing: bool,
+    pub draft: StartTime,
+    /// Which entry the edit controls act on.
+    draft_row: usize,
     /// The knob's *displayed* position, eased toward the selected minute. Values
     /// that snap look mechanical, so the knob chases its target - the same reason
     /// the progress sweep is driven from fractional time. Q4 for smooth easing at
@@ -745,6 +792,9 @@ impl Ui {
             dragging_slider: false,
             drag_started_ms: 0,
             detail: 0,
+            editing: false,
+            draft: StartTime::EMPTY,
+            draft_row: 0,
             knob_q4: 0,
             last_running: false,
             observed_run_total_s: 0,
@@ -957,6 +1007,15 @@ impl Ui {
 
                 match target {
                     Target::Back => {
+                        // In edit mode Back is the way out of the *mode*, not the
+                        // page: the draft is dropped and the schedule reappears as
+                        // the controller has it. Leaving the page as well would
+                        // discard the work with no way to tell that had happened.
+                        if self.editing {
+                            self.cancel_edit();
+                            self.ripple(x, y, C_CANCEL, now_ms);
+                            return Action::None;
+                        }
                         // One level up, wherever that turns out to be. On the
                         // keyboard this also cancels the edit: the buffer is
                         // simply dropped. On the confirmation screen it is the
@@ -1015,6 +1074,19 @@ impl Ui {
                                 start: schedule.remote_id,
                             }
                         }
+                    }
+                    Target::EditSave => self.edit_save(state, x, y, now_ms),
+                    Target::TimeAdjust(which) => {
+                        self.time_adjust(which);
+                        Action::None
+                    }
+                    Target::Armed => {
+                        self.draft.enabled = !self.draft.enabled;
+                        Action::None
+                    }
+                    Target::EditCtl(which) => {
+                        self.edit_control(which, state);
+                        Action::None
                     }
                     Target::Confirm => self.confirm_action(x, y, now_ms),
                     Target::Retry => {
@@ -1080,7 +1152,10 @@ impl Ui {
                         }
                     }
                     Target::Slider => Action::None,
-                    Target::List => Action::None,
+                    // Both arrive through the list band and are acted on at
+                    // release, once it is known the touch was a tap and not the
+                    // beginning of a scroll.
+                    Target::EntryRow(_) | Target::List => Action::None,
                 }
             }
             Event::Drag(x, y) => {
@@ -1093,7 +1168,14 @@ impl Ui {
                         Screen::Detail => (
                             l::DETAIL_PITCH,
                             l::DETAIL_MAX_ROWS,
-                            state.starts.get(self.detail).map_or(0, |s| s.n_entries),
+                            // While editing it is the draft that is listed, plus
+                            // the row that appends - which has to be reachable on
+                            // a schedule that already fills the page.
+                            if self.editing {
+                                self.draft.n_entries + 1
+                            } else {
+                                state.starts.get(self.detail).map_or(0, |s| s.n_entries)
+                            },
                         ),
                         Screen::Info => (l::ANALOG_PITCH, l::ANALOG_MAX_ROWS, state.n_analogs),
                         Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
@@ -1151,6 +1233,16 @@ impl Ui {
                                 self.selected = index;
                                 self.ripple(x, y, C_FORCE, now_ms);
                             }
+                            // Edit mode: a row picks which entry the controls act
+                            // on, and the row past the end appends another.
+                            Some(Target::EntryRow(index)) => {
+                                if index < self.draft.n_entries {
+                                    self.draft_row = index;
+                                } else {
+                                    self.add_entry(state);
+                                }
+                                self.ripple(x, y, C_INSPECT, now_ms);
+                            }
                             // Settings rows land here: the band is draggable, so
                             // a row can only be *opened* once the touch turns out
                             // to have been a tap and not the start of a scroll.
@@ -1192,7 +1284,11 @@ impl Ui {
                     / l::SCHED_PITCH) as usize
             }
             Screen::Detail => {
-                ((y - (l::DETAIL_FIRST_CY - 21) + self.detail_scroll) / l::DETAIL_PITCH) as usize
+                let from_top = y - (l::DETAIL_FIRST_CY - 21) + self.detail_scroll;
+                if from_top < 0 {
+                    return None;
+                }
+                (from_top / l::DETAIL_PITCH) as usize
             }
             Screen::Info => {
                 ((y - (l::ANALOG_FIRST_CY - 16) + self.info_scroll) / l::ANALOG_PITCH) as usize
@@ -1206,6 +1302,12 @@ impl Ui {
         match self.screen {
             Screen::Inspect => (index < state.n_starts).then_some(Target::Schedule(index)),
             Screen::Force => (index < state.n_usable()).then_some(Target::Relay(index)),
+            // One row past the last entry is the "add another" row, so the list
+            // reaches one further than it has entries. Only while editing: the
+            // view-mode list is not interactive.
+            Screen::Detail if self.editing => {
+                (index <= self.draft.n_entries).then_some(Target::EntryRow(index))
+            }
             _ => None,
         }
     }
@@ -1502,15 +1604,64 @@ impl Ui {
                             + 21,
                     },
                 );
-                let (rx, ry, rr) = l::RUN_NOW;
+                // EDIT is always there; everything else on the right depends on
+                // the mode - the run button and the edit controls share that
+                // column, which is what gives the controls room.
+                let (ex0, ey0, ex1, ey1) = l::EDIT;
                 self.zone(
-                    Target::RunNow,
-                    Zone::Disc {
-                        cx: rx,
-                        cy: ry,
-                        r: rr,
+                    Target::EditSave,
+                    Zone::Rect {
+                        x0: ex0,
+                        y0: ey0,
+                        x1: ex1,
+                        y1: ey1,
                     },
                 );
+                if self.editing {
+                    let (ax0, ay0, ax1, ay1) = l::ARMED;
+                    self.zone(
+                        Target::Armed,
+                        Zone::Rect {
+                            x0: ax0,
+                            y0: ay0,
+                            x1: ax1,
+                            y1: ay1,
+                        },
+                    );
+                    for (which, (x0, y0, x1, y1)) in [
+                        l::TIME_HH_DOWN,
+                        l::TIME_HH_UP,
+                        l::TIME_MM_DOWN,
+                        l::TIME_MM_UP,
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        self.zone(Target::TimeAdjust(which), Zone::Rect { x0, y0, x1, y1 });
+                    }
+                    for which in 0..EDIT_CONTROLS.len() {
+                        let y0 = l::EDIT_COL_TOP + which as i32 * l::EDIT_COL_PITCH;
+                        self.zone(
+                            Target::EditCtl(which),
+                            Zone::Rect {
+                                x0: l::EDIT_COL_X0,
+                                y0,
+                                x1: l::EDIT_COL_X1,
+                                y1: y0 + l::EDIT_COL_H,
+                            },
+                        );
+                    }
+                } else {
+                    let (rx, ry, rr) = l::RUN_NOW;
+                    self.zone(
+                        Target::RunNow,
+                        Zone::Disc {
+                            cx: rx,
+                            cy: ry,
+                            r: rr,
+                        },
+                    );
+                }
             }
             // Every list screen works the way the schedules list does: the whole
             // band is one draggable zone, and which row a tap landed on is
@@ -2301,6 +2452,147 @@ impl Ui {
             }
             _ => Action::None,
         }
+    }
+
+    /// Enter edit mode, or leave it by saving.
+    fn edit_save(&mut self, state: &State, x: i32, y: i32, now_ms: u32) -> Action {
+        if self.editing {
+            self.editing = false;
+            self.ripple(x, y, C_RUN, now_ms);
+            return Action::SaveSchedule;
+        }
+        let Some(schedule) = state.starts.get(self.detail).copied() else {
+            return Action::None;
+        };
+        self.draft = schedule;
+        self.draft_row = 0;
+        self.detail_scroll = 0;
+        self.editing = true;
+        self.ripple(x, y, C_INSPECT, now_ms);
+        Action::None
+    }
+
+    /// Discard the draft and return to viewing.
+    fn cancel_edit(&mut self) {
+        self.editing = false;
+        self.draft_row = 0;
+    }
+
+    /// The clock adjusters and the armed toggle.
+    ///
+    /// Minutes move in fives: a watering start time is not a stopwatch, and sixty
+    /// taps to cross an hour would be worse than a coarse step.
+    fn time_adjust(&mut self, which: usize) {
+        match which {
+            0 => self.draft.hh = (self.draft.hh + 23) % 24,
+            1 => self.draft.hh = (self.draft.hh + 1) % 24,
+            2 => {
+                self.draft.mm = match self.draft.mm {
+                    0 => 55,
+                    m => (m.saturating_sub(1) / 5) * 5,
+                }
+            }
+            _ => self.draft.mm = ((self.draft.mm / 5 + 1) * 5) % 60,
+        }
+    }
+
+    /// One of the selected entry's controls: reorder, change relay, change
+    /// duration, remove.
+    fn edit_control(&mut self, which: usize, state: &State) {
+        let n = self.draft.n_entries;
+        if n == 0 {
+            return;
+        }
+        let row = self.draft_row.min(n - 1);
+        match which {
+            // Reorder by swapping with the neighbour, and follow the entry so the
+            // controls stay pointed at what was just moved.
+            0 => {
+                if row > 0 {
+                    self.draft.entries.swap(row, row - 1);
+                    self.draft_row = row - 1;
+                }
+            }
+            1 => {
+                if row + 1 < n {
+                    self.draft.entries.swap(row, row + 1);
+                    self.draft_row = row + 1;
+                }
+            }
+            // Next usable relay on this schedule's own controller - the only ones
+            // it can address.
+            2 => {
+                let owner = self.draft.controller;
+                let mut ids = [0u8; crate::model::MAX_RELAYS];
+                let mut count = 0;
+                for relay in state.usable().filter(|r| r.controller == owner) {
+                    if count < ids.len() {
+                        ids[count] = relay.id;
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    return;
+                }
+                let current = self.draft.entries[row].relay;
+                let at = ids[..count].iter().position(|id| *id == current);
+                let next = match at {
+                    Some(index) => ids[(index + 1) % count],
+                    None => ids[0],
+                };
+                self.draft.entries[row].relay = next;
+            }
+            // Duration, in steps that scale with the value: five seconds while
+            // it is a test pulse, half a minute once it is real watering.
+            3 | 4 => {
+                let seconds = self.draft.entries[row].seconds as u32;
+                let step = if seconds < 60 { 5 } else { 30 };
+                let next = if which == 3 {
+                    seconds + step
+                } else {
+                    seconds.saturating_sub(step)
+                };
+                let ceiling = state.max_run_s.max(5);
+                self.draft.entries[row].seconds = next.clamp(5, ceiling) as u16;
+            }
+            // Remove, keeping the order of the rest.
+            _ => {
+                for i in row..n - 1 {
+                    self.draft.entries[i] = self.draft.entries[i + 1];
+                }
+                self.draft.n_entries = n - 1;
+                self.draft.entries[self.draft.n_entries] = crate::model::Entry {
+                    relay: 0,
+                    seconds: 0,
+                };
+                self.draft_row = self.draft_row.min(self.draft.n_entries.saturating_sub(1));
+            }
+        }
+    }
+
+    /// Append an entry, copying the previous one's duration so a schedule of
+    /// equal-length zones takes one tap each.
+    fn add_entry(&mut self, state: &State) {
+        if self.draft.n_entries >= crate::model::MAX_ENTRIES {
+            return;
+        }
+        let owner = self.draft.controller;
+        let relay = state
+            .usable()
+            .find(|r| r.controller == owner)
+            .map(|r| r.id)
+            .unwrap_or(0);
+        if relay == 0 {
+            return;
+        }
+        let seconds = if self.draft.n_entries > 0 {
+            self.draft.entries[self.draft.n_entries - 1].seconds
+        } else {
+            300
+        };
+        self.draft.entries[self.draft.n_entries] = crate::model::Entry { relay, seconds };
+        self.draft_row = self.draft.n_entries;
+        self.draft.n_entries += 1;
     }
 
     /// The confirmation screen's YES. Only one thing needs confirming so far, so
@@ -3407,6 +3699,93 @@ impl Ui {
         }
     }
 
+    /// Edit mode: the armed toggle, the clock adjusters, and the selected entry's
+    /// controls down the right-hand column.
+    fn draw_edit_controls(
+        &self,
+        scene: &mut Scene,
+        state: &State,
+        draft: &StartTime,
+        alpha: u8,
+    ) {
+        // Armed, as a toggle rather than a label: this is the one field of a
+        // schedule that changes what the controller does without changing what it
+        // waters.
+        let (ax0, ay0, ax1, ay1) = l::ARMED;
+        scene.pill(
+            ax0,
+            ay0,
+            ax1,
+            ay1,
+            (ay1 - ay0) / 2,
+            if draft.enabled { C_RUN } else { rgb(58, 22, 22) },
+            alpha,
+        );
+        scene.label(
+            (ax0 + ax1) / 2,
+            (ay0 + ay1) / 2 + 9,
+            FontId::Caption,
+            if draft.enabled { rgb(4, 22, 14) } else { MUTED },
+            alpha,
+            Align::Center,
+            if draft.enabled { "ON" } else { "OFF" },
+        );
+
+        // Clock adjusters. Hours by one, minutes by five - a start time is not a
+        // stopwatch, and sixty taps to cross an hour would be worse than a coarse
+        // step.
+        for (label, (x0, y0, x1, y1)) in [
+            ("H-", l::TIME_HH_DOWN),
+            ("H+", l::TIME_HH_UP),
+            ("M-", l::TIME_MM_DOWN),
+            ("M+", l::TIME_MM_UP),
+        ] {
+            scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, rgb(20, 44, 74), alpha);
+            scene.label(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2 + 9,
+                FontId::Caption,
+                INK,
+                alpha,
+                Align::Center,
+                label,
+            );
+        }
+
+        // The selected entry's controls. Greyed rather than hidden when they
+        // cannot act - an empty schedule, or an entry already at one end - so the
+        // column does not rearrange itself under the finger.
+        let n = draft.n_entries;
+        let row = self.draft_row.min(n.saturating_sub(1));
+        for (which, caption) in EDIT_CONTROLS.iter().enumerate() {
+            let y0 = l::EDIT_COL_TOP + which as i32 * l::EDIT_COL_PITCH;
+            let y1 = y0 + l::EDIT_COL_H;
+            let live = n > 0
+                && match which {
+                    0 => row > 0,
+                    1 => row + 1 < n,
+                    3 => (draft.entries[row].seconds as u32) < state.max_run_s,
+                    4 => draft.entries[row].seconds > 5,
+                    _ => true,
+                };
+            let plate = match which {
+                _ if !live => rgb(18, 30, 42),
+                5 => rgb(72, 26, 26),
+                _ => rgb(24, 52, 100),
+            };
+            scene.pill(l::EDIT_COL_X0, y0, l::EDIT_COL_X1, y1, 12, plate, alpha);
+            scene.label(
+                (l::EDIT_COL_X0 + l::EDIT_COL_X1) / 2,
+                (y0 + y1) / 2 + 9,
+                FontId::Caption,
+                if live { INK } else { DIM },
+                alpha,
+                Align::Center,
+                caption,
+            );
+        }
+    }
+
     /// The big button on the right of a schedule's entry list: start it now, or
     /// stop it while it runs.
     ///
@@ -3454,7 +3833,14 @@ impl Ui {
     fn draw_detail(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
         let index = self.detail.min(state.n_starts.saturating_sub(1));
-        let s = state.starts[index];
+        // The draft while editing: the model underneath is replaced by every poll,
+        // which would undo each change as fast as it was made.
+        let s = if self.editing {
+            self.draft
+        } else {
+            state.starts[index]
+        };
+        let editing = self.editing;
 
         let mut title = Buf::<16>::new();
         let _ = write!(title, "{:02}:{:02}", s.hh, s.mm);
@@ -3469,7 +3855,10 @@ impl Ui {
         );
 
         let mut sub = Buf::<32>::new();
-        if let Some((elapsed, total, active, _)) = state.schedule_progress(index) {
+        if editing {
+            // Nothing here: the armed toggle and the clock adjusters occupy this
+            // strip, and a caption behind them would only be clutter.
+        } else if let Some((elapsed, total, active, _)) = state.schedule_progress(index) {
             // While it runs, the subtitle is the progress readout: which entry of
             // how many, and how far through the whole schedule.
             let _ = write!(
@@ -3497,28 +3886,71 @@ impl Ui {
         // Entries run top to bottom in the order the controller will drive them.
         let first = (self.detail_scroll / l::DETAIL_PITCH) as usize;
         let shift = -(self.detail_scroll % l::DETAIL_PITCH);
-        let rows = s
-            .n_entries
-            .saturating_sub(first)
-            .min(l::DETAIL_MAX_ROWS + 1);
+        // One row past the entries while editing - that is the "add another" row,
+        // and `row_at` reaches one further for the same reason.
+        let listed = s.n_entries + editing as usize;
+        let rows = listed.saturating_sub(first).min(l::DETAIL_MAX_ROWS + 1);
         // Milliseconds, not seconds: a row is over 300 px wide, so a whole
         // second of a short entry is a visible jump.
         let progress = state.schedule_progress_ms(index, self.run_left_ms);
         scene.clip(178, 432);
         for row in 0..rows {
             let i = first + row;
-            let e = s.entries[i];
             let cy = l::DETAIL_FIRST_CY + row as i32 * l::DETAIL_PITCH + shift;
+
+            // The row past the end, while editing: add another entry.
+            if i >= s.n_entries {
+                scene.pill(
+                    l::DETAIL_X0,
+                    cy - 21,
+                    l::DETAIL_X1,
+                    cy + 21,
+                    18,
+                    rgb(18, 44, 60),
+                    alpha,
+                );
+                let full = s.n_entries >= crate::model::MAX_ENTRIES;
+                scene.label(
+                    (l::DETAIL_X0 + l::DETAIL_X1) / 2,
+                    cy + 9,
+                    FontId::Caption,
+                    if full { DIM } else { INK },
+                    alpha,
+                    Align::Center,
+                    if full { "FULL" } else { "+ ADD ZONE" },
+                );
+                continue;
+            }
+
+            let e = s.entries[i];
+            let selected = editing && i == self.draft_row.min(s.n_entries.saturating_sub(1));
             scene.pill(
                 l::DETAIL_X0,
                 cy - 21,
                 l::DETAIL_X1,
                 cy + 21,
                 18,
-                rgb(15, 34, 72),
+                if selected {
+                    rgb(28, 62, 122)
+                } else {
+                    rgb(15, 34, 72)
+                },
                 alpha,
             );
-            if let Some((active, elapsed_ms, duration_ms)) = progress {
+            // The selected row carries a bar down its left edge, so which entry
+            // the controls opposite will act on is never in doubt.
+            if selected {
+                scene.pill(
+                    l::DETAIL_X0 + 4,
+                    cy - 14,
+                    l::DETAIL_X0 + 9,
+                    cy + 14,
+                    2,
+                    C_INSPECT,
+                    alpha,
+                );
+            }
+            if let Some((active, elapsed_ms, duration_ms)) = progress.filter(|_| !editing) {
                 // Entries before the active one are complete, the active one is
                 // partly filled, later ones are untouched.
                 let (amount, of) = if i < active {
@@ -3580,14 +4012,41 @@ impl Ui {
         }
         scene.clip_reset();
 
-        self.draw_run_button(scene, &s, alpha);
+        // EDIT, or SAVE while editing - same place either way. The run button
+        // gives up its column to the edit controls, which is what makes room for
+        // them.
+        let (ex0, ey0, ex1, ey1) = l::EDIT;
+        scene.pill(
+            ex0,
+            ey0,
+            ex1,
+            ey1,
+            (ey1 - ey0) / 2,
+            if editing { C_RUN } else { rgb(24, 52, 100) },
+            alpha,
+        );
+        scene.label(
+            (ex0 + ex1) / 2,
+            (ey0 + ey1) / 2 + 10,
+            FontId::Caption,
+            if editing { rgb(4, 22, 14) } else { INK },
+            alpha,
+            Align::Center,
+            if editing { "SAVE" } else { "EDIT" },
+        );
+
+        if editing {
+            self.draw_edit_controls(scene, state, &s, alpha);
+        } else {
+            self.draw_run_button(scene, &s, alpha);
+        }
 
         self.draw_scrollbar(
             scene,
             self.detail_scroll,
             l::DETAIL_MAX_ROWS,
             l::DETAIL_PITCH,
-            s.n_entries,
+            listed,
             178,
             432,
             C_INSPECT,
