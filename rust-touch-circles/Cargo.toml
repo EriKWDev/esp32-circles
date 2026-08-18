@@ -12,9 +12,10 @@ esp-backtrace = { version = "0.18", features = ["esp32c6", "panic-handler", "pri
 esp-println = { version = "0.16", features = ["esp32c6", "log-04"] }
 esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c6"] }
 esp-radio = { version = "1.0.0-beta.0", features = ["esp32c6", "wifi", "unstable"] }
-esp-alloc = "0.9"
+esp-alloc = "0.10"
 smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-dhcpv4"] }
 md-5 = { version = "0.10", default-features = false }
+esp-rtos = { version = "0.3.0", features = ["esp32c6", "esp-radio", "esp-alloc"] }
 
 # Host-side only: rasterizes the bundled TTFs into anti-aliased coverage maps
 # (see build.rs). None of this ships in the firmware.

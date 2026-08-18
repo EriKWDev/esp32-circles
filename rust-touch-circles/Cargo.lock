@@ -447,22 +447,6 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "esp-alloc"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "641e43d6a60244429117ef2fa7a47182120c7561336ea01f6fb08d634f46bae1"
-dependencies = [
- "allocator-api2 0.3.1",
- "cfg-if",
- "document-features",
- "enumset",
- "esp-config 0.6.1",
- "esp-sync 0.1.1",
- "linked_list_allocator",
- "rlsf",
-]
-
-[[package]]
-name = "esp-alloc"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46ced060d4085858283df950b80a4da2348e1707d7d07b1e966308582dae79f5"
@@ -663,7 +647,7 @@ dependencies = [
  "embedded-io-async 0.6.1",
  "embedded-io-async 0.7.0",
  "enumset",
- "esp-alloc 0.10.0",
+ "esp-alloc",
  "esp-config 0.7.0",
  "esp-hal",
  "esp-hal-procmacros",
@@ -714,6 +698,29 @@ dependencies = [
  "document-features",
  "esp-metadata-generated 0.4.0",
  "esp32c6",
+]
+
+[[package]]
+name = "esp-rtos"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "551f90766e1527edaa0c91e8d559e9e2a60397b545e93357ac61fb31845e5712"
+dependencies = [
+ "allocator-api2 0.3.1",
+ "cfg-if",
+ "document-features",
+ "embassy-sync 0.8.0",
+ "esp-alloc",
+ "esp-config 0.7.0",
+ "esp-hal",
+ "esp-hal-procmacros",
+ "esp-metadata-generated 0.4.0",
+ "esp-radio-rtos-driver",
+ "esp-rom-sys",
+ "esp-sync 0.2.1",
+ "portable-atomic",
+ "riscv",
+ "xtensa-lx",
 ]
 
 [[package]]
@@ -1485,12 +1492,13 @@ dependencies = [
 name = "touch-circles"
 version = "0.1.0"
 dependencies = [
- "esp-alloc 0.9.0",
+ "esp-alloc",
  "esp-backtrace",
  "esp-bootloader-esp-idf",
  "esp-hal",
  "esp-println",
  "esp-radio",
+ "esp-rtos",
  "fontdue",
  "md-5",
  "smoltcp",

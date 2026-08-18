@@ -18,6 +18,7 @@ mod display;
 mod font;
 mod gfx;
 mod model;
+mod net;
 mod touch;
 mod ui;
 
@@ -42,6 +43,18 @@ use touch::Touch;
 use ui::{Action, Ui};
 
 const PMIC_ADDR: u8 = 0x34;
+
+/// How often to re-read `/api/dump`. Only honoured while the UI is idle, so a
+/// transfer can never interrupt an animation - see `net`.
+const POLL_INTERVAL_MS: u32 = 2_000;
+
+// smoltcp needs its storage to outlive the interface. There is no allocator
+// budget to spare for this and no StaticCell dependency, so it is plain statics
+// handed out exactly once during startup.
+static mut SOCKETS: [smoltcp::iface::SocketStorage<'static>; 4] =
+    [smoltcp::iface::SocketStorage::EMPTY; 4];
+static mut NET_RX: [u8; 5120] = [0; 5120];
+static mut NET_TX: [u8; 2048] = [0; 2048];
 
 /// SYSTIMER runs at 16 MHz on the ESP32-C6.
 #[inline]
@@ -102,8 +115,38 @@ fn main() -> ! {
     lcd.set_brightness(0);
     lcd.fill_black();
 
+    // The Wi-Fi blobs need a heap and a scheduler, and the scheduler MUST be
+    // started before the radio is initialized. This is why the firmware is no
+    // longer strictly RTOS-free: esp-radio requires esp-rtos. The render loop
+    // still owns the main thread.
+    esp_alloc::heap_allocator!(size: 72 * 1024);
+    let timg0 = esp_hal::timer::timg::TimerGroup::new(p.TIMG0);
+    let sw_int = esp_hal::interrupt::software::SoftwareInterruptControl::new(p.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+
     let mut state = State::new();
     seed_mock(&mut state);
+
+    // Bring up the radio. A failure here is not fatal: the panel stays usable on
+    // its bench model, with the link dot showing red, which is far better than a
+    // dead screen in a shed.
+    let mut net = match net::Net::new(
+        p.WIFI,
+        unsafe { &mut *core::ptr::addr_of_mut!(SOCKETS) },
+        unsafe { &mut *core::ptr::addr_of_mut!(NET_RX) },
+        unsafe { &mut *core::ptr::addr_of_mut!(NET_TX) },
+        now_ms(),
+    ) {
+        Ok(net) => {
+            state.link = Link::Connecting;
+            Some(net)
+        }
+        Err(e) => {
+            esp_println::println!("wifi init failed: {e}");
+            state.link = Link::Offline;
+            None
+        }
+    };
 
     let mut ui = Ui::new();
     let mut scene = Scene::new();
@@ -137,6 +180,7 @@ fn main() -> ! {
     let mut frames = 0u32;
     let mut build_us = 0u32;
     let mut present_us = 0u32;
+    let mut last_poll_ms = 0u32;
     let mut dirty = true;
 
     loop {
@@ -164,10 +208,13 @@ fn main() -> ! {
         }
         match ui.input(event, &state, t) {
             Action::Trigger { relay, seconds } => {
-                // Until the network layer lands, apply locally so the countdown
-                // and the single-active-relay behaviour can be exercised on the
-                // bench exactly as they will behave against the controller.
+                // Applied locally first so the countdown starts on the same frame
+                // as the tap; the controller confirms it on the next poll, and its
+                // reply is authoritative if the two ever disagree.
                 apply_local_trigger(&mut state, relay, seconds);
+                if let Some(net) = net.as_mut() {
+                    net.trigger(relay, seconds, t);
+                }
                 dirty = true;
             }
             Action::Stop => {
@@ -177,9 +224,42 @@ fn main() -> ! {
                 for r in state.relays.iter_mut() {
                     r.on = false;
                 }
+                if let Some(net) = net.as_mut() {
+                    // Stopping is a trigger of zero length's opposite: the API
+                    // exposes it as its own endpoint, so ask for the relay the UI
+                    // just released.
+                    net.stop(t);
+                }
                 dirty = true;
             }
             Action::None => {}
+        }
+
+        // Pump the stack every pass. This is cheap - it only moves frames that are
+        // already queued - and it is what keeps DHCP and TCP alive between the
+        // comparatively rare dump requests.
+        if let Some(n) = net.as_mut() {
+            n.step(t);
+            state.link = if n.ip.is_some() && n.last_error.is_none() {
+                Link::Online
+            } else if n.is_connected() || n.ip.is_some() {
+                Link::Connecting
+            } else {
+                Link::Offline
+            };
+
+            // Requests only go out while nothing is animating, so a transfer can
+            // never stutter a transition. present() already blocks ~20 ms a frame,
+            // which is longer than smoltcp likes to be ignored, so this is the
+            // conservative placement until the stack is pumped between stripes.
+            if !ui.animating()
+                && n.ip.is_some()
+                && t.wrapping_sub(last_poll_ms) >= POLL_INTERVAL_MS
+            {
+                last_poll_ms = t;
+                n.poll_dump(&mut state, t);
+                dirty = true;
+            }
         }
 
         ui.update(&state, t);
