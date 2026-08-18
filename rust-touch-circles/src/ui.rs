@@ -314,6 +314,8 @@ pub struct Ui {
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
     observed_run_total_s: u32,
+    /// Screen that opened the full timer; makes Back a true stack pop.
+    run_return: Screen,
     dragging_list: bool,
     list_start_y: i32,
     list_start_offset: i32,
@@ -354,6 +356,7 @@ impl Ui {
             knob_q4: 0,
             last_running: false,
             observed_run_total_s: 0,
+            run_return: Screen::Force,
             dragging_list: false,
             list_start_y: 0,
             list_start_offset: 0,
@@ -491,7 +494,7 @@ impl Ui {
                         // rather than always jumping home.
                         let to = match self.screen {
                             Screen::Detail => Screen::Inspect,
-                            Screen::Running => Screen::Force,
+                            Screen::Running => self.run_return,
                             _ => Screen::Home,
                         };
                         self.start_wipe(to, x, y, now_ms);
@@ -504,6 +507,7 @@ impl Ui {
                         Action::None
                     }
                     Target::RunningBadge => {
+                        self.run_return = self.screen;
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::None
                     }
@@ -528,6 +532,7 @@ impl Ui {
                         let Some(relay) = state.usable().nth(self.selected) else {
                             return Action::None;
                         };
+                        self.run_return = Screen::Force;
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::Trigger {
                             relay: relay.id,
