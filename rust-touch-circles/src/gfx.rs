@@ -293,6 +293,28 @@ pub enum Prim {
     },
 }
 
+/// How many discs the occluding batch below can hold. Matches the demo's circle
+/// limit, since that is the only thing that fills it.
+pub const MAX_DISCS: usize = 32;
+
+/// One disc of the occluding batch.
+#[derive(Clone, Copy)]
+pub struct Disc {
+    pub cx: i32,
+    pub cy: i32,
+    pub r: i32,
+    pub color: u16,
+    pub alpha: u8,
+}
+
+const NO_DISC: Disc = Disc {
+    cx: 0,
+    cy: 0,
+    r: 0,
+    color: 0,
+    alpha: 0,
+};
+
 pub struct Scene {
     pub prims: [Prim; MAX_PRIMS],
     /// Precomputed inclusive vertical bounds for each primitive. This removes
@@ -305,6 +327,15 @@ pub struct Scene {
     clip_bottom: i16,
     pub len: usize,
     pub background: u16,
+    /// Discs composited with occlusion, beneath all primitives.
+    ///
+    /// A separate path because the assumption behind the primitive list - a
+    /// handful of small shapes, so back-to-front painting beats tracking coverage
+    /// - is exactly wrong for the circles demo, where a dozen overlapping
+    /// screen-filling discs can each cost a full-screen fill. `discs_row` writes
+    /// every pixel once instead, which is what let the original demo hold 60 fps.
+    pub discs: [Disc; MAX_DISCS],
+    pub n_discs: usize,
 }
 
 const NOTHING: Prim = Prim::Disc {
@@ -324,14 +355,31 @@ impl Scene {
             clip_bottom: H as i16 - 1,
             len: 0,
             background: 0,
+            discs: [NO_DISC; MAX_DISCS],
+            n_discs: 0,
         }
     }
 
     pub fn clear(&mut self, background: u16) {
         self.len = 0;
+        self.n_discs = 0;
         self.background = background;
         self.clip_top = 0;
         self.clip_bottom = H as i16 - 1;
+    }
+
+    /// Add a disc to the occluding batch. Order matters: later discs are on top.
+    pub fn push_disc(&mut self, cx: i32, cy: i32, r: i32, color: u16, alpha: u8) {
+        if self.n_discs < MAX_DISCS {
+            self.discs[self.n_discs] = Disc {
+                cx,
+                cy,
+                r,
+                color,
+                alpha,
+            };
+            self.n_discs += 1;
+        }
     }
 
     #[inline]
@@ -875,12 +923,143 @@ fn key_row_prim(
     }
 }
 
+/// One scanline of the occluding disc batch.
+///
+/// Walks the discs front-to-back - newest first - keeping the x-intervals already
+/// written, and fills only the parts of each disc that nothing nearer has
+/// claimed. Total writes per row are therefore bounded by the row's width no
+/// matter how many discs overlap, which is the whole point: painting these
+/// back-to-front costs a full-screen fill *per disc*.
+///
+/// Edges are hard here rather than anti-aliased, as in the demo this came from.
+/// At radii of hundreds of pixels the difference is invisible, and a partially
+/// transparent edge pixel cannot be treated as covering without leaving seams
+/// where discs meet.
+fn discs_row(row: &mut [u8], y: i32, discs: &[Disc]) {
+    // Opaque intervals already written, sorted and disjoint.
+    let mut covered = [(0i32, 0i32); MAX_DISCS];
+    let mut n_covered = 0usize;
+
+    // The opaque discs, nearest first, each filling only what nothing in front of
+    // it has claimed. This is where the saving is: without it, every one of them
+    // costs close to a full-screen fill.
+    for disc in discs.iter().rev().filter(|d| d.alpha == 255) {
+        let Some((left, right)) = disc_span(disc, y) else {
+            continue;
+        };
+        paint_uncovered(row, &covered[..n_covered], left, right, disc.color, 255);
+        insert_covered(&mut covered, &mut n_covered, left, right);
+    }
+
+    // Then the fading ones. A fading disc is always an older one - it has had
+    // time to finish growing - so every one of them is *behind* every opaque disc,
+    // which is what makes this split sound: they can be blended afterwards as long
+    // as they keep out of the opaque spans. Oldest first, so where two of them do
+    // overlap they blend in the right order.
+    //
+    // Skipping the opaque spans is not just tidiness. A fading disc is at full
+    // radius, so blending it across the whole row costs far more than filling it;
+    // while a drag is piling up new circles, the opaque ones on top mean there is
+    // almost nothing of it left to blend.
+    for disc in discs.iter().filter(|d| d.alpha != 255) {
+        let Some((left, right)) = disc_span(disc, y) else {
+            continue;
+        };
+        paint_uncovered(
+            row,
+            &covered[..n_covered],
+            left,
+            right,
+            disc.color,
+            disc.alpha,
+        );
+    }
+}
+
+/// The x range a disc occupies on scanline `y`, or None if it misses the row.
+#[inline]
+fn disc_span(disc: &Disc, y: i32) -> Option<(i32, i32)> {
+    let dy = (y - disc.cy).abs();
+    if dy > disc.r {
+        return None;
+    }
+    let half = ((disc.r * disc.r - dy * dy) as u32).isqrt() as i32;
+    Some((disc.cx - half, disc.cx + half))
+}
+
+/// Write the parts of `[left, right]` that `covered` does not already own.
+/// `blend_span` takes the paired-store fill path at alpha 255, so this serves the
+/// opaque and the fading passes alike.
+#[inline]
+fn paint_uncovered(
+    row: &mut [u8],
+    covered: &[(i32, i32)],
+    left: i32,
+    right: i32,
+    color: u16,
+    alpha: u8,
+) {
+    let mut cursor = left;
+    for &(c0, c1) in covered {
+        if c1 < cursor {
+            continue;
+        }
+        if c0 > right {
+            break;
+        }
+        if c0 > cursor {
+            blend_span(row, cursor, (c0 - 1).min(right), color, alpha);
+        }
+        cursor = cursor.max(c1 + 1);
+        if cursor > right {
+            return;
+        }
+    }
+    blend_span(row, cursor, right, color, alpha);
+}
+
+/// Insert `[left, right]` into a sorted, disjoint interval list, coalescing
+/// anything it touches. A full list simply stops absorbing new intervals, which
+/// costs overdraw but never correctness.
+fn insert_covered(covered: &mut [(i32, i32); MAX_DISCS], n: &mut usize, left: i32, right: i32) {
+    let mut at = 0;
+    while at < *n && covered[at].1 + 1 < left {
+        at += 1;
+    }
+    let mut end = at;
+    let (mut low, mut high) = (left, right);
+    while end < *n && covered[end].0 <= right + 1 {
+        low = low.min(covered[end].0);
+        high = high.max(covered[end].1);
+        end += 1;
+    }
+    // Replace the merged run [at, end) with the single interval.
+    let merged = end - at;
+    if merged == 0 {
+        if *n >= MAX_DISCS {
+            return;
+        }
+        covered.copy_within(at..*n, at + 1);
+        *n += 1;
+    } else if merged > 1 {
+        covered.copy_within(end..*n, at + 1);
+        *n -= merged - 1;
+    }
+    covered[at] = (low, high);
+}
+
 /// Composite `y0..y0+STRIPE_ROWS` of the scene into `pixels`.
 pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
     for local in 0..STRIPE_ROWS {
         let y = (y0 + local) as i32;
         let row = &mut pixels[local * W * 2..(local + 1) * W * 2];
         fill_span(row, 0, W as i32 - 1, scene.background);
+
+        // Beneath every primitive, so the Back button and any transition disc are
+        // drawn over the demo rather than under it.
+        if scene.n_discs != 0 {
+            discs_row(row, y, &scene.discs[..scene.n_discs]);
+        }
 
         for index in 0..scene.len {
             let p = &scene.prims[index];

@@ -40,6 +40,9 @@ const C_INFO: u16 = rgb(142, 104, 226);
 /// Configuration reads as a cooler, more technical relative of Extras.
 const BG_CONFIG: u16 = rgb(10, 24, 32);
 const C_CONFIG: u16 = rgb(58, 158, 178);
+/// The demo's first palette entry, used for its button on the Extras menu so the
+/// page announces itself before you open it.
+const C_BUBBLES: u16 = rgb(255, 55, 125);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -280,12 +283,15 @@ pub enum Screen {
     /// One controller's settings, and the only place it can be removed.
     Controller,
     /// Text entry. What it is editing, and where Back returns to, are held in
-    /// `edit` and `kb_return` rather than encoded in more screen variants.
+    /// `edit`, and Back is the ordinary history pop, rather than encoded in
+    /// more screen variants.
     Keyboard,
     /// Joining a network: working, then joined, or failed with a retry.
     Connecting,
     /// A destructive action, held until it is confirmed.
     Confirm,
+    /// The circles demo from the project's main branch, as a page of its own.
+    Bubbles,
 }
 
 impl Screen {
@@ -307,6 +313,10 @@ impl Screen {
             | Screen::Keyboard
             | Screen::Connecting
             | Screen::Confirm => BG_CONFIG,
+            // Black, as the demo has it - and since the transition disc grows in
+            // the destination's background colour, arriving here is a wipe to
+            // black, which is the right way into it.
+            Screen::Bubbles => rgb(0, 0, 0),
         }
     }
     fn accent(self) -> u16 {
@@ -319,6 +329,7 @@ impl Screen {
             Screen::Info => C_INFO,
             Screen::Extras => C_INFO,
             Screen::Confirm => C_CANCEL,
+            Screen::Bubbles => C_BUBBLES,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -361,6 +372,8 @@ enum Target {
     /// A keyboard key that is not part of a grid row - shift, delete, mode,
     /// space, commit.
     KeyAux(usize),
+    /// Anywhere on the bubbles page that is not the Back button.
+    Bubble,
     /// Go ahead with the destructive action being confirmed.
     Confirm,
     /// Try the failed network join again.
@@ -550,8 +563,16 @@ const WIPE_REVEAL_MS: u32 = 240;
 /// UI can have.
 const WIPE_MAX_MS: u32 = 2_000;
 
+/// How deep the navigation history goes. The longest real route is
+/// Home > Extras > Settings > Wi-Fi > keyboard > connecting, so this has room to
+/// spare; beyond it the oldest entry is dropped.
+const NAV_DEPTH: usize = 8;
+
 pub struct Ui {
     pub screen: Screen,
+    /// Screens above this one, oldest first - see `open` and `back`.
+    nav: [Screen; NAV_DEPTH],
+    nav_len: usize,
     wipe: Option<Wipe>,
     ripples: [Ripple; MAX_RIPPLES],
     bubbles: [Bubble; MAX_BUBBLES],
@@ -586,10 +607,12 @@ pub struct Ui {
     /// (grid row, slot) of the key lit right now, and when it was pressed.
     key_hot: Option<(usize, usize)>,
     key_hot_ms: u32,
-    /// Where Back returns to from the keyboard, so it is a true stack pop.
-    kb_return: Screen,
     /// The network chosen in the picker, held until its password is entered.
     pending_ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
+    /// The circles demo from the main branch. Its own model with its own rules -
+    /// see `bubbles`. Called `game` because `bubbles` is already the ambient
+    /// decoration on the other screens, and the two are unrelated.
+    game: crate::bubbles::Bubbles,
     /// When the current join attempt started, and whether it has been given up
     /// on. The connecting screen is driven from these two.
     connect_started_ms: u32,
@@ -622,8 +645,6 @@ pub struct Ui {
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
     observed_run_total_s: u32,
-    /// Screen that opened the full timer; makes Back a true stack pop.
-    run_return: Screen,
     run_finished: bool,
     /// A completed run remains available as a 00:00 badge until DONE is used.
     completion_pending: bool,
@@ -653,6 +674,8 @@ impl Ui {
     pub const fn new() -> Self {
         Self {
             screen: Screen::Home,
+            nav: [Screen::Home; NAV_DEPTH],
+            nav_len: 0,
             wipe: None,
             ripples: [NO_RIPPLE; MAX_RIPPLES],
             bubbles: [NO_BUBBLE; MAX_BUBBLES],
@@ -674,8 +697,8 @@ impl Ui {
             key_mode: KeyMode::Lower,
             key_hot: None,
             key_hot_ms: 0,
-            kb_return: Screen::Config,
             pending_ssid: crate::store::FixedStr::EMPTY,
+            game: crate::bubbles::Bubbles::new(),
             connect_started_ms: 0,
             connect_failed: false,
             connect_ok_ms: None,
@@ -687,7 +710,6 @@ impl Ui {
             knob_q4: 0,
             last_running: false,
             observed_run_total_s: 0,
-            run_return: Screen::Force,
             run_finished: false,
             completion_pending: false,
             completion_acknowledged: false,
@@ -751,6 +773,11 @@ impl Ui {
         self.last_bubble_y = y;
     }
 
+    /// Begin a transition to `to` without touching the history.
+    ///
+    /// Prefer `open`, `back` or `unwind_to`: this is the raw move, for the two
+    /// cases that are genuinely not navigation - a coloured cancel, and the
+    /// transitions that replace the current screen in place.
     fn start_wipe(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
         self.wipe = Some(Wipe {
             to,
@@ -759,6 +786,53 @@ impl Ui {
             born_ms: now_ms,
             color: to.background(),
         });
+    }
+
+    /// Go one level deeper: remember where we are, then transition.
+    ///
+    /// Every forward move goes through here, and Back is always `back()`. This
+    /// replaced a table of hardcoded parents, which was wrong by construction -
+    /// screens reachable from more than one place needed a remembered caller
+    /// anyway (the countdown had one, the keyboard had another), and any screen
+    /// added without a table entry silently fell through to Home. That is exactly
+    /// how Back on the demo page ended up going home instead of to Extras.
+    fn open(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
+        let from = self.interactive_screen();
+        if self.nav_len == NAV_DEPTH {
+            // Deep enough that the oldest entry is of no interest; drop it rather
+            // than refuse to record where we are now.
+            self.nav.rotate_left(1);
+            self.nav_len -= 1;
+        }
+        self.nav[self.nav_len] = from;
+        self.nav_len += 1;
+        self.start_wipe(to, x, y, now_ms);
+    }
+
+    /// Pop one level. Home is the floor, so Back is never a dead end.
+    fn back(&mut self, x: i32, y: i32, now_ms: u32) -> Screen {
+        let to = if self.nav_len > 0 {
+            self.nav_len -= 1;
+            self.nav[self.nav_len]
+        } else {
+            Screen::Home
+        };
+        self.start_wipe(to, x, y, now_ms);
+        to
+    }
+
+    /// Return to a screen already in the history, dropping everything above it.
+    ///
+    /// For the transitions that finish a task several levels deep and belong back
+    /// where it started - committing an edit, confirming a removal, joining a
+    /// network. Popping one level at a time would land on the keyboard again.
+    fn unwind_to(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
+        if let Some(at) = self.nav[..self.nav_len].iter().rposition(|s| *s == to) {
+            self.nav_len = at;
+        }
+        // A target that is not in the history keeps the history as it is: the
+        // screen still opens, and Back still leads somewhere sensible.
+        self.start_wipe(to, x, y, now_ms);
     }
 
     /// Which screen a touch belongs to: once a wipe starts, the destination
@@ -829,54 +903,45 @@ impl Ui {
                 };
                 // Keys light up instead of rippling. A ripple per keystroke would
                 // be visual noise, and it would evict the ripples that carry
-                // meaning - there are only MAX_RIPPLES slots.
-                if !matches!(target, Target::KeyRow(_) | Target::KeyAux(_)) {
+                // meaning - there are only MAX_RIPPLES slots. The bubbles page
+                // answers a touch with its own circle, so it needs no ripple
+                // either - and the demo has none.
+                if !matches!(
+                    target,
+                    Target::KeyRow(_) | Target::KeyAux(_) | Target::Bubble
+                ) {
                     self.ripple(x, y, color, now_ms);
                 }
 
                 match target {
                     Target::Back => {
-                        // Back steps up one level, to wherever you came from,
-                        // rather than always jumping home.
-                        let to = match self.screen {
-                            Screen::Detail => Screen::Inspect,
-                            Screen::Running => self.run_return,
-                            // Both of these are reached through Extras, so Back
-                            // returns to the menu rather than skipping home.
-                            Screen::Info | Screen::Config => Screen::Extras,
-                            Screen::Wifi | Screen::Controller | Screen::Connecting => {
-                                Screen::Config
-                            }
-                            // Back is the "no" of the confirmation screen.
-                            Screen::Confirm => Screen::Controller,
-                            // Cancels the edit: the buffer is simply dropped.
-                            Screen::Keyboard => self.kb_return,
-                            _ => Screen::Home,
-                        };
+                        // One level up, wherever that turns out to be. On the
+                        // keyboard this also cancels the edit: the buffer is
+                        // simply dropped. On the confirmation screen it is the
+                        // "no".
                         self.menu_scroll = 0;
-                        self.start_wipe(to, x, y, now_ms);
+                        self.back(x, y, now_ms);
                         Action::None
                     }
                     Target::Schedule(index) => {
                         self.detail = index;
                         self.detail_scroll = 0;
-                        self.start_wipe(Screen::Detail, x, y, now_ms);
+                        self.open(Screen::Detail, x, y, now_ms);
                         Action::None
                     }
                     Target::RunningBadge => {
-                        self.run_return = self.screen;
                         self.run_finished = self.completion_pending;
-                        self.start_wipe(Screen::Running, x, y, now_ms);
+                        self.open(Screen::Running, x, y, now_ms);
                         Action::None
                     }
                     Target::Inspect => {
-                        self.start_wipe(Screen::Inspect, x, y, now_ms);
+                        self.open(Screen::Inspect, x, y, now_ms);
                         Action::None
                     }
                     Target::Info => {
                         // The cog opens the menu now, not the analog page.
                         self.menu_scroll = 0;
-                        self.start_wipe(Screen::Extras, x, y, now_ms);
+                        self.open(Screen::Extras, x, y, now_ms);
                         Action::None
                     }
                     // List rows normally arrive here on release, via `row_at`, but
@@ -886,6 +951,10 @@ impl Ui {
                     | Target::ConfigRow(_)
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
+                    Target::Bubble => {
+                        self.game.press(x, y, now_ms);
+                        Action::None
+                    }
                     Target::Confirm => self.confirm_action(x, y, now_ms),
                     Target::Retry => {
                         self.connect_started_ms = now_ms;
@@ -909,7 +978,7 @@ impl Ui {
                     Target::KeyAux(index) => self.key_aux(index, x, y, now_ms),
                     Target::Force => {
                         self.selected = self.selected.min(state.n_usable().saturating_sub(1));
-                        self.start_wipe(Screen::Force, x, y, now_ms);
+                        self.open(Screen::Force, x, y, now_ms);
                         Action::None
                     }
                     Target::Relay(index) => {
@@ -920,9 +989,8 @@ impl Ui {
                         let Some(relay) = state.usable().nth(self.selected) else {
                             return Action::None;
                         };
-                        self.run_return = Screen::Force;
                         self.run_finished = false;
-                        self.start_wipe(Screen::Running, x, y, now_ms);
+                        self.open(Screen::Running, x, y, now_ms);
                         Action::Trigger {
                             relay: relay.id,
                             controller: relay.controller,
@@ -931,10 +999,12 @@ impl Ui {
                         }
                     }
                     Target::Cancel => {
-                        // Cancel and Done both pop the timer's remembered caller.
-                        // Only an active run needs the network stop operation.
+                        // Cancel and Done are Back with a colour: same pop, but the
+                        // transition carries the outcome - green for a run that
+                        // finished, red for one being stopped.
+                        let to = self.back(x, y, now_ms);
                         self.wipe = Some(Wipe {
-                            to: self.run_return,
+                            to,
                             x,
                             y,
                             born_ms: now_ms,
@@ -989,7 +1059,17 @@ impl Ui {
                         _ => {}
                     }
                 }
-                if self.dragging_list || (!self.dragging_slider && self.hit(x, y).is_none()) {
+                // Dragging across the demo leaves a trail: its spawn rule rejects
+                // contacts near a live circle's origin, so a moving finger starts
+                // a new one roughly every fingertip's width. That is the original's
+                // behaviour, not an addition.
+                if self.interactive_screen() == Screen::Bubbles {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.game.press(x, y, now_ms);
+                    }
+                } else if self.dragging_list
+                    || (!self.dragging_slider && self.hit(x, y).is_none())
+                {
                     self.bubble(x, y, now_ms);
                 }
                 Action::None
@@ -1004,7 +1084,7 @@ impl Ui {
                                 self.detail = index;
                                 self.detail_scroll = 0;
                                 self.ripple(x, y, C_INSPECT, now_ms);
-                                self.start_wipe(Screen::Detail, x, y, now_ms);
+                                self.open(Screen::Detail, x, y, now_ms);
                             }
                             Some(Target::Relay(index)) => {
                                 self.selected = index;
@@ -1087,6 +1167,7 @@ impl Ui {
             self.key_hot = None;
         }
         self.update_connect(state, now_ms);
+        self.game.update(now_ms);
         for bubble in self.bubbles.iter_mut() {
             if bubble.active && now_ms.wrapping_sub(bubble.born_ms) >= BUBBLE_MS {
                 bubble.active = false;
@@ -1133,11 +1214,11 @@ impl Ui {
             self.run_finished = true;
             self.completion_pending = true;
             // Let completion grow out of the same top-right affordance the user
-            // would tap, and remember the current page so DONE pops back to it.
+            // would tap. Opened, not replaced, so DONE pops back to whatever page
+            // was on screen when the run ended.
             if self.interactive_screen() != Screen::Running && self.wipe.is_none() {
-                self.run_return = self.screen;
                 let (x, y, _) = l::RUN_BADGE;
-                self.start_wipe(Screen::Running, x, y, now_ms);
+                self.open(Screen::Running, x, y, now_ms);
             }
         } else if self.screen == Screen::Running
             && state.left_s == 0
@@ -1165,6 +1246,10 @@ impl Ui {
             // The connecting sweep is continuous, and its elapsed-seconds readout
             // has to keep counting even though the clock is not what drives it.
             || self.screen == Screen::Connecting
+            // The demo runs at whatever rate the loop can manage, exactly as it
+            // does on its own branch, and stops asking for frames once the last
+            // circle has faded.
+            || self.game.active()
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1207,8 +1292,14 @@ impl Ui {
         // Keep the compact run affordance out of wipe frames. Popping it onto
         // the outgoing screen on the same frame a manual run starts made it
         // briefly intersect the expanding transition disc.
+        // Kept off the demo page too, which is meant to be the animation and a way
+        // back and nothing else. A run in progress is still one tap away, since
+        // Back leads to a screen that does show the badge.
         if ((run_is_active(state) && !self.completion_acknowledged) || self.completion_pending)
-            && self.interactive_screen() != Screen::Running
+            && !matches!(
+                self.interactive_screen(),
+                Screen::Running | Screen::Bubbles
+            )
         {
             self.draw_running_badge(scene, state, 255);
         }
@@ -1371,6 +1462,28 @@ impl Ui {
                 );
                 let (x0, y0, x1, y1) = l::CONFIRM_YES;
                 self.zone(Target::Confirm, Zone::Rect { x0, y0, x1, y1 });
+            }
+            Screen::Bubbles => {
+                // Back first, so the corner it occupies belongs to it; the rest of
+                // the panel is the game's, which is how the demo behaves - a
+                // contact anywhere starts a circle.
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                self.zone(
+                    Target::Bubble,
+                    Zone::Rect {
+                        x0: 0,
+                        y0: 0,
+                        x1: W as i32 - 1,
+                        y1: H as i32 - 1,
+                    },
+                );
             }
             Screen::Connecting => {
                 self.zone(
@@ -1562,7 +1675,12 @@ impl Ui {
         now_ms: u32,
         alpha: u8,
     ) {
-        self.draw_bubbles(scene, screen, now_ms, alpha);
+        // The ambient decoration is skipped on the demo page: its own circles are
+        // the content there, and a second, different kind of circle drifting
+        // behind them would not read as the same animation.
+        if screen != Screen::Bubbles {
+            self.draw_bubbles(scene, screen, now_ms, alpha);
+        }
         match screen {
             Screen::Home => self.draw_home(scene, state, alpha),
             Screen::Inspect => self.draw_inspect(scene, state, alpha),
@@ -1577,6 +1695,7 @@ impl Ui {
             Screen::Keyboard => self.draw_keyboard(scene, now_ms, alpha),
             Screen::Connecting => self.draw_connecting(scene, state, now_ms, alpha),
             Screen::Confirm => self.draw_confirm(scene, alpha),
+            Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -1844,6 +1963,7 @@ impl Ui {
     const EXTRAS: &'static [(&'static str, u16, Screen)] = &[
         ("SETTINGS", C_CONFIG, Screen::Config),
         ("SENSORS", C_INFO, Screen::Info),
+        ("BUBBLES", C_BUBBLES, Screen::Bubbles),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -1981,7 +2101,7 @@ impl Ui {
                 if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
                     self.menu_scroll = 0;
                     self.info_scroll = 0;
-                    self.start_wipe(*screen, x, y, now_ms);
+                    self.open(*screen, x, y, now_ms);
                 }
                 Action::None
             }
@@ -1991,11 +2111,11 @@ impl Ui {
                     // it by the time the transition lands.
                     self.want_scan = !self.networks.scanned;
                     self.menu_scroll = 0;
-                    self.start_wipe(Screen::Wifi, x, y, now_ms);
+                    self.open(Screen::Wifi, x, y, now_ms);
                 } else if row <= self.settings.n_controllers {
                     self.controller_selected = row - 1;
                     self.menu_scroll = 0;
-                    self.start_wipe(Screen::Controller, x, y, now_ms);
+                    self.open(Screen::Controller, x, y, now_ms);
                 } else {
                     self.open_keyboard(Edit::NewControllerIp, "", x, y, now_ms);
                 }
@@ -2041,7 +2161,7 @@ impl Ui {
                     .copied()
                     .filter(|_| index < self.settings.n_controllers)
                 else {
-                    self.start_wipe(Screen::Config, x, y, now_ms);
+                    self.unwind_to(Screen::Config, x, y, now_ms);
                     return Action::None;
                 };
                 match row {
@@ -2080,7 +2200,7 @@ impl Ui {
                     ),
                     // Removal is one tap away from a controller you may have had
                     // to walk somewhere to find the address of, so it asks first.
-                    _ => self.start_wipe(Screen::Confirm, x, y, now_ms),
+                    _ => self.open(Screen::Confirm, x, y, now_ms),
                 }
                 Action::None
             }
@@ -2094,7 +2214,7 @@ impl Ui {
     fn confirm_action(&mut self, x: i32, y: i32, now_ms: u32) -> Action {
         self.settings.remove_controller(self.controller_selected);
         self.menu_scroll = 0;
-        self.start_wipe(Screen::Config, x, y, now_ms);
+        self.unwind_to(Screen::Config, x, y, now_ms);
         Action::SaveSettings
     }
 
@@ -2103,7 +2223,7 @@ impl Ui {
         self.connect_started_ms = now_ms;
         self.connect_failed = false;
         self.connect_ok_ms = None;
-        self.start_wipe(Screen::Connecting, x, y, now_ms);
+        self.open(Screen::Connecting, x, y, now_ms);
     }
 
     /// Drive the connecting screen: give up after a while, and once the network
@@ -2121,7 +2241,7 @@ impl Ui {
             self.connect_failed = false;
             if now_ms.wrapping_sub(since) >= CONNECT_SETTLE_MS && self.wipe.is_none() {
                 self.menu_scroll = 0;
-                self.start_wipe(Screen::Config, CX, 262, now_ms);
+                self.unwind_to(Screen::Config, CX, 262, now_ms);
             }
         } else if !self.connect_failed
             && now_ms.wrapping_sub(self.connect_started_ms) >= CONNECT_TIMEOUT_MS
@@ -2144,13 +2264,12 @@ impl Ui {
     }
 
     fn open_keyboard(&mut self, edit: Edit, initial: &str, x: i32, y: i32, now_ms: u32) {
-        self.kb_return = self.screen;
         self.edit = edit;
         self.edit_buf = crate::store::FixedStr::new(initial);
         self.edit_invalid = false;
         self.key_mode = edit.mode();
         self.key_hot = None;
-        self.start_wipe(Screen::Keyboard, x, y, now_ms);
+        self.open(Screen::Keyboard, x, y, now_ms);
     }
 
     fn type_char(&mut self, ch: char) {
@@ -2233,7 +2352,6 @@ impl Ui {
                 // Chain straight into the password instead of returning to the
                 // picker: a hand-typed network still needs one.
                 self.pending_ssid = crate::store::FixedStr::new(value.as_str());
-                self.kb_return = Screen::Wifi;
                 self.edit = Edit::WifiPsk;
                 self.edit_buf = crate::store::FixedStr::EMPTY;
                 self.key_mode = KeyMode::Lower;
@@ -2258,7 +2376,7 @@ impl Ui {
                     return Action::None;
                 }
                 self.menu_scroll = 0;
-                self.start_wipe(Screen::Config, x, y, now_ms);
+                self.unwind_to(Screen::Config, x, y, now_ms);
                 Action::SaveSettings
             }
             Edit::ControllerIp(index) => {
@@ -2267,11 +2385,11 @@ impl Ui {
                     return Action::None;
                 };
                 if index >= self.settings.n_controllers {
-                    self.start_wipe(Screen::Config, x, y, now_ms);
+                    self.unwind_to(Screen::Config, x, y, now_ms);
                     return Action::None;
                 }
                 self.settings.controllers[index].ip = ip;
-                self.start_wipe(Screen::Controller, x, y, now_ms);
+                self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
             Edit::ControllerUser(index) => {
@@ -2280,7 +2398,7 @@ impl Ui {
                     return Action::None;
                 }
                 self.settings.controllers[index].user.set(value.as_str());
-                self.start_wipe(Screen::Controller, x, y, now_ms);
+                self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
             Edit::ControllerPass(index) => {
@@ -2289,7 +2407,7 @@ impl Ui {
                     return Action::None;
                 }
                 self.settings.controllers[index].pass.set(value.as_str());
-                self.start_wipe(Screen::Controller, x, y, now_ms);
+                self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
             Edit::ControllerName(index) => {
@@ -2299,7 +2417,7 @@ impl Ui {
                 }
                 // An empty name is legitimate: it means "just show the address".
                 self.settings.controllers[index].name.set(value.as_str());
-                self.start_wipe(Screen::Controller, x, y, now_ms);
+                self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
         }
@@ -2570,6 +2688,19 @@ impl Ui {
         scene.clip_reset();
 
         self.menu_scrollbar(scene, Screen::Controller, C_CONFIG, alpha);
+    }
+
+    /// The circles demo, given the whole panel.
+    ///
+    /// No heading, no status line, no ambient bubbles, no battery and no run badge
+    /// - see `draw_screen` and `build`. Just the animation and the Back button, so
+    /// the page behaves like the demo it came from rather than like a settings
+    /// page that happens to have circles on it.
+    fn draw_bubbles_game(&mut self, scene: &mut Scene, now_ms: u32, alpha: u8) {
+        self.game.draw(scene, now_ms, alpha);
+        // Drawn last so it survives whatever lands on the panel: a Back button
+        // underneath an opaque screen-filling disc would strand you here.
+        self.draw_back(scene, alpha);
     }
 
     /// Confirmation for removing a controller. A full screen rather than a

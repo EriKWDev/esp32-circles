@@ -14,6 +14,7 @@
 use esp_backtrace as _;
 esp_bootloader_esp_idf::esp_app_desc!();
 
+mod bubbles;
 mod display;
 mod font;
 mod gfx;
@@ -411,6 +412,7 @@ fn main() -> ! {
                     ui::Screen::Keyboard => "keyboard",
                     ui::Screen::Connecting => "connecting",
                     ui::Screen::Confirm => "confirm",
+                    ui::Screen::Bubbles => "bubbles",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
