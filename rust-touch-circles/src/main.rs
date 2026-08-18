@@ -298,6 +298,17 @@ fn main() -> ! {
                 }
                 dirty = true;
             }
+            Action::RunSchedule { controller, start } => {
+                if let Some(net) = net.as_mut() {
+                    net.run_schedule(controller, start, t);
+                }
+                // No optimistic local state here, unlike a manual trigger: which
+                // relay a schedule starts with, and how the controller sequences
+                // the rest, is the controller's to decide. The next poll - forced
+                // below - is what makes it visible.
+                last_poll_ms = t.wrapping_sub(POLL_INTERVAL_MS);
+                dirty = true;
+            }
             Action::None => {}
         }
 
@@ -534,6 +545,9 @@ fn seed_mock(state: &mut State) {
 
     let mut first = StartTime {
         id: 1,
+        remote_id: 1,
+        controller: 0,
+        running: false,
         enabled: true,
         hh: 6,
         mm: 0,
@@ -554,6 +568,9 @@ fn seed_mock(state: &mut State) {
     state.starts[0] = first;
     state.starts[1] = StartTime {
         id: 2,
+        remote_id: 2,
+        controller: 0,
+        running: false,
         enabled: false,
         hh: 12,
         mm: 0,
@@ -566,6 +583,9 @@ fn seed_mock(state: &mut State) {
     };
     state.starts[2] = StartTime {
         id: 3,
+        remote_id: 3,
+        controller: 0,
+        running: false,
         enabled: true,
         hh: 21,
         mm: 30,

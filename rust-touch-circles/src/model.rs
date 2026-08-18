@@ -50,18 +50,32 @@ pub struct Entry {
 
 #[derive(Clone, Copy)]
 pub struct StartTime {
+    /// Id within the merged list, assigned by `merge_controller`.
     pub id: u8,
+    /// The id this schedule has on its own controller - what /api/run-schedule
+    /// and POST /api/schedule must be given. Schedules are numbered 1..3 on
+    /// every controller, so once several are merged the local id cannot be sent
+    /// back, exactly as with relays.
+    pub remote_id: u8,
+    pub controller: u8,
     pub enabled: bool,
     pub hh: u8,
     pub mm: u8,
     pub entries: [Entry; MAX_ENTRIES],
     pub n_entries: usize,
     pub gap_s: u16,
+    /// Whether this schedule is what the controller is currently running.
+    /// Reported by the controller (dump `sched:`) rather than guessed from the
+    /// active relay and queue depth, which is ambiguous as soon as two
+    /// schedules share a relay.
+    pub running: bool,
 }
 
 impl StartTime {
     const EMPTY: StartTime = StartTime {
         id: 0,
+        remote_id: 0,
+        controller: 0,
         enabled: false,
         hh: 0,
         mm: 0,
@@ -71,6 +85,7 @@ impl StartTime {
         }; MAX_ENTRIES],
         n_entries: 0,
         gap_s: 0,
+        running: false,
     };
 
     /// Total watering time this start time represents.
@@ -134,6 +149,11 @@ pub struct State {
     pub active: i32,
     pub left_s: u32,
     pub queued: u32,
+    /// Which schedule the controller says the current activity belongs to, in
+    /// that controller's own numbering. 0 when idle or running manually. Only
+    /// meaningful in a per-controller snapshot; the merged model carries it as
+    /// `StartTime::running` instead.
+    pub active_start: u8,
     pub max_run_s: u32,
     pub err: Text,
     pub link: Link,
@@ -163,6 +183,7 @@ impl State {
             active: 0,
             left_s: 0,
             queued: 0,
+            active_start: 0,
             max_run_s: 3600,
             err: Text::EMPTY,
             link: Link::Connecting,
@@ -238,13 +259,21 @@ impl State {
     /// Progress for a schedule the controller is actually executing. Returns
     /// (elapsed, total, active entry, entry elapsed).
     ///
-    /// The active relay and its reported `left` value are authoritative while a
-    /// valve is energized; clock arithmetic is used only during an inter-relay
-    /// gap, when `run` is false but `queued` remains non-zero. This avoids both
-    /// false RUNNING bars for a skipped schedule and drift from delayed starts.
+    /// Which schedule is running comes from the controller (`StartTime::running`,
+    /// from the dump's `sched:`), not from matching the active relay. Matching
+    /// was wrong whenever a relay appeared twice in one schedule - which real
+    /// ones do - because the same relay id then answered for two different
+    /// entries. With the owner known, the position in the running order follows
+    /// from the queue depth, which is exact.
+    ///
+    /// Within that, the reported `left` is authoritative while a valve is
+    /// energized; clock arithmetic is used only during an inter-relay gap, when
+    /// `run` is false but `queued` remains non-zero.
     pub fn schedule_progress(&self, index: usize) -> Option<(u32, u32, usize, u32)> {
         let schedule = self.starts.get(index)?;
-        if !self.clock_valid || !schedule.enabled || schedule.n_entries == 0 {
+        // Armed state is deliberately not required: a schedule can be run on
+        // demand, and it is then just as much in progress as a scheduled one.
+        if !schedule.running || schedule.n_entries == 0 {
             return None;
         }
         let total = schedule.total_seconds();
@@ -253,20 +282,11 @@ impl State {
         }
         let visibly_active = self.running && (self.left_s > 0 || self.queued > 0);
         if visibly_active {
-            let entries = &schedule.entries[..schedule.n_entries];
-            let active = entries
-                .iter()
-                .enumerate()
-                .find(|(i, entry)| {
-                    entry.relay as i32 == self.active
-                        && schedule.n_entries - *i - 1 == self.queued as usize
-                })
-                .map(|(i, _)| i)
-                .or_else(|| {
-                    entries
-                        .iter()
-                        .position(|entry| entry.relay as i32 == self.active)
-                })?;
+            // Entries still queued behind the active one place it exactly.
+            let active = schedule
+                .n_entries
+                .saturating_sub(1)
+                .saturating_sub(self.queued as usize);
             let duration = schedule.entries[active].seconds as u32;
             let entry_elapsed = duration.saturating_sub(self.left_s.min(duration));
             let before = schedule.entries[..active]
@@ -276,7 +296,7 @@ impl State {
                 + schedule.gap_s as u32 * active as u32;
             return Some((before + entry_elapsed, total, active, entry_elapsed));
         }
-        if self.queued == 0 {
+        if self.queued == 0 || !self.clock_valid {
             return None;
         }
 
@@ -374,6 +394,12 @@ pub fn parse_dump(body: &str, state: &mut State) {
                 if n_starts < MAX_STARTS {
                     state.starts[n_starts] = StartTime {
                         id: num(line, 1).unwrap_or(0),
+                        // A snapshot straight off one controller: the merge
+                        // assigns the merged id and stamps the owner, so these
+                        // stay at their defaults here.
+                        remote_id: num(line, 1).unwrap_or(0),
+                        controller: 0,
+                        running: false,
                         enabled: num::<u8>(line, 2).unwrap_or(0) != 0,
                         hh: num(line, 3).unwrap_or(0),
                         mm: num(line, 4).unwrap_or(0),
@@ -432,6 +458,7 @@ pub fn parse_dump(body: &str, state: &mut State) {
             "active" => state.active = num(line, 1).unwrap_or(0),
             "left" => state.left_s = num(line, 1).unwrap_or(0),
             "queued" => state.queued = num(line, 1).unwrap_or(0),
+            "sched" => state.active_start = num(line, 1).unwrap_or(0),
             "maxrun" => state.max_run_s = num(line, 1).unwrap_or(3600),
             "relaygap" => {
                 let gap = num(line, 1).unwrap_or(0);

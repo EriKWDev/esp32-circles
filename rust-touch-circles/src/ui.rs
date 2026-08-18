@@ -14,7 +14,7 @@ use core::fmt::Write as _;
 
 use crate::font::FontId;
 use crate::gfx::{Align, H, Scene, Text, W, rgb};
-use crate::model::{Link, State};
+use crate::model::{Link, StartTime, State};
 use crate::touch::Event;
 
 const CX: i32 = (W / 2) as i32;
@@ -114,6 +114,13 @@ mod l {
     pub const DETAIL_FIRST_CY: i32 = 200;
     pub const DETAIL_PITCH: i32 = 48;
     pub const DETAIL_MAX_ROWS: usize = 5;
+    /// Narrower than the schedules list: this page keeps a column free on the
+    /// right for the run button, the same arrangement the manual page uses for
+    /// GO, so "the big button that starts watering" is always in one place.
+    pub const DETAIL_X0: i32 = 18;
+    pub const DETAIL_X1: i32 = 342;
+    /// (cx, cy, r) - vertically centred on the entry list.
+    pub const RUN_NOW: (i32, i32, i32) = (408, 296, 54);
     pub const ANALOG_X0: i32 = 132;
     pub const ANALOG_X1: i32 = 438;
     pub const ANALOG_FIRST_CY: i32 = 198;
@@ -374,6 +381,8 @@ enum Target {
     KeyAux(usize),
     /// Anywhere on the bubbles page that is not the Back button.
     Bubble,
+    /// Run this schedule now, or stop it if it is already running.
+    RunNow,
     /// Go ahead with the destructive action being confirmed.
     Confirm,
     /// Try the failed network join again.
@@ -423,6 +432,8 @@ pub enum Action {
     SaveSettings,
     /// The network changed: persist, then re-join with the new credentials.
     ApplyWifi,
+    /// Run one schedule immediately. `start` is the id on its own controller.
+    RunSchedule { controller: u8, start: u8 },
 }
 
 /// What the keyboard is filling in. Held as state rather than as more `Screen`
@@ -955,6 +966,25 @@ impl Ui {
                         self.game.press(x, y, now_ms);
                         Action::None
                     }
+                    Target::RunNow => {
+                        let Some(schedule) = state.starts.get(self.detail).copied() else {
+                            return Action::None;
+                        };
+                        if schedule.running {
+                            // Same stop the countdown uses: the controller drops
+                            // the whole run, queue included.
+                            self.ripple(x, y, C_CANCEL, now_ms);
+                            Action::Stop
+                        } else if schedule.n_entries == 0 {
+                            Action::None
+                        } else {
+                            self.ripple(x, y, C_RUN, now_ms);
+                            Action::RunSchedule {
+                                controller: schedule.controller,
+                                start: schedule.remote_id,
+                            }
+                        }
+                    }
                     Target::Confirm => self.confirm_action(x, y, now_ms),
                     Target::Retry => {
                         self.connect_started_ms = now_ms;
@@ -1398,21 +1428,21 @@ impl Ui {
                 self.zone(
                     Target::List,
                     Zone::Rect {
-                        x0: l::SCHED_X0,
+                        x0: l::DETAIL_X0,
                         y0: l::DETAIL_FIRST_CY - 21,
-                        x1: l::SCHED_X1,
+                        x1: l::DETAIL_X1,
                         y1: l::DETAIL_FIRST_CY
                             + (l::DETAIL_MAX_ROWS as i32 - 1) * l::DETAIL_PITCH
                             + 21,
                     },
                 );
+                let (rx, ry, rr) = l::RUN_NOW;
                 self.zone(
-                    Target::List,
-                    Zone::Rect {
-                        x0: 450,
-                        y0: 178,
-                        x1: 478,
-                        y1: 432,
+                    Target::RunNow,
+                    Zone::Disc {
+                        cx: rx,
+                        cy: ry,
+                        r: rr,
                     },
                 );
             }
@@ -3312,6 +3342,49 @@ impl Ui {
         }
     }
 
+    /// The big button on the right of a schedule's entry list: start it now, or
+    /// stop it while it runs.
+    ///
+    /// Deliberately the same size, position and language as the manual page's GO -
+    /// on both screens it is "the button that opens a valve", and it turns red for
+    /// stopping exactly as the countdown's cancel does. A schedule with no entries
+    /// gets a dimmed plate rather than a hidden one, so the layout does not shift
+    /// and the reason is visible.
+    fn draw_run_button(&self, scene: &mut Scene, schedule: &StartTime, alpha: u8) {
+        let (cx, cy, r) = l::RUN_NOW;
+        let empty = schedule.n_entries == 0;
+        let color = if schedule.running {
+            C_CANCEL
+        } else if empty {
+            rgb(28, 44, 70)
+        } else {
+            C_RUN
+        };
+        scene.disc(cx, cy, r, color, alpha);
+        let (caption, ink) = if schedule.running {
+            ("STOP", INK)
+        } else if empty {
+            ("EMPTY", MUTED)
+        } else {
+            ("RUN", rgb(4, 22, 14))
+        };
+        let font = if caption == "EMPTY" {
+            FontId::Caption
+        } else {
+            FontId::Body
+        };
+        let f = font.get();
+        scene.label(
+            cx,
+            cy + f.ascent / 2 - f.ascent / 8,
+            font,
+            ink,
+            alpha,
+            Align::Center,
+            caption,
+        );
+    }
+
     /// One schedule's running order: which relay, for how long, in sequence.
     fn draw_detail(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         self.draw_back(scene, alpha);
@@ -3330,8 +3403,18 @@ impl Ui {
             title.as_str(),
         );
 
-        let mut sub = Buf::<28>::new();
-        if s.enabled {
+        let mut sub = Buf::<32>::new();
+        if let Some((elapsed, total, active, _)) = state.schedule_progress(index) {
+            // While it runs, the subtitle is the progress readout: which entry of
+            // how many, and how far through the whole schedule.
+            let _ = write!(
+                sub,
+                "RUNNING {} OF {} \u{b7} {}%",
+                active + 1,
+                s.n_entries,
+                elapsed * 100 / total.max(1)
+            );
+        } else if s.enabled {
             let _ = write!(sub, "ARMED \u{b7} {} IN ORDER", s.n_entries);
         } else {
             let _ = write!(sub, "DISARMED");
@@ -3360,9 +3443,9 @@ impl Ui {
             let e = s.entries[i];
             let cy = l::DETAIL_FIRST_CY + row as i32 * l::DETAIL_PITCH + shift;
             scene.pill(
-                l::SCHED_X0,
+                l::DETAIL_X0,
                 cy - 21,
-                l::SCHED_X1,
+                l::DETAIL_X1,
                 cy + 21,
                 18,
                 rgb(15, 34, 72),
@@ -3377,17 +3460,17 @@ impl Ui {
                     0
                 };
                 if amount > 0 {
-                    let fill = l::SCHED_X0
-                        + (l::SCHED_X1 - l::SCHED_X0) * amount as i32 / (e.seconds as i32).max(1);
-                    scene.pill(l::SCHED_X0, cy + 15, fill, cy + 21, 3, C_RUN, alpha);
+                    let fill = l::DETAIL_X0
+                        + (l::DETAIL_X1 - l::DETAIL_X0) * amount as i32 / (e.seconds as i32).max(1);
+                    scene.pill(l::DETAIL_X0, cy + 15, fill, cy + 21, 3, C_RUN, alpha);
                 }
             }
             // Position in the running order.
-            scene.disc(l::SCHED_X0 + 26, cy, 14, rgb(30, 70, 148), alpha);
+            scene.disc(l::DETAIL_X0 + 26, cy, 14, rgb(30, 70, 148), alpha);
             let mut n = Buf::<4>::new();
             let _ = write!(n, "{}", i + 1);
             scene.label(
-                l::SCHED_X0 + 26,
+                l::DETAIL_X0 + 26,
                 cy + 9,
                 FontId::Caption,
                 INK,
@@ -3401,7 +3484,7 @@ impl Ui {
                 .map(|r| r.name)
                 .unwrap_or(Text::EMPTY);
             scene.label(
-                l::SCHED_X0 + 52,
+                l::DETAIL_X0 + 52,
                 cy + 9,
                 FontId::Caption,
                 INK,
@@ -3417,7 +3500,7 @@ impl Ui {
                 let _ = write!(dur, "{} S", e.seconds);
             }
             scene.label(
-                l::SCHED_X1 - 22,
+                l::DETAIL_X1 - 22,
                 cy + 9,
                 FontId::Caption,
                 MUTED,
@@ -3427,6 +3510,8 @@ impl Ui {
             );
         }
         scene.clip_reset();
+
+        self.draw_run_button(scene, &s, alpha);
 
         self.draw_scrollbar(
             scene,

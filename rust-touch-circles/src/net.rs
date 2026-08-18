@@ -238,6 +238,10 @@ enum HttpKind {
     Dump(usize),
     Trigger,
     Stop,
+    /// Run a schedule on demand, or write one back. Neither returns anything the
+    /// model needs: the next poll is authoritative either way, and treating the
+    /// reply as authoritative would mean two sources of truth for the schedule.
+    Schedule,
 }
 
 #[derive(Clone, Copy)]
@@ -718,12 +722,14 @@ impl Net {
                 }
                 self.job = Job::Poll { next: index + 1 };
             }
-            HttpKind::Trigger => {}
             HttpKind::Stop => {
                 if let Job::StopAll { next } = self.job {
                     self.job = Job::StopAll { next: next + 1 };
                 }
             }
+            // Neither carries anything the model needs on success: the next poll
+            // is what makes the controller's decision visible.
+            HttpKind::Trigger | HttpKind::Schedule => {}
         }
     }
 
@@ -739,7 +745,9 @@ impl Net {
                     self.job = Job::StopAll { next: next + 1 };
                 }
             }
-            HttpKind::Trigger => {}
+            // Nothing to unwind for either: the request carried no model state,
+            // and the failure is already recorded for the status line.
+            HttpKind::Trigger | HttpKind::Schedule => {}
         }
     }
 
@@ -842,6 +850,33 @@ impl Net {
         self.job = Job::Idle;
         if let Err(e) = self.start_http(
             HttpKind::Trigger,
+            controller as usize,
+            false,
+            path,
+            0,
+            now_ms,
+        ) {
+            self.last_error = Some(e);
+        }
+    }
+
+    /// Run one schedule now. `start` is the id on that controller, not the
+    /// merged one - see StartTime::remote_id.
+    ///
+    /// The controller supersedes whatever is running, so this needs no stop
+    /// first; asking it to decide is also what keeps the single-relay rule its
+    /// job rather than a race between the panel and the clock.
+    pub fn run_schedule(&mut self, controller: u8, start: u8, now_ms: u32) {
+        if controller as usize >= self.n_hosts {
+            return;
+        }
+        let mut path = Buf::<96>::new();
+        let _ = write!(path, "/local/rainbird/app/api/run-schedule?start={start}");
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        if let Err(e) = self.start_http(
+            HttpKind::Schedule,
             controller as usize,
             false,
             path,
@@ -1006,6 +1041,16 @@ fn merge_controller(state: &mut State, remote: &State, controller: u8, online: b
         for entry in start.entries[..start.n_entries.min(MAX_ENTRIES)].iter_mut() {
             entry.relay = global_id(entry.relay);
         }
+        // Keep the controller's own id and which controller it came from: every
+        // controller numbers its schedules 1..3, so the merged id cannot be sent
+        // back to one of them. Same reason relays keep `remote_id`.
+        start.remote_id = source.id;
+        start.controller = controller;
+        start.id = (state.n_starts + 1) as u8;
+        // The controller names the schedule it is running; a schedule on an
+        // offline controller is never shown as running, since that state is as
+        // stale as the rest of its snapshot.
+        start.running = online && remote.active_start != 0 && remote.active_start == source.id;
         state.starts[state.n_starts] = start;
         state.n_starts += 1;
     }
