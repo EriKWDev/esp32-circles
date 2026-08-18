@@ -101,11 +101,13 @@ mod l {
     pub const DETAIL_MAX_ROWS: usize = 5;
     pub const ANALOG_X0: i32 = 132;
     pub const ANALOG_X1: i32 = 438;
-    pub const ANALOG_FIRST_CY: i32 = 183;
+    pub const ANALOG_FIRST_CY: i32 = 198;
     pub const ANALOG_PITCH: i32 = 42;
     // Six rows fit the clipped viewport completely. A seventh row previously
     // looked like accidental clipping and never enabled the scrollbar.
     pub const ANALOG_MAX_ROWS: usize = 6;
+    pub const ANALOG_VIEW_TOP: i32 = 168;
+    pub const ANALOG_VIEW_BOTTOM: i32 = 438;
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -400,7 +402,8 @@ impl Ui {
     fn bubble(&mut self, x: i32, y: i32, now_ms: u32) {
         let dx = x - self.last_bubble_x;
         let dy = y - self.last_bubble_y;
-        if now_ms.wrapping_sub(self.last_bubble_ms) < 65 && dx * dx + dy * dy < 18 * 18 {
+        let elapsed = now_ms.wrapping_sub(self.last_bubble_ms);
+        if elapsed < 110 || (elapsed < 180 && dx * dx + dy * dy < 24 * 24) {
             return;
         }
         let slot = self.bubbles.iter().position(|b| !b.active).unwrap_or(0);
@@ -443,9 +446,6 @@ impl Ui {
     /// cost of not being able to slide off a button to cancel it - a trade worth
     /// making for a panel whose buttons are this large.
     pub fn input(&mut self, ev: Event, state: &State, now_ms: u32) -> Action {
-        if let Event::Press(x, y) | Event::Drag(x, y) = ev {
-            self.bubble(x, y, now_ms);
-        }
         // Ignore input while a transition runs: the target that was hit is
         // already leaving, and letting a second tap through mid-animation is how
         // you end up two screens deep by accident.
@@ -456,6 +456,7 @@ impl Ui {
         match ev {
             Event::Press(x, y) => {
                 let Some(target) = self.hit(x, y) else {
+                    self.bubble(x, y, now_ms);
                     return Action::None;
                 };
                 if target == Target::Slider {
@@ -465,6 +466,7 @@ impl Ui {
                     return Action::None;
                 }
                 if target == Target::List {
+                    self.bubble(x, y, now_ms);
                     self.dragging_list = true;
                     self.list_start_y = y;
                     self.list_drag_on_bar = x >= 450;
@@ -559,7 +561,7 @@ impl Ui {
                     Target::List => Action::None,
                 }
             }
-            Event::Drag(_, y) => {
+            Event::Drag(x, y) => {
                 if self.dragging_slider {
                     self.minutes = minutes_from_y(y);
                 }
@@ -589,6 +591,9 @@ impl Ui {
                         Screen::Force => self.relay_scroll = offset,
                         _ => {}
                     }
+                }
+                if self.dragging_list || (!self.dragging_slider && self.hit(x, y).is_none()) {
+                    self.bubble(x, y, now_ms);
                 }
                 Action::None
             }
@@ -880,20 +885,18 @@ impl Ui {
                     Target::List,
                     Zone::Rect {
                         x0: 20,
-                        y0: l::ANALOG_FIRST_CY - 18,
+                        y0: l::ANALOG_VIEW_TOP,
                         x1: l::ANALOG_X1,
-                        y1: l::ANALOG_FIRST_CY
-                            + (l::ANALOG_MAX_ROWS as i32 - 1) * l::ANALOG_PITCH
-                            + 18,
+                        y1: l::ANALOG_VIEW_BOTTOM,
                     },
                 );
                 self.zone(
                     Target::List,
                     Zone::Rect {
                         x0: 450,
-                        y0: l::ANALOG_FIRST_CY,
+                        y0: l::ANALOG_VIEW_TOP,
                         x1: 478,
-                        y1: 438,
+                        y1: l::ANALOG_VIEW_BOTTOM,
                     },
                 );
             }
@@ -1236,7 +1239,7 @@ impl Ui {
             .n_analogs
             .saturating_sub(first)
             .min(l::ANALOG_MAX_ROWS + 1);
-        scene.clip(l::ANALOG_FIRST_CY - 18, 438);
+        scene.clip(l::ANALOG_VIEW_TOP, l::ANALOG_VIEW_BOTTOM);
         for row in 0..rows {
             let a = state.analogs[first + row];
             let cy = l::ANALOG_FIRST_CY + row as i32 * l::ANALOG_PITCH + shift;
@@ -1294,8 +1297,8 @@ impl Ui {
             l::ANALOG_MAX_ROWS,
             l::ANALOG_PITCH,
             state.n_analogs,
-            l::ANALOG_FIRST_CY,
-            438,
+            l::ANALOG_VIEW_TOP,
+            l::ANALOG_VIEW_BOTTOM,
             C_INFO,
             alpha,
         );
