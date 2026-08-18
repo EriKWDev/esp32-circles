@@ -1,1 +1,4 @@
 /target/
+
+# Wi-Fi credentials, injected at build time - never committed.
+wifi.txt

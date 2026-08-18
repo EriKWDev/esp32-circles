@@ -1,0 +1,4 @@
+Barlow is licensed under the SIL Open Font License, Version 1.1.
+Copyright (c) Jeremy Tribby. https://github.com/jpt/barlow
+Bundled here only so build.rs can rasterize glyph coverage maps at build time;
+no font code or outlines ship in the firmware binary.

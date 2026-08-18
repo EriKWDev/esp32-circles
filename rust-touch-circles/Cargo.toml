@@ -12,6 +12,11 @@ esp-backtrace = { version = "0.18", features = ["esp32c6", "panic-handler", "pri
 esp-println = { version = "0.16", features = ["esp32c6", "log-04"] }
 esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c6"] }
 
+# Host-side only: rasterizes the bundled TTFs into anti-aliased coverage maps
+# (see build.rs). None of this ships in the firmware.
+[build-dependencies]
+fontdue = "0.9"
+
 [profile.dev]
 opt-level = 3
 debug = 1
