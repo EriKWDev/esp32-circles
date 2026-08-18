@@ -22,7 +22,11 @@ pub const H: usize = 480;
 pub const STRIPE_ROWS: usize = 32;
 pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 
-pub const MAX_PRIMS: usize = 64;
+// Worst case is INFO: four controllers, seven analog rows, a running badge,
+// eight ambient bubbles, and foreground tap ripples. Keep fixed storage (and
+// therefore deterministic memory use), but leave enough headroom that playful
+// background effects can never evict functional foreground primitives.
+pub const MAX_PRIMS: usize = 80;
 /// Longest string any single text primitive can hold. Relay names are the only
 /// unbounded input and are truncated to this on the way in.
 pub const MAX_TEXT: usize = 28;

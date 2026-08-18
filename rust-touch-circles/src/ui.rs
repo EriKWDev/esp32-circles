@@ -181,15 +181,8 @@ enum Target {
     Slider,
     Schedule(usize),
     Info,
-    RelayPrev,
-    RelayNext,
-    InfoPrev,
-    InfoNext,
-    SchedulePrev,
-    ScheduleNext,
-    DetailPrev,
-    DetailNext,
     RunningBadge,
+    List,
 }
 
 #[derive(Clone, Copy)]
@@ -245,6 +238,25 @@ const MAX_RIPPLES: usize = 6;
 const RIPPLE_GROW_MS: u32 = 460;
 const RIPPLE_FADE_MS: u32 = 260;
 
+#[derive(Clone, Copy)]
+struct Bubble {
+    x: i32,
+    y: i32,
+    born_ms: u32,
+    max_r: i32,
+    active: bool,
+}
+
+const NO_BUBBLE: Bubble = Bubble {
+    x: 0,
+    y: 0,
+    born_ms: 0,
+    max_r: 0,
+    active: false,
+};
+const MAX_BUBBLES: usize = 8;
+const BUBBLE_MS: u32 = 520;
+
 /// A screen change, animated as a disc of the destination's colour growing from
 /// the point touched until it has swallowed the old screen.
 #[derive(Clone, Copy)]
@@ -267,6 +279,7 @@ pub struct Ui {
     pub screen: Screen,
     wipe: Option<Wipe>,
     ripples: [Ripple; MAX_RIPPLES],
+    bubbles: [Bubble; MAX_BUBBLES],
     zones: [(Target, Zone); MAX_ZONES],
     n_zones: usize,
     /// Force menu: minutes 1..=10, and which usable relay is selected.
@@ -299,6 +312,14 @@ pub struct Ui {
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
     observed_run_total_s: u32,
+    dragging_list: bool,
+    list_start_y: i32,
+    list_start_offset: usize,
+    list_drag_on_bar: bool,
+    pending_row: Option<Target>,
+    last_bubble_ms: u32,
+    last_bubble_x: i32,
+    last_bubble_y: i32,
 }
 
 const NO_RIPPLE: Ripple = Ripple {
@@ -316,6 +337,7 @@ impl Ui {
             screen: Screen::Home,
             wipe: None,
             ripples: [NO_RIPPLE; MAX_RIPPLES],
+            bubbles: [NO_BUBBLE; MAX_BUBBLES],
             zones: [(Target::Back, Zone::Disc { cx: 0, cy: 0, r: 0 }); MAX_ZONES],
             n_zones: 0,
             minutes: 3,
@@ -330,6 +352,14 @@ impl Ui {
             knob_q4: 0,
             last_running: false,
             observed_run_total_s: 0,
+            dragging_list: false,
+            list_start_y: 0,
+            list_start_offset: 0,
+            list_drag_on_bar: false,
+            pending_row: None,
+            last_bubble_ms: 0,
+            last_bubble_x: -100,
+            last_bubble_y: -100,
         }
     }
 
@@ -360,6 +390,25 @@ impl Ui {
             color,
             active: true,
         };
+    }
+
+    fn bubble(&mut self, x: i32, y: i32, now_ms: u32) {
+        let dx = x - self.last_bubble_x;
+        let dy = y - self.last_bubble_y;
+        if now_ms.wrapping_sub(self.last_bubble_ms) < 65 && dx * dx + dy * dy < 18 * 18 {
+            return;
+        }
+        let slot = self.bubbles.iter().position(|b| !b.active).unwrap_or(0);
+        self.bubbles[slot] = Bubble {
+            x,
+            y,
+            born_ms: now_ms,
+            max_r: 14 + ((x as u32 ^ y as u32 ^ now_ms) % 13) as i32,
+            active: true,
+        };
+        self.last_bubble_ms = now_ms;
+        self.last_bubble_x = x;
+        self.last_bubble_y = y;
     }
 
     fn start_wipe(&mut self, to: Screen, x: i32, y: i32, now_ms: u32) {
@@ -399,12 +448,27 @@ impl Ui {
         match ev {
             Event::Press(x, y) => {
                 let Some(target) = self.hit(x, y) else {
+                    self.bubble(x, y, now_ms);
                     return Action::None;
                 };
                 if target == Target::Slider {
                     self.dragging_slider = true;
                     self.drag_started_ms = now_ms;
                     self.minutes = minutes_from_y(y);
+                    return Action::None;
+                }
+                if target == Target::List {
+                    self.dragging_list = true;
+                    self.list_start_y = y;
+                    self.list_drag_on_bar = x >= 450;
+                    self.list_start_offset = match self.screen {
+                        Screen::Inspect => self.schedule_page,
+                        Screen::Detail => self.detail_page,
+                        Screen::Info => self.info_page,
+                        Screen::Force => self.relay_page,
+                        _ => 0,
+                    };
+                    self.pending_row = self.row_at(y, state);
                     return Action::None;
                 }
                 let color = match target {
@@ -435,25 +499,6 @@ impl Ui {
                         self.start_wipe(Screen::Detail, x, y, now_ms);
                         Action::None
                     }
-                    Target::SchedulePrev => {
-                        self.schedule_page = self.schedule_page.saturating_sub(1);
-                        Action::None
-                    }
-                    Target::ScheduleNext => {
-                        let pages = state.n_starts.saturating_sub(1) / l::SCHED_MAX_ROWS + 1;
-                        self.schedule_page = (self.schedule_page + 1).min(pages.saturating_sub(1));
-                        Action::None
-                    }
-                    Target::DetailPrev => {
-                        self.detail_page = self.detail_page.saturating_sub(1);
-                        Action::None
-                    }
-                    Target::DetailNext => {
-                        let count = state.starts.get(self.detail).map_or(0, |s| s.n_entries);
-                        let pages = count.saturating_sub(1) / l::DETAIL_MAX_ROWS + 1;
-                        self.detail_page = (self.detail_page + 1).min(pages.saturating_sub(1));
-                        Action::None
-                    }
                     Target::RunningBadge => {
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::None
@@ -473,24 +518,6 @@ impl Ui {
                     }
                     Target::Relay(index) => {
                         self.selected = index;
-                        Action::None
-                    }
-                    Target::RelayPrev => {
-                        self.relay_page = self.relay_page.saturating_sub(1);
-                        Action::None
-                    }
-                    Target::RelayNext => {
-                        let pages = state.n_usable().saturating_sub(1) / l::RELAY_MAX_ROWS + 1;
-                        self.relay_page = (self.relay_page + 1).min(pages.saturating_sub(1));
-                        Action::None
-                    }
-                    Target::InfoPrev => {
-                        self.info_page = self.info_page.saturating_sub(1);
-                        Action::None
-                    }
-                    Target::InfoNext => {
-                        let pages = state.n_analogs.saturating_sub(1) / l::ANALOG_MAX_ROWS + 1;
-                        self.info_page = (self.info_page + 1).min(pages.saturating_sub(1));
                         Action::None
                     }
                     Target::Go => {
@@ -520,19 +547,92 @@ impl Ui {
                         Action::Stop
                     }
                     Target::Slider => Action::None,
+                    Target::List => Action::None,
                 }
             }
-            Event::Drag(_, y) => {
+            Event::Drag(x, y) => {
                 if self.dragging_slider {
                     self.minutes = minutes_from_y(y);
                 }
+                if self.dragging_list {
+                    let (pitch, visible, total) = match self.screen {
+                        Screen::Inspect => (l::SCHED_PITCH, l::SCHED_MAX_ROWS, state.n_starts),
+                        Screen::Detail => (
+                            l::DETAIL_PITCH,
+                            l::DETAIL_MAX_ROWS,
+                            state.starts.get(self.detail).map_or(0, |s| s.n_entries),
+                        ),
+                        Screen::Info => (l::ANALOG_PITCH, l::ANALOG_MAX_ROWS, state.n_analogs),
+                        Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
+                        _ => (1, 1, 0),
+                    };
+                    let max_offset = total.saturating_sub(visible);
+                    let delta = if self.list_drag_on_bar {
+                        (self.list_start_y - y) * max_offset as i32 / 240
+                    } else {
+                        (self.list_start_y - y) / pitch.max(1)
+                    };
+                    let offset = (self.list_start_offset as i32 + delta).clamp(0, max_offset as i32)
+                        as usize;
+                    match self.screen {
+                        Screen::Inspect => self.schedule_page = offset,
+                        Screen::Detail => self.detail_page = offset,
+                        Screen::Info => self.info_page = offset,
+                        Screen::Force => self.relay_page = offset,
+                        _ => {}
+                    }
+                }
+                if !self.dragging_slider && !self.dragging_list && self.hit(x, y).is_none() {
+                    self.bubble(x, y, now_ms);
+                }
                 Action::None
             }
-            Event::Release { .. } => {
+            Event::Release { x, y, tap } => {
                 self.dragging_slider = false;
+                if self.dragging_list {
+                    self.dragging_list = false;
+                    if tap {
+                        match self.pending_row.take() {
+                            Some(Target::Schedule(index)) => {
+                                self.detail = index;
+                                self.detail_page = 0;
+                                self.ripple(x, y, C_INSPECT, now_ms);
+                                self.start_wipe(Screen::Detail, x, y, now_ms);
+                            }
+                            Some(Target::Relay(index)) => {
+                                self.selected = index;
+                                self.ripple(x, y, C_FORCE, now_ms);
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        self.pending_row = None;
+                    }
+                }
                 Action::None
             }
             Event::None => Action::None,
+        }
+    }
+
+    fn row_at(&self, y: i32, state: &State) -> Option<Target> {
+        let row = match self.screen {
+            Screen::Inspect => ((y - (l::SCHED_FIRST_CY - l::SCHED_HALF_H)) / l::SCHED_PITCH)
+                .clamp(0, l::SCHED_MAX_ROWS as i32 - 1) as usize,
+            Screen::Detail => ((y - (l::DETAIL_FIRST_CY - 21)) / l::DETAIL_PITCH)
+                .clamp(0, l::DETAIL_MAX_ROWS as i32 - 1) as usize,
+            Screen::Info => ((y - (l::ANALOG_FIRST_CY - 16)) / l::ANALOG_PITCH)
+                .clamp(0, l::ANALOG_MAX_ROWS as i32 - 1) as usize,
+            Screen::Force => ((y - (l::RELAY_FIRST_CY - l::RELAY_HALF_H)) / l::RELAY_PITCH)
+                .clamp(0, l::RELAY_MAX_ROWS as i32 - 1) as usize,
+            _ => return None,
+        };
+        match self.screen {
+            Screen::Inspect => (self.schedule_page + row < state.n_starts)
+                .then_some(Target::Schedule(self.schedule_page + row)),
+            Screen::Force => (self.relay_page + row < state.n_usable())
+                .then_some(Target::Relay(self.relay_page + row)),
+            _ => None,
         }
     }
 
@@ -548,6 +648,11 @@ impl Ui {
         for r in self.ripples.iter_mut() {
             if r.active && now_ms.wrapping_sub(r.born_ms) >= RIPPLE_GROW_MS + RIPPLE_FADE_MS {
                 r.active = false;
+            }
+        }
+        for bubble in self.bubbles.iter_mut() {
+            if bubble.active && now_ms.wrapping_sub(bubble.born_ms) >= BUBBLE_MS {
+                bubble.active = false;
             }
         }
         // A drag cannot outlive this. See `drag_started_ms`.
@@ -591,6 +696,7 @@ impl Ui {
     pub fn animating(&self) -> bool {
         self.wipe.is_some()
             || self.ripples.iter().any(|r| r.active)
+            || self.bubbles.iter().any(|b| b.active)
             || self.screen == Screen::Running
             || self.last_running
             || self.dragging_slider
@@ -610,13 +716,13 @@ impl Ui {
         scene.clear(base.background());
 
         match self.wipe {
-            None => self.draw_screen(scene, base, state, 255),
+            None => self.draw_screen(scene, base, state, now_ms, 255),
             Some(w) => {
                 let age = now_ms.wrapping_sub(w.born_ms);
                 if age < WIPE_COVER_MS {
                     // The outgoing screen stays visible under the growing disc,
                     // so the change reads as one surface covering another.
-                    self.draw_screen(scene, base, state, 255);
+                    self.draw_screen(scene, base, state, now_ms, 255);
                     let t = (age * 32_768 / WIPE_COVER_MS).min(32_768);
                     let eased = ease_out_q15(t);
                     let dx = w.x.max(W as i32 - w.x);
@@ -629,9 +735,15 @@ impl Ui {
                     let reveal = (age - WIPE_COVER_MS).min(WIPE_REVEAL_MS);
                     let t = (reveal * 32_768 / WIPE_REVEAL_MS).min(32_768);
                     let alpha = (smoothstep_q15(t) * 255 / 32_768) as u8;
-                    self.draw_screen(scene, w.to, state, alpha);
+                    self.draw_screen(scene, w.to, state, now_ms, alpha);
                 }
             }
+        }
+        // Keep the compact run affordance out of wipe frames. Popping it onto
+        // the outgoing screen on the same frame a manual run starts made it
+        // briefly intersect the expanding transition disc.
+        if self.wipe.is_none() && state.running && base != Screen::Running {
+            self.draw_running_badge(scene, state, 255);
         }
 
         // One place registers zones, from the same constants the drawing uses.
@@ -695,27 +807,25 @@ impl Ui {
                         r: br,
                     },
                 );
-                let first = self.schedule_page * l::SCHED_MAX_ROWS;
-                let rows = state.n_starts.saturating_sub(first).min(l::SCHED_MAX_ROWS);
-                for row in 0..rows {
-                    let index = first + row;
-                    let cy = l::SCHED_FIRST_CY + row as i32 * l::SCHED_PITCH;
-                    self.zone(
-                        Target::Schedule(index),
-                        Zone::Rect {
-                            x0: l::SCHED_X0,
-                            y0: cy - l::SCHED_HALF_H,
-                            x1: l::SCHED_X1,
-                            y1: cy + l::SCHED_HALF_H,
-                        },
-                    );
-                }
-                self.register_pager(
-                    first,
-                    rows,
-                    state.n_starts,
-                    Target::SchedulePrev,
-                    Target::ScheduleNext,
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: l::SCHED_X0,
+                        y0: l::SCHED_FIRST_CY - l::SCHED_HALF_H,
+                        x1: l::SCHED_X1,
+                        y1: l::SCHED_FIRST_CY
+                            + (l::SCHED_MAX_ROWS as i32 - 1) * l::SCHED_PITCH
+                            + l::SCHED_HALF_H,
+                    },
+                );
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 450,
+                        y0: 156,
+                        x1: 478,
+                        y1: 438,
+                    },
                 );
             }
             Screen::Detail => {
@@ -727,14 +837,25 @@ impl Ui {
                         r: br,
                     },
                 );
-                let count = state.starts.get(self.detail).map_or(0, |s| s.n_entries);
-                let first = self.detail_page * l::DETAIL_MAX_ROWS;
-                self.register_pager(
-                    first,
-                    count.saturating_sub(first).min(l::DETAIL_MAX_ROWS),
-                    count,
-                    Target::DetailPrev,
-                    Target::DetailNext,
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: l::SCHED_X0,
+                        y0: l::DETAIL_FIRST_CY - 21,
+                        x1: l::SCHED_X1,
+                        y1: l::DETAIL_FIRST_CY
+                            + (l::DETAIL_MAX_ROWS as i32 - 1) * l::DETAIL_PITCH
+                            + 21,
+                    },
+                );
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 450,
+                        y0: 178,
+                        x1: 478,
+                        y1: 432,
+                    },
                 );
             }
             Screen::Info => {
@@ -746,27 +867,26 @@ impl Ui {
                         r: br,
                     },
                 );
-                let first = self.info_page * l::ANALOG_MAX_ROWS;
-                if self.info_page > 0 {
-                    self.zone(
-                        Target::InfoPrev,
-                        Zone::Disc {
-                            cx: 190,
-                            cy: 462,
-                            r: 22,
-                        },
-                    );
-                }
-                if first + l::ANALOG_MAX_ROWS < state.n_analogs {
-                    self.zone(
-                        Target::InfoNext,
-                        Zone::Disc {
-                            cx: 290,
-                            cy: 462,
-                            r: 22,
-                        },
-                    );
-                }
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 20,
+                        y0: l::ANALOG_FIRST_CY - 18,
+                        x1: l::ANALOG_X1,
+                        y1: l::ANALOG_FIRST_CY
+                            + (l::ANALOG_MAX_ROWS as i32 - 1) * l::ANALOG_PITCH
+                            + 18,
+                    },
+                );
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 450,
+                        y0: l::ANALOG_FIRST_CY,
+                        x1: 478,
+                        y1: 438,
+                    },
+                );
             }
             Screen::Force => {
                 self.zone(
@@ -786,42 +906,28 @@ impl Ui {
                         y1: l::SLIDER_BOTTOM + 20,
                     },
                 );
-                let total = state.n_usable();
-                let first = self.relay_page * l::RELAY_MAX_ROWS;
-                let rows = total.saturating_sub(first).min(l::RELAY_MAX_ROWS);
-                for row in 0..rows {
-                    let index = first + row;
-                    let cy = l::RELAY_FIRST_CY + row as i32 * l::RELAY_PITCH;
-                    self.zone(
-                        Target::Relay(index),
-                        Zone::Rect {
-                            x0: l::RELAY_X0,
-                            y0: cy - l::RELAY_HALF_H,
-                            x1: l::RELAY_X1,
-                            y1: cy + l::RELAY_HALF_H,
-                        },
-                    );
-                }
-                if self.relay_page > 0 {
-                    self.zone(
-                        Target::RelayPrev,
-                        Zone::Disc {
-                            cx: 190,
-                            cy: 444,
-                            r: 26,
-                        },
-                    );
-                }
-                if first + rows < total {
-                    self.zone(
-                        Target::RelayNext,
-                        Zone::Disc {
-                            cx: 300,
-                            cy: 444,
-                            r: 26,
-                        },
-                    );
-                }
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: l::RELAY_X0,
+                        y0: l::RELAY_FIRST_CY - l::RELAY_HALF_H,
+                        x1: l::RELAY_X1,
+                        y1: l::RELAY_FIRST_CY
+                            + (l::RELAY_MAX_ROWS as i32 - 1) * l::RELAY_PITCH
+                            + l::RELAY_HALF_H,
+                    },
+                );
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 450,
+                        y0: l::RELAY_FIRST_CY - l::RELAY_HALF_H,
+                        x1: 478,
+                        y1: l::RELAY_FIRST_CY
+                            + (l::RELAY_MAX_ROWS as i32 - 1) * l::RELAY_PITCH
+                            + l::RELAY_HALF_H,
+                    },
+                );
                 let (gx, gy, gr) = l::GO;
                 self.zone(
                     Target::Go,
@@ -851,37 +957,15 @@ impl Ui {
         }
     }
 
-    fn register_pager(
+    fn draw_screen(
         &mut self,
-        first: usize,
-        rows: usize,
-        total: usize,
-        prev: Target,
-        next: Target,
+        scene: &mut Scene,
+        screen: Screen,
+        state: &State,
+        now_ms: u32,
+        alpha: u8,
     ) {
-        if first > 0 {
-            self.zone(
-                prev,
-                Zone::Disc {
-                    cx: 190,
-                    cy: 456,
-                    r: 24,
-                },
-            );
-        }
-        if first + rows < total {
-            self.zone(
-                next,
-                Zone::Disc {
-                    cx: 290,
-                    cy: 456,
-                    r: 24,
-                },
-            );
-        }
-    }
-
-    fn draw_screen(&mut self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
+        self.draw_bubbles(scene, screen, now_ms, alpha);
         match screen {
             Screen::Home => self.draw_home(scene, state, alpha),
             Screen::Inspect => self.draw_inspect(scene, state, alpha),
@@ -890,8 +974,24 @@ impl Ui {
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
         }
-        if state.running && screen != Screen::Running {
-            self.draw_running_badge(scene, state, alpha);
+    }
+
+    fn draw_bubbles(&self, scene: &mut Scene, screen: Screen, now_ms: u32, alpha: u8) {
+        for bubble in self.bubbles.iter().filter(|b| b.active) {
+            let age = now_ms.wrapping_sub(bubble.born_ms).min(BUBBLE_MS);
+            let t = age * 32_768 / BUBBLE_MS;
+            let radius = 3 + (bubble.max_r as u32 * ease_out_q15(t) / 32_768) as i32;
+            let fade = 46 * (32_768 - smoothstep_q15(t)) / 32_768;
+            let bubble_alpha = (fade * alpha as u32 / 255) as u8;
+            let thickness = if age > BUBBLE_MS * 4 / 5 { 1 } else { 2 };
+            scene.ring(
+                bubble.x,
+                bubble.y,
+                radius,
+                (radius - thickness).max(0),
+                screen.accent(),
+                bubble_alpha,
+            );
         }
     }
 
@@ -910,8 +1010,8 @@ impl Ui {
         let (bx, by, br) = l::BACK;
         scene.ring(bx, by, br, br - 4, MUTED, alpha);
         scene.label(
-            bx,
-            by + 14,
+            bx + 1,
+            by + 16,
             FontId::Icon,
             INK,
             alpha,
@@ -947,9 +1047,9 @@ impl Ui {
         }
         let mut left = Buf::<8>::new();
         if state.left_s >= 60 {
-            let _ = write!(left, "{}:{:02}", state.left_s / 60, state.left_s % 60);
+            let _ = write!(left, "{}m", state.left_s.div_ceil(60));
         } else {
-            let _ = write!(left, "{}", state.left_s);
+            let _ = write!(left, "{}s", state.left_s);
         }
         scene.label(
             cx,
@@ -966,7 +1066,7 @@ impl Ui {
     fn draw_scrollbar(
         &self,
         scene: &mut Scene,
-        page: usize,
+        offset: usize,
         rows_per_page: usize,
         total: usize,
         y0: i32,
@@ -977,12 +1077,12 @@ impl Ui {
         if total <= rows_per_page {
             return;
         }
-        let pages = total.div_ceil(rows_per_page);
         scene.pill(462, y0, 468, y1, 3, DIM, alpha);
         let track = y1 - y0;
-        let thumb_h = (track / pages as i32).max(18);
+        let thumb_h = (track * rows_per_page as i32 / total as i32).max(18);
         let travel = track - thumb_h;
-        let thumb_y = y0 + travel * page.min(pages - 1) as i32 / (pages - 1) as i32;
+        let max_offset = total - rows_per_page;
+        let thumb_y = y0 + travel * offset.min(max_offset) as i32 / max_offset as i32;
         scene.pill(460, thumb_y, 470, thumb_y + thumb_h, 5, color, alpha);
     }
 
@@ -1118,7 +1218,7 @@ impl Ui {
             );
         }
 
-        let first = self.info_page * l::ANALOG_MAX_ROWS;
+        let first = self.info_page;
         let rows = state
             .n_analogs
             .saturating_sub(first)
@@ -1173,28 +1273,6 @@ impl Ui {
                 "NO ANALOG INPUTS",
             );
         }
-        if self.info_page > 0 {
-            scene.label(
-                190,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f104}",
-            );
-        }
-        if first + rows < state.n_analogs {
-            scene.label(
-                290,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f105}",
-            );
-        }
         self.draw_scrollbar(
             scene,
             self.info_page,
@@ -1220,7 +1298,7 @@ impl Ui {
             "SCHEDULES",
         );
 
-        let first = self.schedule_page * l::SCHED_MAX_ROWS;
+        let first = self.schedule_page;
         let rows = state.n_starts.saturating_sub(first).min(l::SCHED_MAX_ROWS);
         for row in 0..rows {
             let index = first + row;
@@ -1287,28 +1365,6 @@ impl Ui {
             scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
         }
 
-        if self.schedule_page > 0 {
-            scene.label(
-                190,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f104}",
-            );
-        }
-        if first + rows < state.n_starts {
-            scene.label(
-                290,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f105}",
-            );
-        }
         self.draw_scrollbar(
             scene,
             self.schedule_page,
@@ -1373,7 +1429,7 @@ impl Ui {
         );
 
         // Entries run top to bottom in the order the controller will drive them.
-        let first = self.detail_page * l::DETAIL_MAX_ROWS;
+        let first = self.detail_page;
         let rows = s.n_entries.saturating_sub(first).min(l::DETAIL_MAX_ROWS);
         let progress = state.schedule_progress(index);
         for row in 0..rows {
@@ -1448,28 +1504,6 @@ impl Ui {
             );
         }
 
-        if self.detail_page > 0 {
-            scene.label(
-                190,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f104}",
-            );
-        }
-        if first + rows < s.n_entries {
-            scene.label(
-                290,
-                470,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f105}",
-            );
-        }
         self.draw_scrollbar(
             scene,
             self.detail_page,
@@ -1524,7 +1558,7 @@ impl Ui {
         );
         scene.disc(sx, knob_y, 28, rgb(252, 216, 154), alpha);
 
-        let first = self.relay_page * l::RELAY_MAX_ROWS;
+        let first = self.relay_page;
         for (row, (index, relay)) in state
             .usable()
             .enumerate()
@@ -1555,30 +1589,6 @@ impl Ui {
         }
 
         let total = state.n_usable();
-        if self.relay_page > 0 {
-            scene.disc(190, 444, 24, rgb(52, 34, 10), alpha);
-            scene.label(
-                190,
-                458,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f104}",
-            );
-        }
-        if first + l::RELAY_MAX_ROWS < total {
-            scene.disc(300, 444, 24, rgb(52, 34, 10), alpha);
-            scene.label(
-                300,
-                458,
-                FontId::Icon,
-                INK,
-                alpha,
-                Align::Center,
-                "\u{f105}",
-            );
-        }
         self.draw_scrollbar(
             scene,
             self.relay_page,
