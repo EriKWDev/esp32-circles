@@ -254,8 +254,8 @@ const NO_BUBBLE: Bubble = Bubble {
     max_r: 0,
     active: false,
 };
-const MAX_BUBBLES: usize = 8;
-const BUBBLE_MS: u32 = 520;
+const MAX_BUBBLES: usize = 10;
+const BUBBLE_MS: u32 = 760;
 
 /// A screen change, animated as a disc of the destination's colour growing from
 /// the point touched until it has swallowed the old screen.
@@ -285,10 +285,10 @@ pub struct Ui {
     /// Force menu: minutes 1..=10, and which usable relay is selected.
     pub minutes: u32,
     pub selected: usize,
-    relay_page: usize,
-    info_page: usize,
-    schedule_page: usize,
-    detail_page: usize,
+    relay_scroll: i32,
+    info_scroll: i32,
+    schedule_scroll: i32,
+    detail_scroll: i32,
     dragging_slider: bool,
     /// When the current slider drag began. A drag is abandoned after
     /// DRAG_MAX_MS so a touch controller that latches a contact - and therefore
@@ -314,7 +314,7 @@ pub struct Ui {
     observed_run_total_s: u32,
     dragging_list: bool,
     list_start_y: i32,
-    list_start_offset: usize,
+    list_start_offset: i32,
     list_drag_on_bar: bool,
     pending_row: Option<Target>,
     last_bubble_ms: u32,
@@ -342,10 +342,10 @@ impl Ui {
             n_zones: 0,
             minutes: 3,
             selected: 0,
-            relay_page: 0,
-            info_page: 0,
-            schedule_page: 0,
-            detail_page: 0,
+            relay_scroll: 0,
+            info_scroll: 0,
+            schedule_scroll: 0,
+            detail_scroll: 0,
             dragging_slider: false,
             drag_started_ms: 0,
             detail: 0,
@@ -403,7 +403,7 @@ impl Ui {
             x,
             y,
             born_ms: now_ms,
-            max_r: 14 + ((x as u32 ^ y as u32 ^ now_ms) % 13) as i32,
+            max_r: 34 + ((x as u32 ^ y as u32 ^ now_ms) % 23) as i32,
             active: true,
         };
         self.last_bubble_ms = now_ms;
@@ -438,6 +438,9 @@ impl Ui {
     /// cost of not being able to slide off a button to cancel it - a trade worth
     /// making for a panel whose buttons are this large.
     pub fn input(&mut self, ev: Event, state: &State, now_ms: u32) -> Action {
+        if let Event::Press(x, y) | Event::Drag(x, y) = ev {
+            self.bubble(x, y, now_ms);
+        }
         // Ignore input while a transition runs: the target that was hit is
         // already leaving, and letting a second tap through mid-animation is how
         // you end up two screens deep by accident.
@@ -448,7 +451,6 @@ impl Ui {
         match ev {
             Event::Press(x, y) => {
                 let Some(target) = self.hit(x, y) else {
-                    self.bubble(x, y, now_ms);
                     return Action::None;
                 };
                 if target == Target::Slider {
@@ -462,10 +464,10 @@ impl Ui {
                     self.list_start_y = y;
                     self.list_drag_on_bar = x >= 450;
                     self.list_start_offset = match self.screen {
-                        Screen::Inspect => self.schedule_page,
-                        Screen::Detail => self.detail_page,
-                        Screen::Info => self.info_page,
-                        Screen::Force => self.relay_page,
+                        Screen::Inspect => self.schedule_scroll,
+                        Screen::Detail => self.detail_scroll,
+                        Screen::Info => self.info_scroll,
+                        Screen::Force => self.relay_scroll,
                         _ => 0,
                     };
                     self.pending_row = self.row_at(y, state);
@@ -495,7 +497,7 @@ impl Ui {
                     }
                     Target::Schedule(index) => {
                         self.detail = index;
-                        self.detail_page = 0;
+                        self.detail_scroll = 0;
                         self.start_wipe(Screen::Detail, x, y, now_ms);
                         Action::None
                     }
@@ -550,7 +552,7 @@ impl Ui {
                     Target::List => Action::None,
                 }
             }
-            Event::Drag(x, y) => {
+            Event::Drag(_, y) => {
                 if self.dragging_slider {
                     self.minutes = minutes_from_y(y);
                 }
@@ -566,24 +568,20 @@ impl Ui {
                         Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
                         _ => (1, 1, 0),
                     };
-                    let max_offset = total.saturating_sub(visible);
+                    let max_offset = total.saturating_sub(visible) as i32 * pitch;
                     let delta = if self.list_drag_on_bar {
-                        (self.list_start_y - y) * max_offset as i32 / 240
+                        (self.list_start_y - y) * max_offset / 240
                     } else {
-                        (self.list_start_y - y) / pitch.max(1)
+                        self.list_start_y - y
                     };
-                    let offset = (self.list_start_offset as i32 + delta).clamp(0, max_offset as i32)
-                        as usize;
+                    let offset = (self.list_start_offset + delta).clamp(0, max_offset);
                     match self.screen {
-                        Screen::Inspect => self.schedule_page = offset,
-                        Screen::Detail => self.detail_page = offset,
-                        Screen::Info => self.info_page = offset,
-                        Screen::Force => self.relay_page = offset,
+                        Screen::Inspect => self.schedule_scroll = offset,
+                        Screen::Detail => self.detail_scroll = offset,
+                        Screen::Info => self.info_scroll = offset,
+                        Screen::Force => self.relay_scroll = offset,
                         _ => {}
                     }
-                }
-                if !self.dragging_slider && !self.dragging_list && self.hit(x, y).is_none() {
-                    self.bubble(x, y, now_ms);
                 }
                 Action::None
             }
@@ -595,7 +593,7 @@ impl Ui {
                         match self.pending_row.take() {
                             Some(Target::Schedule(index)) => {
                                 self.detail = index;
-                                self.detail_page = 0;
+                                self.detail_scroll = 0;
                                 self.ripple(x, y, C_INSPECT, now_ms);
                                 self.start_wipe(Screen::Detail, x, y, now_ms);
                             }
@@ -616,22 +614,26 @@ impl Ui {
     }
 
     fn row_at(&self, y: i32, state: &State) -> Option<Target> {
-        let row = match self.screen {
-            Screen::Inspect => ((y - (l::SCHED_FIRST_CY - l::SCHED_HALF_H)) / l::SCHED_PITCH)
-                .clamp(0, l::SCHED_MAX_ROWS as i32 - 1) as usize,
-            Screen::Detail => ((y - (l::DETAIL_FIRST_CY - 21)) / l::DETAIL_PITCH)
-                .clamp(0, l::DETAIL_MAX_ROWS as i32 - 1) as usize,
-            Screen::Info => ((y - (l::ANALOG_FIRST_CY - 16)) / l::ANALOG_PITCH)
-                .clamp(0, l::ANALOG_MAX_ROWS as i32 - 1) as usize,
-            Screen::Force => ((y - (l::RELAY_FIRST_CY - l::RELAY_HALF_H)) / l::RELAY_PITCH)
-                .clamp(0, l::RELAY_MAX_ROWS as i32 - 1) as usize,
+        let index = match self.screen {
+            Screen::Inspect => {
+                ((y - (l::SCHED_FIRST_CY - l::SCHED_HALF_H) + self.schedule_scroll)
+                    / l::SCHED_PITCH) as usize
+            }
+            Screen::Detail => {
+                ((y - (l::DETAIL_FIRST_CY - 21) + self.detail_scroll) / l::DETAIL_PITCH) as usize
+            }
+            Screen::Info => {
+                ((y - (l::ANALOG_FIRST_CY - 16) + self.info_scroll) / l::ANALOG_PITCH) as usize
+            }
+            Screen::Force => {
+                ((y - (l::RELAY_FIRST_CY - l::RELAY_HALF_H) + self.relay_scroll) / l::RELAY_PITCH)
+                    as usize
+            }
             _ => return None,
         };
         match self.screen {
-            Screen::Inspect => (self.schedule_page + row < state.n_starts)
-                .then_some(Target::Schedule(self.schedule_page + row)),
-            Screen::Force => (self.relay_page + row < state.n_usable())
-                .then_some(Target::Relay(self.relay_page + row)),
+            Screen::Inspect => (index < state.n_starts).then_some(Target::Schedule(index)),
+            Screen::Force => (index < state.n_usable()).then_some(Target::Relay(index)),
             _ => None,
         }
     }
@@ -981,9 +983,9 @@ impl Ui {
             let age = now_ms.wrapping_sub(bubble.born_ms).min(BUBBLE_MS);
             let t = age * 32_768 / BUBBLE_MS;
             let radius = 3 + (bubble.max_r as u32 * ease_out_q15(t) / 32_768) as i32;
-            let fade = 46 * (32_768 - smoothstep_q15(t)) / 32_768;
+            let fade = 66 * (32_768 - smoothstep_q15(t)) / 32_768;
             let bubble_alpha = (fade * alpha as u32 / 255) as u8;
-            let thickness = if age > BUBBLE_MS * 4 / 5 { 1 } else { 2 };
+            let thickness = if age > BUBBLE_MS * 4 / 5 { 2 } else { 4 };
             scene.ring(
                 bubble.x,
                 bubble.y,
@@ -1040,21 +1042,18 @@ impl Ui {
         scene.disc(cx, cy, r, rgb(8, 48, 31), alpha);
         scene.ring(cx, cy, r, r - 4, rgb(25, 82, 56), alpha);
         let total = self.observed_run_total_s.max(state.left_s).max(1);
-        let done = total.saturating_sub(state.left_s.min(total));
-        let span = (done * 360 / total) as i32;
+        let total_ms = total * 1000;
+        let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
+        let span = progress_span_q12(total_ms, left_ms);
         if span > 0 {
             scene.arc(cx, cy, r, r - 5, 0, span, C_RUN, alpha);
         }
         let mut left = Buf::<8>::new();
-        if state.left_s >= 60 {
-            let _ = write!(left, "{}m", state.left_s.div_ceil(60));
-        } else {
-            let _ = write!(left, "{}s", state.left_s);
-        }
+        let _ = write!(left, "{}:{:02}", state.left_s / 60, state.left_s % 60);
         scene.label(
             cx,
-            cy + 8,
-            FontId::Caption,
+            cy + 7,
+            FontId::Micro,
             INK,
             alpha,
             Align::Center,
@@ -1066,8 +1065,9 @@ impl Ui {
     fn draw_scrollbar(
         &self,
         scene: &mut Scene,
-        offset: usize,
+        offset_px: i32,
         rows_per_page: usize,
+        row_pitch: i32,
         total: usize,
         y0: i32,
         y1: i32,
@@ -1081,8 +1081,8 @@ impl Ui {
         let track = y1 - y0;
         let thumb_h = (track * rows_per_page as i32 / total as i32).max(18);
         let travel = track - thumb_h;
-        let max_offset = total - rows_per_page;
-        let thumb_y = y0 + travel * offset.min(max_offset) as i32 / max_offset as i32;
+        let max_offset_px = (total - rows_per_page) as i32 * row_pitch;
+        let thumb_y = y0 + travel * offset_px.clamp(0, max_offset_px) / max_offset_px;
         scene.pill(460, thumb_y, 470, thumb_y + thumb_h, 5, color, alpha);
     }
 
@@ -1218,14 +1218,16 @@ impl Ui {
             );
         }
 
-        let first = self.info_page;
+        let first = (self.info_scroll / l::ANALOG_PITCH) as usize;
+        let shift = -(self.info_scroll % l::ANALOG_PITCH);
         let rows = state
             .n_analogs
             .saturating_sub(first)
-            .min(l::ANALOG_MAX_ROWS);
+            .min(l::ANALOG_MAX_ROWS + 1);
+        scene.clip(l::ANALOG_FIRST_CY - 18, 438);
         for row in 0..rows {
             let a = state.analogs[first + row];
-            let cy = l::ANALOG_FIRST_CY + row as i32 * l::ANALOG_PITCH;
+            let cy = l::ANALOG_FIRST_CY + row as i32 * l::ANALOG_PITCH + shift;
             scene.label(
                 28,
                 cy + 8,
@@ -1262,6 +1264,7 @@ impl Ui {
             }
             scene.disc(fill, cy + 5, 8, rgb(218, 198, 252), alpha);
         }
+        scene.clip_reset();
         if rows == 0 {
             scene.label(
                 CX,
@@ -1275,8 +1278,9 @@ impl Ui {
         }
         self.draw_scrollbar(
             scene,
-            self.info_page,
+            self.info_scroll,
             l::ANALOG_MAX_ROWS,
+            l::ANALOG_PITCH,
             state.n_analogs,
             l::ANALOG_FIRST_CY,
             438,
@@ -1298,13 +1302,18 @@ impl Ui {
             "SCHEDULES",
         );
 
-        let first = self.schedule_page;
-        let rows = state.n_starts.saturating_sub(first).min(l::SCHED_MAX_ROWS);
+        let first = (self.schedule_scroll / l::SCHED_PITCH) as usize;
+        let shift = -(self.schedule_scroll % l::SCHED_PITCH);
+        let rows = state
+            .n_starts
+            .saturating_sub(first)
+            .min(l::SCHED_MAX_ROWS + 1);
+        scene.clip(156, 438);
         for row in 0..rows {
             let index = first + row;
             let s = state.starts[index];
             let on = s.enabled && s.n_entries > 0;
-            let cy = l::SCHED_FIRST_CY + row as i32 * l::SCHED_PITCH;
+            let cy = l::SCHED_FIRST_CY + row as i32 * l::SCHED_PITCH + shift;
             let (x0, x1) = (l::SCHED_X0, l::SCHED_X1);
             scene.pill(
                 x0,
@@ -1364,11 +1373,13 @@ impl Ui {
             scene.pill(x1 - 26, cy - 8, x1 - 20, cy + 1, 3, MUTED, alpha);
             scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
         }
+        scene.clip_reset();
 
         self.draw_scrollbar(
             scene,
-            self.schedule_page,
+            self.schedule_scroll,
             l::SCHED_MAX_ROWS,
+            l::SCHED_PITCH,
             state.n_starts,
             156,
             438,
@@ -1429,13 +1440,18 @@ impl Ui {
         );
 
         // Entries run top to bottom in the order the controller will drive them.
-        let first = self.detail_page;
-        let rows = s.n_entries.saturating_sub(first).min(l::DETAIL_MAX_ROWS);
+        let first = (self.detail_scroll / l::DETAIL_PITCH) as usize;
+        let shift = -(self.detail_scroll % l::DETAIL_PITCH);
+        let rows = s
+            .n_entries
+            .saturating_sub(first)
+            .min(l::DETAIL_MAX_ROWS + 1);
         let progress = state.schedule_progress(index);
+        scene.clip(178, 432);
         for row in 0..rows {
             let i = first + row;
             let e = s.entries[i];
-            let cy = l::DETAIL_FIRST_CY + row as i32 * l::DETAIL_PITCH;
+            let cy = l::DETAIL_FIRST_CY + row as i32 * l::DETAIL_PITCH + shift;
             scene.pill(
                 l::SCHED_X0,
                 cy - 21,
@@ -1503,11 +1519,13 @@ impl Ui {
                 dur.as_str(),
             );
         }
+        scene.clip_reset();
 
         self.draw_scrollbar(
             scene,
-            self.detail_page,
+            self.detail_scroll,
             l::DETAIL_MAX_ROWS,
+            l::DETAIL_PITCH,
             s.n_entries,
             178,
             432,
@@ -1558,16 +1576,21 @@ impl Ui {
         );
         scene.disc(sx, knob_y, 28, rgb(252, 216, 154), alpha);
 
-        let first = self.relay_page;
+        let first = (self.relay_scroll / l::RELAY_PITCH) as usize;
+        let shift = -(self.relay_scroll % l::RELAY_PITCH);
+        scene.clip(
+            l::RELAY_FIRST_CY - l::RELAY_HALF_H,
+            l::RELAY_FIRST_CY + (l::RELAY_MAX_ROWS as i32 - 1) * l::RELAY_PITCH + l::RELAY_HALF_H,
+        );
         for (row, (index, relay)) in state
             .usable()
             .enumerate()
             .skip(first)
-            .take(l::RELAY_MAX_ROWS)
+            .take(l::RELAY_MAX_ROWS + 1)
             .enumerate()
         {
             let selected = index == self.selected;
-            let cy = l::RELAY_FIRST_CY + row as i32 * l::RELAY_PITCH;
+            let cy = l::RELAY_FIRST_CY + row as i32 * l::RELAY_PITCH + shift;
             scene.pill(
                 l::RELAY_X0,
                 cy - l::RELAY_HALF_H,
@@ -1587,12 +1610,14 @@ impl Ui {
                 relay.name.as_str(),
             );
         }
+        scene.clip_reset();
 
         let total = state.n_usable();
         self.draw_scrollbar(
             scene,
-            self.relay_page,
+            self.relay_scroll,
             l::RELAY_MAX_ROWS,
+            l::RELAY_PITCH,
             total,
             l::RELAY_FIRST_CY - l::RELAY_HALF_H,
             l::RELAY_FIRST_CY + (l::RELAY_MAX_ROWS as i32 - 1) * l::RELAY_PITCH + l::RELAY_HALF_H,
@@ -1628,15 +1653,9 @@ impl Ui {
 
         let total_ms = (self.minutes * 60 * 1000).max(1);
         let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
-        let done_ms = total_ms.saturating_sub(left_ms.min(total_ms));
-        if done_ms > 0 {
-            // Scaled down before multiplying so the product stays inside u32.
-            let denom = (total_ms / 8).max(1);
-            let span = ((done_ms / 8).min(denom) * 4096 / denom) as i32;
-            let span = span.clamp(0, 4095);
-            if span > 0 {
-                scene.arc(CX, CY, l::RING_OUTER, l::RING_INNER, 0, span, C_RUN, alpha);
-            }
+        let span = progress_span_q12(total_ms, left_ms);
+        if span > 0 {
+            scene.arc(CX, CY, l::RING_OUTER, l::RING_INNER, 0, span, C_RUN, alpha);
         }
 
         let name = state
@@ -1700,6 +1719,14 @@ impl Ui {
 }
 
 /// Slider maps bottom = MINUTES_MIN, top = MINUTES_MAX.
+fn progress_span_q12(total_ms: u32, left_ms: u32) -> i32 {
+    let total_ms = total_ms.max(1);
+    let done_ms = total_ms.saturating_sub(left_ms.min(total_ms));
+    // Scale before multiplying so long controller-side runs remain inside u32.
+    let denom = (total_ms / 8).max(1);
+    ((done_ms / 8).min(denom) * 4096 / denom).min(4095) as i32
+}
+
 fn minutes_from_y(y: i32) -> u32 {
     let span = l::SLIDER_BOTTOM - l::SLIDER_TOP;
     let steps = (l::MINUTES_MAX - l::MINUTES_MIN) as i32;

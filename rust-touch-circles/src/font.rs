@@ -59,6 +59,7 @@ include!(concat!(env!("OUT_DIR"), "/fonts.rs"));
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FontId {
     Icon,
+    Micro,
     Countdown,
     Display,
     Body,
@@ -69,6 +70,7 @@ impl FontId {
     pub fn get(self) -> &'static Font {
         match self {
             FontId::Icon => &ICON,
+            FontId::Micro => &MICRO,
             FontId::Countdown => &COUNTDOWN,
             FontId::Display => &DISPLAY,
             FontId::Body => &BODY,

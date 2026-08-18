@@ -234,6 +234,8 @@ pub enum Align {
 
 #[derive(Clone, Copy)]
 pub enum Prim {
+    /// Change the vertical clip for following primitives. `(0, H-1)` resets it.
+    Clip { y0: i32, y1: i32 },
     /// Filled circle. Doubles as the screen-covering transition wipe.
     Disc {
         cx: i32,
@@ -355,6 +357,17 @@ impl Scene {
         });
     }
 
+    pub fn clip(&mut self, y0: i32, y1: i32) {
+        self.push(Prim::Clip { y0, y1 });
+    }
+
+    pub fn clip_reset(&mut self) {
+        self.push(Prim::Clip {
+            y0: 0,
+            y1: H as i32 - 1,
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn arc(
         &mut self,
@@ -409,6 +422,7 @@ impl Scene {
 /// Vertical bounds of a primitive, so a stripe can skip primitives entirely.
 fn prim_rows(p: &Prim) -> (i32, i32) {
     match *p {
+        Prim::Clip { .. } => (0, H as i32 - 1),
         Prim::Disc { cy, r, .. } => (cy - r - 1, cy + r + 1),
         Prim::Ring { cy, r_outer, .. } | Prim::Arc { cy, r_outer, .. } => {
             (cy - r_outer - 1, cy + r_outer + 1)
@@ -708,13 +722,24 @@ pub fn render_stripe(scene: &Scene, y0: usize, pixels: &mut [u8]) {
         let row = &mut pixels[local * W * 2..(local + 1) * W * 2];
         fill_span(row, 0, W as i32 - 1, scene.background);
 
+        let mut clip_top = 0;
+        let mut clip_bottom = H as i32 - 1;
         for index in 0..scene.len {
             let p = &scene.prims[index];
+            if let Prim::Clip { y0, y1 } = *p {
+                clip_top = y0;
+                clip_bottom = y1;
+                continue;
+            }
+            if y < clip_top || y > clip_bottom {
+                continue;
+            }
             let (top, bottom) = prim_rows(p);
             if y < top || y > bottom {
                 continue;
             }
             match *p {
+                Prim::Clip { .. } => unreachable!(),
                 Prim::Disc {
                     cx,
                     cy,

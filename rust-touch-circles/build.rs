@@ -36,6 +36,13 @@ struct FontSpec {
 // covers its job - the countdown never renders a letter, so it does not pay
 // for one.
 const FONTS: &[FontSpec] = &[
+    // Compact persistent timer badge.
+    FontSpec {
+        ident: "MICRO",
+        ttf: "Barlow-SemiBold.ttf",
+        px: 20.0,
+        charset: DIGITS,
+    },
     // Hero countdown digits.
     // Sized so "12:34" fits inside the countdown ring's inner radius with room
     // to spare, while staying the largest type on the device.
