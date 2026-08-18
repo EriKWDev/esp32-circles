@@ -149,6 +149,9 @@ pub struct State {
     pub active: i32,
     pub left_s: u32,
     pub queued: u32,
+    /// The controller is between two entries of a sequence: nothing energized,
+    /// but the run is very much still in progress.
+    pub queue_gap: bool,
     /// Which schedule the controller says the current activity belongs to, in
     /// that controller's own numbering. 0 when idle or running manually. Only
     /// meaningful in a per-controller snapshot; the merged model carries it as
@@ -183,6 +186,7 @@ impl State {
             active: 0,
             left_s: 0,
             queued: 0,
+            queue_gap: false,
             active_start: 0,
             max_run_s: 3600,
             err: Text::EMPTY,
@@ -318,7 +322,15 @@ impl State {
     /// As `schedule_progress`, but the active entry's own progress in
     /// milliseconds - for the bars, which are wide enough that a whole second is
     /// several pixels and stepping is visible.
-    pub fn schedule_progress_ms(&self, index: usize) -> Option<(usize, u32, u32)> {
+    /// `left_ms` is how much of the active entry remains, supplied by the caller
+    /// rather than derived here: the UI holds a smooth, locally anchored value
+    /// (see `Ui::run_left_ms`), and recomputing it from the last poll would
+    /// reintroduce the very jitter that value exists to remove.
+    pub fn schedule_progress_ms(
+        &self,
+        index: usize,
+        left_ms: u32,
+    ) -> Option<(usize, u32, u32)> {
         let schedule = self.starts.get(index)?;
         if !schedule.running || schedule.n_entries == 0 {
             return None;
@@ -328,12 +340,11 @@ impl State {
             .saturating_sub(1)
             .saturating_sub(self.queued as usize);
         let duration_ms = schedule.entries[at].seconds as u32 * 1000;
-        let left_ms = if self.running {
-            (self.left_s * 1000).saturating_sub(self.clock_frac_ms)
-        } else {
-            0
-        };
-        Some((at, duration_ms.saturating_sub(left_ms.min(duration_ms)), duration_ms))
+        Some((
+            at,
+            duration_ms.saturating_sub(left_ms.min(duration_ms)),
+            duration_ms,
+        ))
     }
 }
 
@@ -469,6 +480,7 @@ pub fn parse_dump(body: &str, state: &mut State) {
             "left" => state.left_s = num(line, 1).unwrap_or(0),
             "queued" => state.queued = num(line, 1).unwrap_or(0),
             "sched" => state.active_start = num(line, 1).unwrap_or(0),
+            "qgap" => state.queue_gap = num::<u8>(line, 1).unwrap_or(0) != 0,
             "maxrun" => state.max_run_s = num(line, 1).unwrap_or(3600),
             "relaygap" => {
                 let gap = num(line, 1).unwrap_or(0);

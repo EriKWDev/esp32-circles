@@ -262,12 +262,13 @@ fn main() -> ! {
                 dirty = true;
             }
             Action::Stop => {
-                state.running = false;
-                state.active = 0;
-                state.left_s = 0;
-                for r in state.relays.iter_mut() {
-                    r.on = false;
-                }
+                // Everything a run consists of, cleared together. Leaving any of
+                // it behind is what produced ghosts: the queue depth kept the
+                // panel believing watering was in progress, and a schedule still
+                // flagged as running kept drawing its progress bars and claiming
+                // the timer page - a stopped schedule haunting the next one until
+                // a poll happened to correct it.
+                clear_local_run(&mut state);
                 if let Some(net) = net.as_mut() {
                     // Stopping is a trigger of zero length's opposite: the API
                     // exposes it as its own endpoint, so ask for the relay the UI
@@ -516,6 +517,25 @@ fn update_power_state(i2c: &mut I2c<'_, esp_hal::Blocking>, state: &mut State) -
     changed
 }
 
+/// Forget everything about a run in progress.
+///
+/// One place, because the parts are not independent: `queued` alone keeps
+/// `run_is_active` true, and a schedule left flagged as running keeps drawing
+/// progress for a run that has ended.
+fn clear_local_run(state: &mut State) {
+    state.running = false;
+    state.active = 0;
+    state.left_s = 0;
+    state.queued = 0;
+    state.queue_gap = false;
+    for r in state.relays.iter_mut() {
+        r.on = false;
+    }
+    for s in state.starts.iter_mut() {
+        s.running = false;
+    }
+}
+
 /// Show a schedule as running the moment it is asked for.
 ///
 /// Mirrors `apply_local_trigger`: the first entry becomes the active relay and
@@ -535,22 +555,26 @@ fn apply_local_schedule(state: &mut State, controller: u8, start: u8) {
     if schedule.n_entries == 0 {
         return;
     }
-    for s in state.starts[..state.n_starts].iter_mut() {
-        s.running = false;
-    }
-    state.starts[index].running = true;
-
+    // Order matters: apply_local_trigger clears schedule ownership, since a
+    // manual run has none. Claim it afterwards, not before.
     let first = schedule.entries[0];
     apply_local_trigger(state, first.relay, first.seconds as u32);
+    state.starts[index].running = true;
     state.queued = schedule.n_entries as u32 - 1;
 }
 
 fn apply_local_trigger(state: &mut State, relay: u8, seconds: u32) {
     // Mirrors the controller's own rule: starting a relay drops whatever was
-    // running, so at most one is ever on.
+    // running, so at most one is ever on - and a schedule that was running is no
+    // longer the owner of anything.
     for r in state.relays.iter_mut() {
         r.on = false;
     }
+    for s in state.starts.iter_mut() {
+        s.running = false;
+    }
+    state.queued = 0;
+    state.queue_gap = false;
     if let Some(r) = state.relays[..state.n_relays]
         .iter_mut()
         .find(|r| r.id == relay)

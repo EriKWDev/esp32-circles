@@ -47,8 +47,14 @@ const C_BUBBLES: u16 = rgb(255, 55, 125);
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
 /// separate acknowledgment latch decides whether its 00:00 badge remains.
+/// Whether watering is still in progress, from the panel's point of view.
+///
+/// A sequence is idle between its entries - nothing is energized, `run:` is 0 -
+/// but it has certainly not finished, so the queue and the gap flag both count as
+/// activity. Requiring `running` here was what made DONE appear on the timer part
+/// way through a schedule, and the corner badge blink out with it.
 fn run_is_active(state: &State) -> bool {
-    state.running && (state.left_s > 0 || state.queued > 0)
+    (state.running && state.left_s > 0) || state.queued > 0 || state.queue_gap
 }
 
 /// Layout. Shared by drawing and hit testing - see the module note.
@@ -663,6 +669,20 @@ pub struct Ui {
     /// otherwise leave navigation to whoever is holding the panel.
     last_running: bool,
     observed_run_total_s: u32,
+    /// Smooth remaining time for the active entry, in milliseconds.
+    ///
+    /// Anchored to the local clock when the entry changes, and then simply
+    /// counted down - never recomputed from a poll. The controller reports whole
+    /// truncated seconds, so its answer disagrees with a smooth prediction by up
+    /// to a second; folding every poll back in made the arcs jump backwards twice
+    /// a second, which is the "glitching back and forth". Polls now decide *which*
+    /// entry is running, not where inside it we are.
+    run_left_ms: u32,
+    /// (active relay, entries still queued) - the identity of the entry the
+    /// anchor belongs to. A change here, and nothing else, re-anchors.
+    run_key: (i32, u32),
+    run_anchor_ms: u32,
+    run_anchor_left_ms: u32,
     run_finished: bool,
     /// A completed run remains available as a 00:00 badge until DONE is used.
     completion_pending: bool,
@@ -728,6 +748,10 @@ impl Ui {
             knob_q4: 0,
             last_running: false,
             observed_run_total_s: 0,
+            run_left_ms: 0,
+            run_key: (0, 0),
+            run_anchor_ms: 0,
+            run_anchor_left_ms: 0,
             run_finished: false,
             completion_pending: false,
             completion_acknowledged: false,
@@ -1227,6 +1251,21 @@ impl Ui {
             self.knob_q4 += if delta.abs() <= 16 { delta } else { delta / 4 };
         }
 
+        // Re-anchor only when the entry itself changes; within one entry the
+        // countdown runs off the local clock so it can never step backwards.
+        let key = (state.active, state.queued);
+        if key != self.run_key {
+            self.run_key = key;
+            self.run_anchor_ms = now_ms;
+            self.run_anchor_left_ms = state.left_s * 1000;
+        }
+        self.run_left_ms = if run_is_active(state) {
+            self.run_anchor_left_ms
+                .saturating_sub(now_ms.wrapping_sub(self.run_anchor_ms))
+        } else {
+            0
+        };
+
         // Preserve the largest observed remainder as the denominator for a
         // manual run. A dump after reboot seeds this immediately.
         if state.running {
@@ -1249,14 +1288,11 @@ impl Ui {
         }
         if ended && !self.completion_acknowledged {
             self.run_finished = true;
+            // Completion waits in the corner badge rather than seizing the screen.
+            // Opening the timer page unasked interrupted whatever was being done,
+            // once per finished run; the badge is the invitation, and tapping it
+            // stays the only way in.
             self.completion_pending = true;
-            // Let completion grow out of the same top-right affordance the user
-            // would tap. Opened, not replaced, so DONE pops back to whatever page
-            // was on screen when the run ended.
-            if self.interactive_screen() != Screen::Running && self.wipe.is_none() {
-                let (x, y, _) = l::RUN_BADGE;
-                self.open(Screen::Running, x, y, now_ms);
-            }
         } else if self.screen == Screen::Running
             && state.left_s == 0
             && state.queued == 0
@@ -1889,14 +1925,13 @@ impl Ui {
         scene.disc(cx, cy, r, rgb(8, 48, 31), alpha);
         scene.ring(cx, cy, r, r - 4, rgb(25, 82, 56), alpha);
         let total = self.observed_run_total_s.max(state.left_s).max(1);
-        let total_ms = total * 1000;
-        let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
-        let span = progress_span_q12(total_ms, left_ms);
+        let span = progress_span_q12(total * 1000, self.run_left_ms);
         if span > 0 {
             scene.arc(cx, cy, r, r - 5, 0, span, C_RUN, alpha);
         }
+        let shown_s = (self.run_left_ms + 999) / 1000;
         let mut left = Buf::<8>::new();
-        let _ = write!(left, "{}:{:02}", state.left_s / 60, state.left_s % 60);
+        let _ = write!(left, "{}:{:02}", shown_s / 60, shown_s % 60);
         scene.label(
             cx,
             cy + 7,
@@ -3468,7 +3503,7 @@ impl Ui {
             .min(l::DETAIL_MAX_ROWS + 1);
         // Milliseconds, not seconds: a row is over 300 px wide, so a whole
         // second of a short entry is a visible jump.
-        let progress = state.schedule_progress_ms(index);
+        let progress = state.schedule_progress_ms(index, self.run_left_ms);
         scene.clip(178, 432);
         for row in 0..rows {
             let i = first + row;
@@ -3686,7 +3721,8 @@ impl Ui {
             .position(|schedule| schedule.running)
             .and_then(|index| {
                 let schedule = state.starts[index];
-                let (at, elapsed_ms, duration_ms) = state.schedule_progress_ms(index)?;
+                let (at, elapsed_ms, duration_ms) =
+                    state.schedule_progress_ms(index, self.run_left_ms)?;
                 let before_s = schedule.entries[..at]
                     .iter()
                     .map(|entry| entry.seconds as u32)
@@ -3696,7 +3732,7 @@ impl Ui {
                 Some((schedule, at, elapsed_ms, duration_ms, before_s, total_s))
             });
 
-        let left_ms = (state.left_s * 1000).saturating_sub(state.clock_frac_ms);
+        let left_ms = self.run_left_ms;
         // The outer sweep. For a sequence it is the whole schedule; for a manual
         // run, the length of that run. It used to be `self.minutes` either way -
         // the manual slider - so a schedule-driven run was measured against
@@ -3766,8 +3802,12 @@ impl Ui {
 
         // The countdown - the reason this screen exists, so it gets the largest
         // type on the device.
+        // Rounded up, and from the anchored value: a countdown that reads 0:00
+        // while a valve is still open is worse than one that lingers a moment on
+        // 0:01, and the digits must agree with the arcs beside them.
+        let shown_s = (self.run_left_ms + 999) / 1000;
         let mut big = Buf::<10>::new();
-        let _ = write!(big, "{}:{:02}", state.left_s / 60, state.left_s % 60);
+        let _ = write!(big, "{}:{:02}", shown_s / 60, shown_s % 60);
         scene.label(
             CX,
             l::RUN_DIGITS_BASELINE,
