@@ -219,7 +219,19 @@ pub struct Net {
     http: Option<Http>,
     job: Job,
     last_connect_attempt_ms: u32,
+    /// When the UI last took charge of connecting. While that is recent, `step`
+    /// keeps its hands off - see MANUAL_HOLD_MS.
+    manual_from_ms: u32,
 }
+
+/// How long a user-driven join keeps the automatic reconnect out of the way.
+///
+/// Two connects must never be in flight at once: the second returns
+/// ESP_ERR_WIFI_CONN, which esp-radio panics on rather than reporting. The UI
+/// serialises its own attempts (its retry only appears once an attempt has been
+/// given up on), so suppressing the automatic one for longer than the UI's own
+/// timeout removes the last way the two could overlap.
+const MANUAL_HOLD_MS: u32 = 25_000;
 
 #[derive(Clone, Copy)]
 enum HttpKind {
@@ -340,6 +352,7 @@ impl Net {
             http: None,
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
+            manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
         };
         net.apply_hosts(settings);
         Ok(net)
@@ -379,7 +392,11 @@ impl Net {
 
     /// Re-join with the credentials now in settings. Used when the network is
     /// changed from the panel; the reconnect logic in `step` takes it from here.
-    pub fn apply_wifi(&mut self, settings: &crate::store::Settings) -> Result<(), &'static str> {
+    pub fn apply_wifi(
+        &mut self,
+        settings: &crate::store::Settings,
+        now_ms: u32,
+    ) -> Result<(), &'static str> {
         self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
         self.http = None;
         self.job = Job::Idle;
@@ -389,9 +406,24 @@ impl Net {
         // A DHCP socket that already holds a lease will not ask for a new one on
         // a different network, so it is reset along with the address.
         self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).reset();
-        let _ = embassy_futures::poll_once(self.controller.disconnect_async());
+        // Leave the old network *completely* before joining the new one. This one
+        // is driven to completion rather than fired and forgotten: connecting
+        // while a disconnect is still in flight leaves the driver's station
+        // control block invalid, and the next connect then returns
+        // ESP_ERR_WIFI_CONN - which esp-radio turns into a panic rather than an
+        // error, because its error table does not map that code. Bounded, and
+        // only reached when actually associated, so the pause is short and the UI
+        // is already showing its connecting screen.
+        if self.controller.is_connected() {
+            let _ = block_on_deadline(self.controller.disconnect_async(), 1_000);
+        }
+        // Claim the connect slot: `step` must not fire a second connect on top of
+        // the one below. Not doing this was exactly the panic described above.
+        self.last_connect_attempt_ms = now_ms;
+        self.manual_from_ms = now_ms;
         join(&mut self.controller, settings)
     }
+
 
     /// Scan for access points, blocking until the radio reports the scan done.
     ///
@@ -459,9 +491,17 @@ impl Net {
     pub fn step(&mut self, now_ms: u32) {
         // A lost AP must never strand the panel or require a reboot. Retrying is
         // also one-shot/non-blocking for the same reason as initial association.
-        const RECONNECT_MS: u32 = 5_000;
+        //
+        // The interval has to outlast a whole association attempt, not merely be
+        // "often enough". Issuing a connect while one is already in flight makes
+        // the driver return ESP_ERR_WIFI_CONN, and esp-radio panics on that code
+        // instead of reporting it - so a retry that overlaps an attempt takes the
+        // panel down. A wrong password takes about ten seconds to be rejected;
+        // fifteen clears it with room to spare.
+        const RECONNECT_MS: u32 = 15_000;
         if !self.controller.is_connected()
             && now_ms.wrapping_sub(self.last_connect_attempt_ms) >= RECONNECT_MS
+            && now_ms.wrapping_sub(self.manual_from_ms) >= MANUAL_HOLD_MS
         {
             self.last_connect_attempt_ms = now_ms;
             if let Poll::Ready(Err(_)) = embassy_futures::poll_once(self.controller.connect_async())

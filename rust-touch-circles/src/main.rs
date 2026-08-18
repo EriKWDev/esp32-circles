@@ -287,7 +287,7 @@ fn main() -> ! {
             Action::ApplyWifi => {
                 persist(&mut store, &ui.settings);
                 if let Some(net) = net.as_mut() {
-                    match net.apply_wifi(&ui.settings) {
+                    match net.apply_wifi(&ui.settings, t) {
                         Ok(()) => state.link = Link::Connecting,
                         Err(e) => {
                             esp_println::println!("wifi reconfigure failed: {e}");
@@ -409,6 +409,8 @@ fn main() -> ! {
                     ui::Screen::Wifi => "wifi",
                     ui::Screen::Controller => "controller",
                     ui::Screen::Keyboard => "keyboard",
+                    ui::Screen::Connecting => "connecting",
+                    ui::Screen::Confirm => "confirm",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

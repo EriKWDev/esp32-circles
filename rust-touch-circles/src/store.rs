@@ -27,12 +27,16 @@ const NVS_OFFSET: u32 = 0x9000;
 const SECTOR: usize = 4096;
 
 const MAGIC: u32 = 0x5242_4E31; // "RBN1"
-const VERSION: u16 = 1;
+/// Bumped to 2 when controllers gained a name. Version 1 records are still read
+/// (see `decode`), because falling back to defaults would silently discard
+/// controllers someone had already added by hand.
+const VERSION: u16 = 2;
 
 pub const MAX_CONTROLLERS: usize = 6;
 pub const MAX_SSID: usize = 32;
 pub const MAX_SECRET: usize = 64;
 pub const MAX_USER: usize = 32;
+pub const MAX_NAME: usize = 20;
 
 /// A fixed-capacity string stored inline, so the whole record is Copy and has a
 /// stable on-flash layout without any serialization framework.
@@ -74,10 +78,15 @@ impl<const N: usize> FixedStr<N> {
     }
 }
 
-/// One irrigation controller: where it is and how to authenticate to it.
+/// One irrigation controller: where it is, what to call it, and how to
+/// authenticate to it.
 #[derive(Clone, Copy)]
 pub struct Controller {
     pub ip: [u8; 4],
+    /// What to call it - "greenhouse", "by the gate". Optional: an address is
+    /// enough to identify one, but not to remember which is which once several
+    /// are deployed.
+    pub name: FixedStr<MAX_NAME>,
     pub user: FixedStr<MAX_USER>,
     pub pass: FixedStr<MAX_SECRET>,
 }
@@ -85,6 +94,7 @@ pub struct Controller {
 impl Controller {
     pub const EMPTY: Self = Self {
         ip: [0; 4],
+        name: FixedStr::EMPTY,
         user: FixedStr::EMPTY,
         pass: FixedStr::EMPTY,
     };
@@ -123,6 +133,7 @@ impl Settings {
         if let Some(ip) = parse_ip(RB_HOST) {
             out.controllers[0] = Controller {
                 ip,
+                name: FixedStr::EMPTY,
                 // The credentials baked in at build time become the default for
                 // a controller added later too, which is what makes adding one
                 // from the panel a matter of typing an address and nothing else.
@@ -140,6 +151,7 @@ impl Settings {
         }
         self.controllers[self.n_controllers] = Controller {
             ip,
+            name: FixedStr::EMPTY,
             user: FixedStr::new(RB_USER),
             pass: FixedStr::new(RB_PASS),
         };
@@ -234,6 +246,10 @@ fn encode(settings: &Settings, out: &mut [u8; SECTOR]) -> usize {
         put(&controller.user.bytes, &mut at);
         put(&[controller.pass.len], &mut at);
         put(&controller.pass.bytes, &mut at);
+        // Appended after the version 1 fields, so a v1 record is exactly this
+        // layout minus these two - which is what lets `decode` read both.
+        put(&[controller.name.len], &mut at);
+        put(&controller.name.bytes, &mut at);
     }
 
     let payload_len = at - HEADER;
@@ -249,11 +265,16 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     if u32::from_le_bytes(raw[0..4].try_into().ok()?) != MAGIC {
         return None;
     }
-    if u16::from_le_bytes(raw[4..6].try_into().ok()?) != VERSION {
-        // A future version is not readable here. Falling back to defaults is
-        // safer than guessing at a layout we do not know.
-        return None;
-    }
+    // Version 1 is the same layout without controller names. Reading it keeps
+    // controllers that were added before names existed; anything newer than this
+    // firmware is not readable, and falling back to defaults is safer than
+    // guessing at a layout we do not know.
+    let version = u16::from_le_bytes(raw[4..6].try_into().ok()?);
+    let has_names = match version {
+        1 => false,
+        v if v == VERSION => true,
+        _ => return None,
+    };
     let payload_len = u16::from_le_bytes(raw[6..8].try_into().ok()?) as usize;
     if payload_len == 0 || HEADER + payload_len > SECTOR {
         return None;
@@ -288,6 +309,10 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         controller.user.bytes.copy_from_slice(take(MAX_USER, &mut at));
         controller.pass.len = take(1, &mut at)[0].min(MAX_SECRET as u8);
         controller.pass.bytes.copy_from_slice(take(MAX_SECRET, &mut at));
+        if has_names {
+            controller.name.len = take(1, &mut at)[0].min(MAX_NAME as u8);
+            controller.name.bytes.copy_from_slice(take(MAX_NAME, &mut at));
+        }
         settings.controllers[index] = controller;
     }
     settings.n_controllers = count.min(MAX_CONTROLLERS);

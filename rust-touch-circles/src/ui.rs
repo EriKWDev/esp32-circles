@@ -60,13 +60,9 @@ mod l {
     /// (cx, cy, r). The panel is square with rounded corners, not round, so this
     /// sits properly in the top-left instead of being pulled toward the middle.
     pub const BACK: (i32, i32, i32) = (58, 58, 40);
-    /// The cog sits in the top *right* on Home, opposite nothing else - Home has
-    /// no Back button. The one exception is a run in progress, whose badge owns
-    /// that corner; then the cog takes the free left one instead of overlapping
-    /// it. Both are corners of an empty strip, so neither placement crowds
-    /// anything, and `Ui::cog` is the single decision point.
-    pub const INFO: (i32, i32, i32) = (422, 58, 40);
-    pub const INFO_ALT: (i32, i32, i32) = (58, 58, 40);
+    /// Top left, where Home has nothing else - the run badge owns the right
+    /// corner, so the two never have to negotiate over it.
+    pub const INFO: (i32, i32, i32) = (58, 58, 40);
     pub const RUN_BADGE: (i32, i32, i32) = (422, 58, 32);
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
@@ -120,14 +116,37 @@ mod l {
     pub const ANALOG_FIRST_CY: i32 = 198;
     pub const ANALOG_PITCH: i32 = 42;
 
-    /// Menu rows, shared by Extras and Config. Wide and tall enough to be a
-    /// comfortable target while still fitting four on a page with a heading.
-    pub const MENU_X0: i32 = 26;
-    pub const MENU_X1: i32 = 442;
-    pub const MENU_FIRST_CY: i32 = 148;
-    pub const MENU_PITCH: i32 = 72;
-    pub const MENU_HALF_H: i32 = 31;
-    pub const MENU_MAX_ROWS: usize = 4;
+    /// Menu rows, shared by every list screen in the settings branch.
+    ///
+    /// Deliberately identical geometry to the schedule rows above, because these
+    /// are the same kind of thing: a scrollable column of openable rows. They
+    /// only differ in colour and content, so they should not also differ in
+    /// width, height, pitch or corner radius.
+    pub const MENU_X0: i32 = SCHED_X0;
+    pub const MENU_X1: i32 = SCHED_X1;
+    pub const MENU_FIRST_CY: i32 = SCHED_FIRST_CY;
+    pub const MENU_PITCH: i32 = SCHED_PITCH;
+    pub const MENU_HALF_H: i32 = SCHED_HALF_H;
+    pub const MENU_MAX_ROWS: usize = SCHED_MAX_ROWS;
+    /// The clipped band the rows scroll inside, and the scrollbar's extent.
+    pub const MENU_VIEW_TOP: i32 = 156;
+    pub const MENU_VIEW_BOTTOM: i32 = 438;
+    /// Heading baseline. At 116 a short title clears the Back button entirely;
+    /// this is why the headings are short - "SETTINGS", not "CONFIGURATION",
+    /// which at this size is wide enough to run under the button.
+    pub const MENU_TITLE: i32 = 116;
+    pub const MENU_STATUS: i32 = 146;
+
+    /// Extras uses Home's button shape rather than list rows: it is a menu of
+    /// destinations, like Home, and will grow to hold games and other toys.
+    pub const EXTRA_X0: i32 = 84;
+    pub const EXTRA_X1: i32 = 396;
+    pub const EXTRA_FIRST_CY: i32 = 200;
+    pub const EXTRA_PITCH: i32 = 94;
+    pub const EXTRA_HALF_H: i32 = 36;
+    pub const EXTRA_MAX_ROWS: usize = 3;
+    pub const EXTRA_VIEW_TOP: i32 = 150;
+    pub const EXTRA_VIEW_BOTTOM: i32 = 448;
     // Six rows fit the clipped viewport completely. A seventh row previously
     // looked like accidental clipping and never enabled the scrollbar.
     pub const ANALOG_MAX_ROWS: usize = 6;
@@ -159,8 +178,54 @@ mod l {
     pub const KEY_MODE: (i32, i32) = (8, 116);
     pub const KEY_SPACE: (i32, i32) = (126, 354);
     pub const KEY_DONE: (i32, i32) = (364, 472);
-    /// The text being edited, above the keys.
-    pub const FIELD: (i32, i32, i32, i32) = (24, 132, 456, 200);
+    /// The text being edited, between the heading and the keys.
+    pub const FIELD: (i32, i32, i32, i32) = (24, 162, 456, 222);
+
+    /// The single destructive button on the confirmation screen, and the retry on
+    /// the connecting one. Both are Home-button shaped: this panel's language for
+    /// "the thing to press".
+    pub const CONFIRM_YES: (i32, i32, i32, i32) = (84, 320, 396, 392);
+    pub const RETRY: (i32, i32, i32, i32) = (110, 386, 370, 452);
+}
+
+/// Row geometry of a list screen, so drawing, scrolling and hit testing all read
+/// the same numbers even though Extras' buttons are a different size from the
+/// settings rows.
+struct RowGeom {
+    x0: i32,
+    x1: i32,
+    first_cy: i32,
+    pitch: i32,
+    half_h: i32,
+    max_rows: usize,
+    top: i32,
+    bottom: i32,
+}
+
+fn geom(screen: Screen) -> RowGeom {
+    if screen == Screen::Extras {
+        RowGeom {
+            x0: l::EXTRA_X0,
+            x1: l::EXTRA_X1,
+            first_cy: l::EXTRA_FIRST_CY,
+            pitch: l::EXTRA_PITCH,
+            half_h: l::EXTRA_HALF_H,
+            max_rows: l::EXTRA_MAX_ROWS,
+            top: l::EXTRA_VIEW_TOP,
+            bottom: l::EXTRA_VIEW_BOTTOM,
+        }
+    } else {
+        RowGeom {
+            x0: l::MENU_X0,
+            x1: l::MENU_X1,
+            first_cy: l::MENU_FIRST_CY,
+            pitch: l::MENU_PITCH,
+            half_h: l::MENU_HALF_H,
+            max_rows: l::MENU_MAX_ROWS,
+            top: l::MENU_VIEW_TOP,
+            bottom: l::MENU_VIEW_BOTTOM,
+        }
+    }
 }
 
 /// Fixed-capacity string, so labels can be formatted without an allocator.
@@ -217,6 +282,10 @@ pub enum Screen {
     /// Text entry. What it is editing, and where Back returns to, are held in
     /// `edit` and `kb_return` rather than encoded in more screen variants.
     Keyboard,
+    /// Joining a network: working, then joined, or failed with a retry.
+    Connecting,
+    /// A destructive action, held until it is confirmed.
+    Confirm,
 }
 
 impl Screen {
@@ -232,7 +301,12 @@ impl Screen {
             Screen::Extras => BG_INFO,
             // Everything reached from Configuration keeps its palette, so the
             // whole settings branch reads as one place.
-            Screen::Config | Screen::Wifi | Screen::Controller | Screen::Keyboard => BG_CONFIG,
+            Screen::Config
+            | Screen::Wifi
+            | Screen::Controller
+            | Screen::Keyboard
+            | Screen::Connecting
+            | Screen::Confirm => BG_CONFIG,
         }
     }
     fn accent(self) -> u16 {
@@ -244,7 +318,12 @@ impl Screen {
             Screen::Detail => C_INSPECT,
             Screen::Info => C_INFO,
             Screen::Extras => C_INFO,
-            Screen::Config | Screen::Wifi | Screen::Controller | Screen::Keyboard => C_CONFIG,
+            Screen::Confirm => C_CANCEL,
+            Screen::Config
+            | Screen::Wifi
+            | Screen::Controller
+            | Screen::Keyboard
+            | Screen::Connecting => C_CONFIG,
         }
     }
 
@@ -282,6 +361,10 @@ enum Target {
     /// A keyboard key that is not part of a grid row - shift, delete, mode,
     /// space, commit.
     KeyAux(usize),
+    /// Go ahead with the destructive action being confirmed.
+    Confirm,
+    /// Try the failed network join again.
+    Retry,
     Schedule(usize),
     Info,
     RunningBadge,
@@ -341,16 +424,21 @@ enum Edit {
     ControllerIp(usize),
     ControllerUser(usize),
     ControllerPass(usize),
+    ControllerName(usize),
 }
 
 impl Edit {
+    /// Kept short: at heading size a long word runs under the Back button, and
+    /// the context that would have padded it out belongs in the subtitle anyway -
+    /// "PASSWORD", with the network's name underneath it.
     fn title(self) -> &'static str {
         match self {
-            Edit::WifiSsid => "NETWORK NAME",
-            Edit::WifiPsk => "WI-FI PASSWORD",
-            Edit::NewControllerIp | Edit::ControllerIp(_) => "IP ADDRESS",
+            Edit::WifiSsid => "NETWORK",
+            Edit::WifiPsk => "PASSWORD",
+            Edit::NewControllerIp | Edit::ControllerIp(_) => "ADDRESS",
             Edit::ControllerUser(_) => "USERNAME",
             Edit::ControllerPass(_) => "PASSWORD",
+            Edit::ControllerName(_) => "NAME",
         }
     }
 
@@ -397,6 +485,17 @@ impl KeyMode {
 /// How long a pressed key stays lit. Long enough to see on a panel refreshing at
 /// 40-60 fps, short enough not to lag a fast typist.
 const KEY_FLASH_MS: u32 = 130;
+
+/// How long to wait for a network to let us in before offering a retry.
+///
+/// There is no failure event to observe here - a rejected password looks exactly
+/// like one that has not been answered yet - so this is a timeout, set past the
+/// ten seconds or so an access point takes to turn one down. It is also well
+/// inside `MANUAL_HOLD_MS`, so the retry it offers can never race the automatic
+/// reconnect.
+const CONNECT_TIMEOUT_MS: u32 = 14_000;
+/// How long the "connected" confirmation stays up before returning to settings.
+const CONNECT_SETTLE_MS: u32 = 1_400;
 
 /// A decorative expanding ring, spawned by every tap. The circles demo's
 /// signature effect, kept as the UI's tactile feedback.
@@ -491,6 +590,13 @@ pub struct Ui {
     kb_return: Screen,
     /// The network chosen in the picker, held until its password is entered.
     pending_ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
+    /// When the current join attempt started, and whether it has been given up
+    /// on. The connecting screen is driven from these two.
+    connect_started_ms: u32,
+    connect_failed: bool,
+    /// When the join first succeeded, so the confirmation can be held briefly
+    /// before returning on its own.
+    connect_ok_ms: Option<u32>,
     schedule_scroll: i32,
     detail_scroll: i32,
     dragging_slider: bool,
@@ -570,6 +676,9 @@ impl Ui {
             key_hot_ms: 0,
             kb_return: Screen::Config,
             pending_ssid: crate::store::FixedStr::EMPTY,
+            connect_started_ms: 0,
+            connect_failed: false,
+            connect_ok_ms: None,
             schedule_scroll: 0,
             detail_scroll: 0,
             dragging_slider: false,
@@ -735,7 +844,11 @@ impl Ui {
                             // Both of these are reached through Extras, so Back
                             // returns to the menu rather than skipping home.
                             Screen::Info | Screen::Config => Screen::Extras,
-                            Screen::Wifi | Screen::Controller => Screen::Config,
+                            Screen::Wifi | Screen::Controller | Screen::Connecting => {
+                                Screen::Config
+                            }
+                            // Back is the "no" of the confirmation screen.
+                            Screen::Confirm => Screen::Controller,
                             // Cancels the edit: the buffer is simply dropped.
                             Screen::Keyboard => self.kb_return,
                             _ => Screen::Home,
@@ -766,124 +879,18 @@ impl Ui {
                         self.start_wipe(Screen::Extras, x, y, now_ms);
                         Action::None
                     }
-                    Target::Extra(row) => {
-                        if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
-                            self.menu_scroll = 0;
-                            self.info_scroll = 0;
-                            self.start_wipe(*screen, x, y, now_ms);
-                        }
-                        Action::None
-                    }
-                    Target::ConfigRow(row) => {
-                        let controllers = self.settings.n_controllers;
-                        if row == 0 {
-                            // Ask for a scan on the way in, so the picker has
-                            // something in it by the time the transition lands.
-                            self.want_scan = !self.networks.scanned;
-                            self.menu_scroll = 0;
-                            self.start_wipe(Screen::Wifi, x, y, now_ms);
-                        } else if row <= controllers {
-                            self.controller_selected = row - 1;
-                            self.menu_scroll = 0;
-                            self.start_wipe(Screen::Controller, x, y, now_ms);
-                        } else {
-                            self.open_keyboard(Edit::NewControllerIp, "", x, y, now_ms);
-                        }
-                        Action::None
-                    }
-                    Target::WifiRow(row) => {
-                        let found = self.networks.n;
-                        if row < found {
-                            let network = self.networks.items[row];
-                            self.pending_ssid = network.ssid;
-                            if network.secure {
-                                // Re-entering the network you are already on is
-                                // usually about fixing something else, so the
-                                // known password is offered rather than cleared.
-                                let known = if network.ssid.as_str()
-                                    == self.settings.ssid.as_str()
-                                {
-                                    self.settings.psk
-                                } else {
-                                    crate::store::FixedStr::EMPTY
-                                };
-                                self.open_keyboard(
-                                    Edit::WifiPsk,
-                                    known.as_str(),
-                                    x,
-                                    y,
-                                    now_ms,
-                                );
-                                Action::None
-                            } else {
-                                // Open network: nothing to type.
-                                self.settings.ssid = network.ssid;
-                                self.settings.psk = crate::store::FixedStr::EMPTY;
-                                self.start_wipe(Screen::Config, x, y, now_ms);
-                                Action::ApplyWifi
-                            }
-                        } else if row == found {
-                            self.want_scan = true;
-                            Action::None
-                        } else {
-                            self.open_keyboard(Edit::WifiSsid, "", x, y, now_ms);
-                            Action::None
-                        }
-                    }
-                    Target::CtlRow(row) => {
-                        let index = self.controller_selected;
-                        let Some(controller) = self
-                            .settings
-                            .controllers
-                            .get(index)
-                            .copied()
-                            .filter(|_| index < self.settings.n_controllers)
-                        else {
-                            self.start_wipe(Screen::Config, x, y, now_ms);
-                            return Action::None;
-                        };
-                        match row {
-                            0 => {
-                                let mut current = Buf::<20>::new();
-                                let ip = controller.ip;
-                                let _ =
-                                    write!(current, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-                                self.open_keyboard(
-                                    Edit::ControllerIp(index),
-                                    current.as_str(),
-                                    x,
-                                    y,
-                                    now_ms,
-                                );
-                                Action::None
-                            }
-                            1 => {
-                                self.open_keyboard(
-                                    Edit::ControllerUser(index),
-                                    controller.user.as_str(),
-                                    x,
-                                    y,
-                                    now_ms,
-                                );
-                                Action::None
-                            }
-                            2 => {
-                                self.open_keyboard(
-                                    Edit::ControllerPass(index),
-                                    controller.pass.as_str(),
-                                    x,
-                                    y,
-                                    now_ms,
-                                );
-                                Action::None
-                            }
-                            _ => {
-                                self.settings.remove_controller(index);
-                                self.menu_scroll = 0;
-                                self.start_wipe(Screen::Config, x, y, now_ms);
-                                Action::SaveSettings
-                            }
-                        }
+                    // List rows normally arrive here on release, via `row_at`, but
+                    // the same handler serves a press so the two paths can never
+                    // drift apart.
+                    Target::Extra(_)
+                    | Target::ConfigRow(_)
+                    | Target::WifiRow(_)
+                    | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
+                    Target::Confirm => self.confirm_action(x, y, now_ms),
+                    Target::Retry => {
+                        self.connect_started_ms = now_ms;
+                        self.connect_failed = false;
+                        Action::ApplyWifi
                     }
                     Target::KeyRow(row) => {
                         let (rows, key_w) = self.key_mode.rows();
@@ -1003,6 +1010,18 @@ impl Ui {
                                 self.selected = index;
                                 self.ripple(x, y, C_FORCE, now_ms);
                             }
+                            // Settings rows land here: the band is draggable, so
+                            // a row can only be *opened* once the touch turns out
+                            // to have been a tap and not the start of a scroll.
+                            Some(
+                                row @ (Target::Extra(_)
+                                | Target::ConfigRow(_)
+                                | Target::WifiRow(_)
+                                | Target::CtlRow(_)),
+                            ) => {
+                                self.ripple(x, y, self.screen.accent(), now_ms);
+                                return self.activate_row(row, x, y, now_ms);
+                            }
                             _ => {}
                         }
                     } else {
@@ -1016,6 +1035,16 @@ impl Ui {
     }
 
     fn row_at(&self, y: i32, state: &State) -> Option<Target> {
+        if self.screen.is_menu() {
+            let g = geom(self.screen);
+            let from_top = y - (g.first_cy - g.half_h) + self.menu_scroll;
+            if from_top < 0 {
+                return None;
+            }
+            let index = (from_top / g.pitch) as usize;
+            return (index < self.menu_total(self.screen))
+                .then(|| Self::menu_target(self.screen, index));
+        }
         let index = match self.screen {
             Screen::Inspect => {
                 ((y - (l::SCHED_FIRST_CY - l::SCHED_HALF_H) + self.schedule_scroll)
@@ -1057,6 +1086,7 @@ impl Ui {
         if self.key_hot.is_some() && now_ms.wrapping_sub(self.key_hot_ms) >= KEY_FLASH_MS {
             self.key_hot = None;
         }
+        self.update_connect(state, now_ms);
         for bubble in self.bubbles.iter_mut() {
             if bubble.active && now_ms.wrapping_sub(bubble.born_ms) >= BUBBLE_MS {
                 bubble.active = false;
@@ -1132,6 +1162,9 @@ impl Ui {
             || self.dragging_slider
             // A lit key has to be un-lit again, which needs one more frame.
             || self.key_hot.is_some()
+            // The connecting sweep is continuous, and its elapsed-seconds readout
+            // has to keep counting even though the clock is not what drives it.
+            || self.screen == Screen::Connecting
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1218,7 +1251,7 @@ impl Ui {
         let (bx, by, br) = l::BACK;
         match screen {
             Screen::Home => {
-                let (ix, iy, ir) = self.cog_at(state);
+                let (ix, iy, ir) = l::INFO;
                 self.zone(
                     Target::Info,
                     Zone::Disc {
@@ -1292,10 +1325,11 @@ impl Ui {
                     },
                 );
             }
-            // All four list screens work the same way: Back, one zone per visible
-            // row, and the scrollbar gutter. The rows come from the same walker
-            // the drawing uses, so a row can never activate a different entry
-            // from the one under the finger.
+            // Every list screen works the way the schedules list does: the whole
+            // band is one draggable zone, and which row a tap landed on is
+            // resolved by `row_at` on release. Registering a zone per row instead
+            // meant a drag that started on a row - which is to say, almost every
+            // drag - scrolled nothing at all.
             Screen::Extras | Screen::Config | Screen::Wifi | Screen::Controller => {
                 self.zone(
                     Target::Back,
@@ -1305,35 +1339,54 @@ impl Ui {
                         r: br,
                     },
                 );
-                let mut rows = [(0usize, 0i32); l::MENU_MAX_ROWS + 1];
-                let mut n_rows = 0;
-                self.menu_rows(screen, |_, row, cy| {
-                    if n_rows < rows.len() {
-                        rows[n_rows] = (row, cy);
-                        n_rows += 1;
-                    }
-                });
-                for &(row, cy) in &rows[..n_rows] {
-                    self.zone(
-                        Self::menu_target(screen, row),
-                        Zone::Rect {
-                            x0: l::MENU_X0,
-                            y0: cy - l::MENU_HALF_H,
-                            x1: l::MENU_X1,
-                            y1: cy + l::MENU_HALF_H,
-                        },
-                    );
-                }
-                // The scrollbar gutter drags the list.
+                let g = geom(screen);
                 self.zone(
                     Target::List,
                     Zone::Rect {
-                        x0: 448,
-                        y0: 118,
-                        x1: 478,
-                        y1: 470,
+                        x0: g.x0,
+                        y0: g.top,
+                        x1: g.x1,
+                        y1: g.bottom,
                     },
                 );
+                // The scrollbar gutter drags too, at bar scale.
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 450,
+                        y0: g.top,
+                        x1: 478,
+                        y1: g.bottom,
+                    },
+                );
+            }
+            Screen::Confirm => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                let (x0, y0, x1, y1) = l::CONFIRM_YES;
+                self.zone(Target::Confirm, Zone::Rect { x0, y0, x1, y1 });
+            }
+            Screen::Connecting => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                // The retry only exists once the attempt has been given up on, so
+                // two attempts can never be in flight together.
+                if self.connect_failed {
+                    let (x0, y0, x1, y1) = l::RETRY;
+                    self.zone(Target::Retry, Zone::Rect { x0, y0, x1, y1 });
+                }
             }
             Screen::Keyboard => {
                 self.zone(
@@ -1522,6 +1575,8 @@ impl Ui {
             Screen::Wifi => self.draw_wifi(scene, alpha),
             Screen::Controller => self.draw_controller(scene, state, alpha),
             Screen::Keyboard => self.draw_keyboard(scene, now_ms, alpha),
+            Screen::Connecting => self.draw_connecting(scene, state, now_ms, alpha),
+            Screen::Confirm => self.draw_confirm(scene, alpha),
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -1635,8 +1690,8 @@ impl Ui {
         );
     }
 
-    fn draw_cog(&self, scene: &mut Scene, state: &State, alpha: u8) {
-        let (x, y, _) = self.cog_at(state);
+    fn draw_cog(&self, scene: &mut Scene, alpha: u8) {
+        let (x, y, _) = l::INFO;
         // The icon itself is the affordance; the generous invisible hit area
         // does not need another enclosing circle.
         scene.label(
@@ -1704,7 +1759,7 @@ impl Ui {
         // shifts aside when a battery is present, so they are drawn together.
         self.draw_link(scene, state, alpha);
         self.draw_power(scene, Screen::Home, state, alpha);
-        self.draw_cog(scene, state, alpha);
+        self.draw_cog(scene, alpha);
 
         let mut clock = Buf::<8>::new();
         if state.clock_valid {
@@ -1783,54 +1838,102 @@ impl Ui {
 
     /// Entries of the Extras menu, in display order. Adding a page here is the
     /// only change needed to surface it - the row count, scrolling, hit testing
-    /// and navigation all derive from this table.
-    const EXTRAS: &'static [(&'static str, &'static str, Screen)] = &[
-        ("CONFIGURATION", "NETWORK \u{b7} CONTROLLERS", Screen::Config),
-        ("ANALOG READOUTS", "LIVE SENSOR INPUTS", Screen::Info),
+    /// and navigation all derive from this table. The colour is the entry's own,
+    /// so a page whose screen shares a palette with another can still be told
+    /// apart on this list.
+    const EXTRAS: &'static [(&'static str, u16, Screen)] = &[
+        ("SETTINGS", C_CONFIG, Screen::Config),
+        ("SENSORS", C_INFO, Screen::Info),
     ];
 
+    /// Extras is a menu of destinations, exactly like Home, so its buttons are
+    /// Home's buttons: same width, same height, same fully-rounded ends, one word
+    /// centred in each. It scrolls, because this is where games and other toys
+    /// will land.
     fn draw_extras(&mut self, scene: &mut Scene, alpha: u8) {
         self.draw_back(scene, alpha);
-        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "EXTRAS");
+        scene.label(
+            CX,
+            l::MENU_TITLE,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            "EXTRAS",
+        );
 
-        self.menu_rows(Screen::Extras, |ui, row, cy| {
-            if let Some((title, subtitle, screen)) = Self::EXTRAS.get(row) {
-                ui.menu_row(scene, cy, screen.accent(), title, subtitle, alpha, true);
+        scene.clip(l::EXTRA_VIEW_TOP, l::EXTRA_VIEW_BOTTOM);
+        self.menu_rows(Screen::Extras, |_, row, cy| {
+            if let Some((title, color, _)) = Self::EXTRAS.get(row) {
+                let (x0, x1) = (l::EXTRA_X0, l::EXTRA_X1);
+                scene.pill(
+                    x0,
+                    cy - l::EXTRA_HALF_H,
+                    x1,
+                    cy + l::EXTRA_HALF_H,
+                    l::EXTRA_HALF_H,
+                    *color,
+                    alpha,
+                );
+                scene.label(
+                    CX,
+                    cy + 14,
+                    FontId::Body,
+                    ink_on(*color),
+                    alpha,
+                    Align::Center,
+                    title,
+                );
             }
         });
+        scene.clip_reset();
 
-        self.draw_scrollbar(
-            scene,
-            self.menu_scroll,
-            l::MENU_MAX_ROWS,
-            l::MENU_PITCH,
-            Self::EXTRAS.len(),
-            l::MENU_FIRST_CY - l::MENU_HALF_H,
-            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
-            C_INFO,
-            alpha,
-        );
+        self.menu_scrollbar(scene, Screen::Extras, C_INFO, alpha);
     }
 
-    /// One menu row: a tinted plate, a title, a subtitle and a chevron. Shared by
-    /// Extras and Config so the two read as the same kind of list.
+    /// One settings row, built exactly like a schedule row: a plate, a status
+    /// dot, the thing itself on the left in body type, its value on the right in
+    /// caption type, and a chevron if it opens.
+    ///
+    /// One baseline, not a title stacked over a subtitle. The stacked version
+    /// reserved room for a second line whether or not there was one, so rows
+    /// without a value looked top-heavy and mis-centred; here the left label is
+    /// always on the row's centre line and the right one simply may be absent.
     #[allow(clippy::too_many_arguments)]
     fn menu_row(
         &self,
         scene: &mut Scene,
         cy: i32,
         accent: u16,
-        title: &str,
-        subtitle: &str,
+        label: &str,
+        value: &str,
         alpha: u8,
         chevron: bool,
     ) {
         let (x0, x1) = (l::MENU_X0, l::MENU_X1);
-        scene.pill(x0, cy - l::MENU_HALF_H, x1, cy + l::MENU_HALF_H, 20, rgb(20, 34, 44), alpha);
-        // A colour chip, so rows are distinguishable at a glance without icons.
-        scene.pill(x0 + 10, cy - 16, x0 + 18, cy + 16, 4, accent, alpha);
-        scene.label(x0 + 32, cy - 2, FontId::Caption, INK, alpha, Align::Left, title);
-        scene.label(x0 + 32, cy + 22, FontId::Micro, MUTED, alpha, Align::Left, subtitle);
+        let half = l::MENU_HALF_H;
+        scene.pill(x0, cy - half, x1, cy + half, 18, rgb(16, 36, 46), alpha);
+        scene.disc(x0 + 28, cy, 9, accent, alpha);
+        scene.label(
+            x0 + 52,
+            cy + 13,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Left,
+            label,
+        );
+        if !value.is_empty() {
+            scene.label(
+                x1 - 44,
+                cy + 10,
+                FontId::Caption,
+                MUTED,
+                alpha,
+                Align::Right,
+                value,
+            );
+        }
         if chevron {
             scene.pill(x1 - 26, cy - 8, x1 - 20, cy + 1, 3, MUTED, alpha);
             scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
@@ -1852,8 +1955,8 @@ impl Ui {
             Screen::Config => self.config_rows(),
             // The networks found, then "scan again", then "type it in".
             Screen::Wifi => self.networks.n + 2,
-            // Address, username, password, remove.
-            Screen::Controller => 4,
+            // Name, address, username, password, remove.
+            Screen::Controller => 5,
             _ => 0,
         }
     }
@@ -1864,6 +1967,166 @@ impl Ui {
             Screen::Wifi => Target::WifiRow(row),
             Screen::Controller => Target::CtlRow(row),
             _ => Target::ConfigRow(row),
+        }
+    }
+
+    /// Open whatever a list row stands for.
+    ///
+    /// Shared by the press and release paths, and the only place a row's meaning
+    /// is decided - the drawing reads the same row indices, so what you tap is
+    /// what you saw.
+    fn activate_row(&mut self, target: Target, x: i32, y: i32, now_ms: u32) -> Action {
+        match target {
+            Target::Extra(row) => {
+                if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
+                    self.menu_scroll = 0;
+                    self.info_scroll = 0;
+                    self.start_wipe(*screen, x, y, now_ms);
+                }
+                Action::None
+            }
+            Target::ConfigRow(row) => {
+                if row == 0 {
+                    // Ask for a scan on the way in, so the picker has something in
+                    // it by the time the transition lands.
+                    self.want_scan = !self.networks.scanned;
+                    self.menu_scroll = 0;
+                    self.start_wipe(Screen::Wifi, x, y, now_ms);
+                } else if row <= self.settings.n_controllers {
+                    self.controller_selected = row - 1;
+                    self.menu_scroll = 0;
+                    self.start_wipe(Screen::Controller, x, y, now_ms);
+                } else {
+                    self.open_keyboard(Edit::NewControllerIp, "", x, y, now_ms);
+                }
+                Action::None
+            }
+            Target::WifiRow(row) => {
+                let found = self.networks.n;
+                if row < found {
+                    let network = self.networks.items[row];
+                    self.pending_ssid = network.ssid;
+                    if network.secure {
+                        // Re-entering the network you are already on is usually
+                        // about fixing something else, so the known password is
+                        // offered rather than cleared.
+                        let known = if network.ssid.as_str() == self.settings.ssid.as_str() {
+                            self.settings.psk
+                        } else {
+                            crate::store::FixedStr::EMPTY
+                        };
+                        self.open_keyboard(Edit::WifiPsk, known.as_str(), x, y, now_ms);
+                        Action::None
+                    } else {
+                        // Open network: nothing to type.
+                        self.settings.ssid = network.ssid;
+                        self.settings.psk = crate::store::FixedStr::EMPTY;
+                        self.begin_connect(x, y, now_ms);
+                        Action::ApplyWifi
+                    }
+                } else if row == found {
+                    self.want_scan = true;
+                    Action::None
+                } else {
+                    self.open_keyboard(Edit::WifiSsid, "", x, y, now_ms);
+                    Action::None
+                }
+            }
+            Target::CtlRow(row) => {
+                let index = self.controller_selected;
+                let Some(controller) = self
+                    .settings
+                    .controllers
+                    .get(index)
+                    .copied()
+                    .filter(|_| index < self.settings.n_controllers)
+                else {
+                    self.start_wipe(Screen::Config, x, y, now_ms);
+                    return Action::None;
+                };
+                match row {
+                    0 => self.open_keyboard(
+                        Edit::ControllerName(index),
+                        controller.name.as_str(),
+                        x,
+                        y,
+                        now_ms,
+                    ),
+                    1 => {
+                        let mut current = Buf::<20>::new();
+                        let ip = controller.ip;
+                        let _ = write!(current, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                        self.open_keyboard(
+                            Edit::ControllerIp(index),
+                            current.as_str(),
+                            x,
+                            y,
+                            now_ms,
+                        );
+                    }
+                    2 => self.open_keyboard(
+                        Edit::ControllerUser(index),
+                        controller.user.as_str(),
+                        x,
+                        y,
+                        now_ms,
+                    ),
+                    3 => self.open_keyboard(
+                        Edit::ControllerPass(index),
+                        controller.pass.as_str(),
+                        x,
+                        y,
+                        now_ms,
+                    ),
+                    // Removal is one tap away from a controller you may have had
+                    // to walk somewhere to find the address of, so it asks first.
+                    _ => self.start_wipe(Screen::Confirm, x, y, now_ms),
+                }
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// The confirmation screen's YES. Only one thing needs confirming so far, so
+    /// the screen is written for that one thing rather than made generic before
+    /// there is a second case to generalise from.
+    fn confirm_action(&mut self, x: i32, y: i32, now_ms: u32) -> Action {
+        self.settings.remove_controller(self.controller_selected);
+        self.menu_scroll = 0;
+        self.start_wipe(Screen::Config, x, y, now_ms);
+        Action::SaveSettings
+    }
+
+    /// Show the connecting screen and start its clock.
+    fn begin_connect(&mut self, x: i32, y: i32, now_ms: u32) {
+        self.connect_started_ms = now_ms;
+        self.connect_failed = false;
+        self.connect_ok_ms = None;
+        self.start_wipe(Screen::Connecting, x, y, now_ms);
+    }
+
+    /// Drive the connecting screen: give up after a while, and once the network
+    /// has let us in, hold the confirmation briefly and then return by itself.
+    ///
+    /// A timeout is the only way to detect failure here - a rejected password is
+    /// indistinguishable from one that simply has not been answered yet, because
+    /// the driver's disconnect events are not exposed by this release.
+    fn update_connect(&mut self, state: &State, now_ms: u32) {
+        if self.interactive_screen() != Screen::Connecting {
+            return;
+        }
+        if state.link == Link::Online {
+            let since = *self.connect_ok_ms.get_or_insert(now_ms);
+            self.connect_failed = false;
+            if now_ms.wrapping_sub(since) >= CONNECT_SETTLE_MS && self.wipe.is_none() {
+                self.menu_scroll = 0;
+                self.start_wipe(Screen::Config, CX, 262, now_ms);
+            }
+        } else if !self.connect_failed
+            && now_ms.wrapping_sub(self.connect_started_ms) >= CONNECT_TIMEOUT_MS
+        {
+            self.connect_failed = true;
         }
     }
 
@@ -1878,15 +2141,6 @@ impl Ui {
             return true;
         }
         false
-    }
-
-    /// Which corner the cog is in - see `l::INFO`.
-    fn cog_at(&self, state: &State) -> (i32, i32, i32) {
-        if (run_is_active(state) && !self.completion_acknowledged) || self.completion_pending {
-            l::INFO_ALT
-        } else {
-            l::INFO
-        }
     }
 
     fn open_keyboard(&mut self, edit: Edit, initial: &str, x: i32, y: i32, now_ms: u32) {
@@ -1990,7 +2244,7 @@ impl Ui {
                 self.settings.ssid = self.pending_ssid;
                 self.settings.psk = value;
                 self.menu_scroll = 0;
-                self.start_wipe(Screen::Config, x, y, now_ms);
+                self.begin_connect(x, y, now_ms);
                 Action::ApplyWifi
             }
             Edit::NewControllerIp => {
@@ -2038,13 +2292,60 @@ impl Ui {
                 self.start_wipe(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
+            Edit::ControllerName(index) => {
+                if index >= self.settings.n_controllers {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                // An empty name is legitimate: it means "just show the address".
+                self.settings.controllers[index].name.set(value.as_str());
+                self.start_wipe(Screen::Controller, x, y, now_ms);
+                Action::SaveSettings
+            }
         }
     }
 
-    fn draw_config(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+    /// The heading and the grey line under it, shared by the settings screens so
+    /// they are all positioned identically and all clear of the Back button.
+    fn page_head(&self, scene: &mut Scene, title: &str, status: &str, alpha: u8) {
         self.draw_back(scene, alpha);
-        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "CONFIGURATION");
+        scene.label(
+            CX,
+            l::MENU_TITLE,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            title,
+        );
+        if !status.is_empty() {
+            scene.label(
+                CX,
+                l::MENU_STATUS,
+                FontId::Micro,
+                MUTED,
+                alpha,
+                Align::Center,
+                status,
+            );
+        }
+    }
 
+    /// How a controller is described in a list: its name if it has one, else its
+    /// address. Shared so the Settings list, the controller's own page and the
+    /// confirmation all call it the same thing.
+    fn controller_label(controller: &crate::store::Controller) -> Buf<24> {
+        let mut out = Buf::<24>::new();
+        if controller.name.is_empty() {
+            let ip = controller.ip;
+            let _ = write!(out, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        } else {
+            let _ = write!(out, "{}", controller.name.as_str());
+        }
+        out
+    }
+
+    fn draw_config(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
         // The panel's own address, which is what you need when something else has
         // to reach it - and the first thing to check when nothing works.
         let mut panel = Buf::<32>::new();
@@ -2056,14 +2357,14 @@ impl Ui {
                 let _ = write!(panel, "THIS PANEL \u{b7} NO ADDRESS YET");
             }
         }
-        scene.label(CX, 100, FontId::Micro, MUTED, alpha, Align::Center, panel.as_str());
+        self.page_head(scene, "SETTINGS", panel.as_str(), alpha);
 
-        let total = self.config_rows();
+        scene.clip(l::MENU_VIEW_TOP, l::MENU_VIEW_BOTTOM);
         self.menu_rows(Screen::Config, |ui, row, cy| {
             if row == 0 {
-                let mut value = Buf::<40>::new();
+                let mut value = Buf::<28>::new();
                 if ui.settings.ssid.is_empty() {
-                    let _ = write!(value, "NOT SET \u{b7} TAP TO CHOOSE");
+                    let _ = write!(value, "TAP TO CHOOSE");
                 } else {
                     let _ = write!(value, "{}", ui.settings.ssid.as_str());
                 }
@@ -2075,10 +2376,7 @@ impl Ui {
                 ui.menu_row(scene, cy, accent, "WI-FI", value.as_str(), alpha, true);
             } else if row <= ui.settings.n_controllers {
                 let controller = ui.settings.controllers[row - 1];
-                let mut title = Buf::<32>::new();
                 let ip = controller.ip;
-                let _ = write!(title, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-                let mut sub = Buf::<40>::new();
                 // Online state comes from the live model, matched by address, so
                 // it stays right when controllers are reordered.
                 let online = state.controller_ips[..state.n_controllers]
@@ -2086,70 +2384,69 @@ impl Ui {
                     .position(|a| *a == ip)
                     .map(|i| state.controller_online[i])
                     .unwrap_or(false);
-                let _ = write!(
-                    sub,
-                    "RAINBIRD \u{b7} {} \u{b7} {}",
-                    controller.user.as_str(),
-                    if online { "ONLINE" } else { "OFFLINE" }
-                );
+                // Named controllers show their name with the address beside it;
+                // unnamed ones show the address alone rather than repeating it.
+                let mut value = Buf::<24>::new();
+                if !controller.name.is_empty() {
+                    let _ = write!(value, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                } else if !online {
+                    let _ = write!(value, "OFFLINE");
+                }
                 ui.menu_row(
                     scene,
                     cy,
                     if online { C_RUN } else { C_CANCEL },
-                    title.as_str(),
-                    sub.as_str(),
+                    Self::controller_label(&controller).as_str(),
+                    value.as_str(),
                     alpha,
                     true,
                 );
             } else {
-                ui.menu_row(
-                    scene,
-                    cy,
-                    C_CONFIG,
-                    "ADD CONTROLLER",
-                    "ENTER AN IP ADDRESS",
-                    alpha,
-                    false,
-                );
+                ui.menu_row(scene, cy, C_CONFIG, "ADD CONTROLLER", "", alpha, true);
             }
         });
+        scene.clip_reset();
 
-        self.draw_scrollbar(
-            scene,
-            self.menu_scroll,
-            l::MENU_MAX_ROWS,
-            l::MENU_PITCH,
-            total,
-            l::MENU_FIRST_CY - l::MENU_HALF_H,
-            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
-            C_CONFIG,
-            alpha,
-        );
+        self.menu_scrollbar(scene, Screen::Config, C_CONFIG, alpha);
     }
 
     /// The rows of a list screen, drawn from `menu_total` and `menu_scroll`.
     /// Calls `row` for each visible one with its index and centre line.
     fn menu_rows(&self, screen: Screen, mut row: impl FnMut(&Self, usize, i32)) {
+        let g = geom(screen);
         let total = self.menu_total(screen);
-        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
-        let shift = -(self.menu_scroll % l::MENU_PITCH);
-        for slot in 0..l::MENU_MAX_ROWS + 1 {
+        let first = (self.menu_scroll / g.pitch) as usize;
+        let shift = -(self.menu_scroll % g.pitch);
+        for slot in 0..g.max_rows + 1 {
             let index = first + slot;
             if index >= total {
                 break;
             }
-            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
-            if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
+            let cy = g.first_cy + slot as i32 * g.pitch + shift;
+            if cy + g.half_h < g.top - 12 || cy - g.half_h > g.bottom + 12 {
                 continue;
             }
             row(self, index, cy);
         }
     }
 
-    fn draw_wifi(&mut self, scene: &mut Scene, alpha: u8) {
-        self.draw_back(scene, alpha);
-        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "WI-FI");
+    /// The scrollbar for a list screen, from that screen's own geometry.
+    fn menu_scrollbar(&self, scene: &mut Scene, screen: Screen, color: u16, alpha: u8) {
+        let g = geom(screen);
+        self.draw_scrollbar(
+            scene,
+            self.menu_scroll,
+            g.max_rows,
+            g.pitch,
+            self.menu_total(screen),
+            g.top,
+            g.bottom,
+            color,
+            alpha,
+        );
+    }
 
+    fn draw_wifi(&mut self, scene: &mut Scene, alpha: u8) {
         let mut status = Buf::<48>::new();
         if self.scan_busy {
             let _ = write!(status, "SCANNING...");
@@ -2160,31 +2457,22 @@ impl Ui {
         } else {
             let _ = write!(status, "TAP SCAN TO LOOK FOR NETWORKS");
         }
-        scene.label(
-            CX,
-            100,
-            FontId::Micro,
-            MUTED,
-            alpha,
-            Align::Center,
-            status.as_str(),
-        );
+        self.page_head(scene, "WI-FI", status.as_str(), alpha);
 
         let found = self.networks.n;
         let current = self.settings.ssid;
+        scene.clip(l::MENU_VIEW_TOP, l::MENU_VIEW_BOTTOM);
         self.menu_rows(Screen::Wifi, |ui, index, cy| {
             if index < found {
                 let network = ui.networks.items[index];
-                let mut sub = Buf::<44>::new();
-                let _ = write!(
-                    sub,
-                    "{} \u{b7} {}",
-                    signal_words(network.rssi),
-                    if network.secure { "SECURED" } else { "OPEN" }
-                );
                 let joined = network.ssid.as_str() == current.as_str();
+                let mut value = Buf::<16>::new();
                 if joined {
-                    let _ = write!(sub, " \u{b7} CURRENT");
+                    let _ = write!(value, "CURRENT");
+                } else if !network.secure {
+                    let _ = write!(value, "OPEN");
+                } else {
+                    let _ = write!(value, "{}", signal_words(network.rssi));
                 }
                 ui.menu_row(
                     scene,
@@ -2197,44 +2485,19 @@ impl Ui {
                         signal_color(network.rssi)
                     },
                     network.ssid.as_str(),
-                    sub.as_str(),
+                    value.as_str(),
                     alpha,
                     true,
                 );
             } else if index == found {
-                ui.menu_row(
-                    scene,
-                    cy,
-                    C_CONFIG,
-                    "SCAN AGAIN",
-                    "LOOK FOR NETWORKS NEARBY",
-                    alpha,
-                    false,
-                );
+                ui.menu_row(scene, cy, C_CONFIG, "SCAN AGAIN", "", alpha, false);
             } else {
-                ui.menu_row(
-                    scene,
-                    cy,
-                    MUTED,
-                    "TYPE NETWORK NAME",
-                    "FOR A HIDDEN NETWORK",
-                    alpha,
-                    true,
-                );
+                ui.menu_row(scene, cy, MUTED, "OTHER NETWORK", "HIDDEN", alpha, true);
             }
         });
+        scene.clip_reset();
 
-        self.draw_scrollbar(
-            scene,
-            self.menu_scroll,
-            l::MENU_MAX_ROWS,
-            l::MENU_PITCH,
-            found + 2,
-            l::MENU_FIRST_CY - l::MENU_HALF_H,
-            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
-            C_CONFIG,
-            alpha,
-        );
+        self.menu_scrollbar(scene, Screen::Wifi, C_CONFIG, alpha);
     }
 
     fn draw_controller(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
@@ -2249,18 +2512,6 @@ impl Ui {
             .unwrap_or(crate::store::Controller::EMPTY);
         let ip = controller.ip;
 
-        let mut title = Buf::<24>::new();
-        let _ = write!(title, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-        scene.label(
-            CX,
-            69,
-            FontId::Body,
-            INK,
-            alpha,
-            Align::Center,
-            title.as_str(),
-        );
-
         // Matched by address rather than by slot, so it stays right after an edit
         // reorders the table.
         let online = state.controller_ips[..state.n_controllers]
@@ -2268,53 +2519,238 @@ impl Ui {
             .position(|a| *a == ip)
             .map(|i| state.controller_online[i])
             .unwrap_or(false);
-        scene.label(
-            CX,
-            100,
-            FontId::Micro,
-            MUTED,
+        let mut status = Buf::<40>::new();
+        let _ = write!(
+            status,
+            "RAINBIRD \u{b7} {}",
+            if online { "ONLINE" } else { "NOT ANSWERING" }
+        );
+        self.page_head(
+            scene,
+            Self::controller_label(&controller).as_str(),
+            status.as_str(),
             alpha,
-            Align::Center,
-            if online {
-                "RAINBIRD CONTROLLER \u{b7} ONLINE"
-            } else {
-                "RAINBIRD CONTROLLER \u{b7} NOT ANSWERING"
-            },
         );
 
+        let mut address = Buf::<20>::new();
+        let _ = write!(address, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
         // The password is masked here but shown while typing: the risk this
         // guards against is someone reading the panel over your shoulder, which
         // the editing screen cannot avoid anyway.
         let mut masked = Buf::<24>::new();
-        for _ in 0..controller.pass.len.min(12) {
-            let _ = write!(masked, "\u{b7}");
-        }
         if controller.pass.is_empty() {
             let _ = write!(masked, "NOT SET");
+        } else {
+            for _ in 0..controller.pass.len.min(10) {
+                let _ = write!(masked, "\u{b7}");
+            }
         }
+        let mut name = Buf::<24>::new();
+        let _ = write!(
+            name,
+            "{}",
+            if controller.name.is_empty() {
+                "NOT SET"
+            } else {
+                controller.name.as_str()
+            }
+        );
 
+        scene.clip(l::MENU_VIEW_TOP, l::MENU_VIEW_BOTTOM);
         self.menu_rows(Screen::Controller, |ui, row, cy| {
-            let (accent, title, sub): (u16, &str, &str) = match row {
-                0 => (C_CONFIG, "ADDRESS", title.as_str()),
-                1 => (C_CONFIG, "USERNAME", controller.user.as_str()),
-                2 => (C_CONFIG, "PASSWORD", masked.as_str()),
-                _ => (C_CANCEL, "REMOVE CONTROLLER", "STOP POLLING THIS ONE"),
+            let (accent, label, value): (u16, &str, &str) = match row {
+                0 => (C_CONFIG, "NAME", name.as_str()),
+                1 => (C_CONFIG, "ADDRESS", address.as_str()),
+                2 => (C_CONFIG, "USERNAME", controller.user.as_str()),
+                3 => (C_CONFIG, "PASSWORD", masked.as_str()),
+                _ => (C_CANCEL, "REMOVE", ""),
             };
-            ui.menu_row(scene, cy, accent, title, sub, alpha, row < 3);
+            ui.menu_row(scene, cy, accent, label, value, alpha, true);
         });
+        scene.clip_reset();
+
+        self.menu_scrollbar(scene, Screen::Controller, C_CONFIG, alpha);
     }
 
-    fn draw_keyboard(&mut self, scene: &mut Scene, now_ms: u32, alpha: u8) {
-        self.draw_back(scene, alpha);
+    /// Confirmation for removing a controller. A full screen rather than a
+    /// dialog: the panel has no notion of a modal, and something this hard to
+    /// undo - the address may have taken a walk to find - deserves the whole
+    /// screen's attention rather than a second small button next to the first.
+    fn draw_confirm(&mut self, scene: &mut Scene, alpha: u8) {
+        let controller = self
+            .settings
+            .controllers
+            .get(self.controller_selected)
+            .copied()
+            .unwrap_or(crate::store::Controller::EMPTY);
+        self.page_head(scene, "REMOVE", "", alpha);
+
         scene.label(
             CX,
-            69,
+            206,
             FontId::Body,
             INK,
             alpha,
             Align::Center,
-            self.edit.title(),
+            Self::controller_label(&controller).as_str(),
         );
+        let ip = controller.ip;
+        let mut detail = Buf::<40>::new();
+        let _ = write!(
+            detail,
+            "{}.{}.{}.{} WILL NO LONGER BE POLLED",
+            ip[0], ip[1], ip[2], ip[3]
+        );
+        scene.label(
+            CX,
+            244,
+            FontId::Micro,
+            MUTED,
+            alpha,
+            Align::Center,
+            detail.as_str(),
+        );
+
+        let (x0, y0, x1, y1) = l::CONFIRM_YES;
+        scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CANCEL, alpha);
+        scene.label(
+            (x0 + x1) / 2,
+            (y0 + y1) / 2 + 14,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            "REMOVE",
+        );
+        // No explicit "no": Back is already the way out of every other screen,
+        // and one unmistakable destructive button beats two similar ones.
+        scene.label(
+            CX,
+            l::CONFIRM_YES.3 + 46,
+            FontId::Caption,
+            MUTED,
+            alpha,
+            Align::Center,
+            "OR GO BACK TO KEEP IT",
+        );
+    }
+
+    /// Joining a network: a breathing ring while it works, then the outcome.
+    fn draw_connecting(&mut self, scene: &mut Scene, state: &State, now_ms: u32, alpha: u8) {
+        let joined = state.link == Link::Online;
+        self.page_head(
+            scene,
+            if joined {
+                "CONNECTED"
+            } else if self.connect_failed {
+                "NO LUCK"
+            } else {
+                "CONNECTING"
+            },
+            self.settings.ssid.as_str(),
+            alpha,
+        );
+
+        let color = if joined {
+            C_RUN
+        } else if self.connect_failed {
+            C_CANCEL
+        } else {
+            C_CONFIG
+        };
+
+        // While working, a sweep chases its own tail; once settled, the ring
+        // closes. Same vocabulary as the countdown's progress arc.
+        let (cx, cy, r) = (CX, 262, 92);
+        scene.ring(cx, cy, r, r - 12, rgb(18, 38, 48), alpha);
+        if joined || self.connect_failed {
+            scene.ring(cx, cy, r, r - 12, color, alpha);
+        } else {
+            let turn = (now_ms.wrapping_sub(self.connect_started_ms) % 1_200) * 4_096 / 1_200;
+            scene.arc(
+                cx,
+                cy,
+                r,
+                r - 12,
+                turn as i32,
+                turn as i32 + 1_100,
+                color,
+                alpha,
+            );
+        }
+
+        let mut middle = Buf::<20>::new();
+        if joined {
+            if let Some(ip) = state.local_ip {
+                let _ = write!(middle, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+            } else {
+                let _ = write!(middle, "JOINED");
+            }
+        } else if self.connect_failed {
+            let _ = write!(middle, "FAILED");
+        } else {
+            let elapsed = now_ms.wrapping_sub(self.connect_started_ms) / 1_000;
+            let _ = write!(middle, "{} S", elapsed);
+        }
+        scene.label(
+            cx,
+            cy + 10,
+            FontId::Caption,
+            INK,
+            alpha,
+            Align::Center,
+            middle.as_str(),
+        );
+
+        if self.connect_failed {
+            let (x0, y0, x1, y1) = l::RETRY;
+            scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CONFIG, alpha);
+            scene.label(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2 + 14,
+                FontId::Body,
+                ink_on(C_CONFIG),
+                alpha,
+                Align::Center,
+                "TRY AGAIN",
+            );
+        } else if !joined {
+            scene.label(
+                CX,
+                l::RETRY.3 + 4,
+                FontId::Caption,
+                DIM,
+                alpha,
+                Align::Center,
+                "CHECKING THE PASSWORD",
+            );
+        }
+    }
+
+    fn draw_keyboard(&mut self, scene: &mut Scene, now_ms: u32, alpha: u8) {
+        // The subtitle carries the context the short heading leaves out - which
+        // network's password, which controller's username.
+        let mut context = Buf::<32>::new();
+        match self.edit {
+            Edit::WifiPsk => {
+                let _ = write!(context, "{}", self.pending_ssid.as_str());
+            }
+            Edit::WifiSsid => {
+                let _ = write!(context, "TYPE THE NETWORK NAME");
+            }
+            Edit::NewControllerIp => {
+                let _ = write!(context, "NEW CONTROLLER");
+            }
+            Edit::ControllerIp(i)
+            | Edit::ControllerUser(i)
+            | Edit::ControllerPass(i)
+            | Edit::ControllerName(i) => {
+                if let Some(controller) = self.settings.controllers.get(i) {
+                    let _ = write!(context, "{}", Self::controller_label(controller).as_str());
+                }
+            }
+        }
+        self.page_head(scene, self.edit.title(), context.as_str(), alpha);
 
         // The value being edited. A rejected commit turns the frame red, which is
         // the only feedback DONE can give when it refuses.
@@ -3125,6 +3561,18 @@ fn signal_words(rssi: i8) -> &'static str {
         r if r >= -80 => "FAIR",
         _ => "WEAK",
     }
+}
+
+/// Legible text on a filled button, chosen from the fill's brightness rather than
+/// picked per button - so a new Extras entry cannot end up with white type on a
+/// pale plate.
+fn ink_on(color: u16) -> u16 {
+    let r = ((color >> 11) & 0x1f) as u32 * 255 / 31;
+    let g = ((color >> 5) & 0x3f) as u32 * 255 / 63;
+    let b = (color & 0x1f) as u32 * 255 / 31;
+    // Rec. 601 luma, integer.
+    let luma = (299 * r + 587 * g + 114 * b) / 1000;
+    if luma > 140 { rgb(8, 14, 18) } else { INK }
 }
 
 fn signal_color(rssi: i8) -> u16 {
