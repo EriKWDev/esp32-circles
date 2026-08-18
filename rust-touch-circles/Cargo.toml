@@ -17,6 +17,8 @@ smoltcp = { version = "0.12", default-features = false, features = ["medium-ethe
 md-5 = { version = "0.10", default-features = false }
 esp-rtos = { version = "0.3.0", features = ["esp32c6", "esp-radio", "esp-alloc"] }
 embassy-futures = "0.1.2"
+esp-storage = { version = "0.9", features = ["esp32c6"] }
+embedded-storage = "0.3"
 
 # Host-side only: rasterizes the bundled TTFs into anti-aliased coverage maps
 # (see build.rs). None of this ships in the firmware.

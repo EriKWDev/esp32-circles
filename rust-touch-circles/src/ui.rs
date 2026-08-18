@@ -37,6 +37,9 @@ const C_FORCE: u16 = rgb(226, 142, 24);
 const C_RUN: u16 = rgb(30, 176, 108);
 const C_CANCEL: u16 = rgb(212, 52, 48);
 const C_INFO: u16 = rgb(142, 104, 226);
+/// Configuration reads as a cooler, more technical relative of Extras.
+const BG_CONFIG: u16 = rgb(10, 24, 32);
+const C_CONFIG: u16 = rgb(58, 158, 178);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -110,6 +113,15 @@ mod l {
     pub const ANALOG_X1: i32 = 438;
     pub const ANALOG_FIRST_CY: i32 = 198;
     pub const ANALOG_PITCH: i32 = 42;
+
+    /// Menu rows, shared by Extras and Config. Wide and tall enough to be a
+    /// comfortable target while still fitting four on a page with a heading.
+    pub const MENU_X0: i32 = 26;
+    pub const MENU_X1: i32 = 442;
+    pub const MENU_FIRST_CY: i32 = 148;
+    pub const MENU_PITCH: i32 = 72;
+    pub const MENU_HALF_H: i32 = 31;
+    pub const MENU_MAX_ROWS: usize = 4;
     // Six rows fit the clipped viewport completely. A seventh row previously
     // looked like accidental clipping and never enabled the scrollbar.
     pub const ANALOG_MAX_ROWS: usize = 6;
@@ -155,7 +167,15 @@ pub enum Screen {
     Running,
     /// One schedule's running order, opened from the schedules list.
     Detail,
+    /// Analog readouts. Reached from Extras rather than directly from the cog,
+    /// so more diagnostic and settings pages can be added beside it.
     Info,
+    /// The cog's destination: a menu of everything that is not day-to-day
+    /// watering. A list rather than a fixed layout, because the whole point is
+    /// that entries get added to it.
+    Extras,
+    /// Network and controller configuration, backed by flash.
+    Config,
 }
 
 impl Screen {
@@ -167,6 +187,9 @@ impl Screen {
             Screen::Running => BG_RUN,
             Screen::Detail => BG_INSPECT,
             Screen::Info => BG_INFO,
+            // Extras shares Info's palette: it is the same part of the app.
+            Screen::Extras => BG_INFO,
+            Screen::Config => BG_CONFIG,
         }
     }
     fn accent(self) -> u16 {
@@ -177,6 +200,8 @@ impl Screen {
             Screen::Running => C_RUN,
             Screen::Detail => C_INSPECT,
             Screen::Info => C_INFO,
+            Screen::Extras => C_INFO,
+            Screen::Config => C_CONFIG,
         }
     }
 }
@@ -190,6 +215,10 @@ enum Target {
     Cancel,
     Relay(usize),
     Slider,
+    /// A row of the Extras menu.
+    Extra(usize),
+    /// A row of the Config page: Wi-Fi first, then one per controller, then Add.
+    ConfigRow(usize),
     Schedule(usize),
     Info,
     RunningBadge,
@@ -298,6 +327,12 @@ pub struct Ui {
     pub selected: usize,
     relay_scroll: i32,
     info_scroll: i32,
+    menu_scroll: i32,
+    /// Last Config row tapped, for the editor that will open on it.
+    config_selected: usize,
+    /// The UI's copy of persisted settings. Held here rather than threaded
+    /// through every draw call, and refreshed by main whenever it changes.
+    pub settings: crate::store::Settings,
     schedule_scroll: i32,
     detail_scroll: i32,
     dragging_slider: bool,
@@ -363,6 +398,9 @@ impl Ui {
             selected: 0,
             relay_scroll: 0,
             info_scroll: 0,
+            menu_scroll: 0,
+            config_selected: 0,
+            settings: crate::store::Settings::EMPTY,
             schedule_scroll: 0,
             detail_scroll: 0,
             dragging_slider: false,
@@ -519,6 +557,9 @@ impl Ui {
                         let to = match self.screen {
                             Screen::Detail => Screen::Inspect,
                             Screen::Running => self.run_return,
+                            // Both of these are reached through Extras, so Back
+                            // returns to the menu rather than skipping home.
+                            Screen::Info | Screen::Config => Screen::Extras,
                             _ => Screen::Home,
                         };
                         self.start_wipe(to, x, y, now_ms);
@@ -541,7 +582,24 @@ impl Ui {
                         Action::None
                     }
                     Target::Info => {
-                        self.start_wipe(Screen::Info, x, y, now_ms);
+                        // The cog opens the menu now, not the analog page.
+                        self.menu_scroll = 0;
+                        self.start_wipe(Screen::Extras, x, y, now_ms);
+                        Action::None
+                    }
+                    Target::Extra(row) => {
+                        if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
+                            self.menu_scroll = 0;
+                            self.info_scroll = 0;
+                            self.start_wipe(*screen, x, y, now_ms);
+                        }
+                        Action::None
+                    }
+                    Target::ConfigRow(row) => {
+                        // Editing lands here next; for now a tap is acknowledged
+                        // with a ripple so the rows do not feel dead, and the
+                        // row's identity is recorded for the editor to pick up.
+                        self.config_selected = row;
                         Action::None
                     }
                     Target::Force => {
@@ -603,6 +661,12 @@ impl Ui {
                         ),
                         Screen::Info => (l::ANALOG_PITCH, l::ANALOG_MAX_ROWS, state.n_analogs),
                         Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
+                        Screen::Extras => {
+                            (l::MENU_PITCH, l::MENU_MAX_ROWS, Self::EXTRAS.len())
+                        }
+                        Screen::Config => {
+                            (l::MENU_PITCH, l::MENU_MAX_ROWS, self.config_rows())
+                        }
                         _ => (1, 1, 0),
                     };
                     let max_offset = total.saturating_sub(visible) as i32 * pitch;
@@ -617,6 +681,7 @@ impl Ui {
                         Screen::Detail => self.detail_scroll = offset,
                         Screen::Info => self.info_scroll = offset,
                         Screen::Force => self.relay_scroll = offset,
+                        Screen::Extras | Screen::Config => self.menu_scroll = offset,
                         _ => {}
                     }
                 }
@@ -925,6 +990,60 @@ impl Ui {
                     },
                 );
             }
+            // Extras and Config are both menus: Back, a scrollable band, and one
+            // zone per visible row. The row targets are registered from the same
+            // pitch the drawing uses, and `row_at` maps a y back to a row.
+            Screen::Extras | Screen::Config => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                let total = if screen == Screen::Extras {
+                    Self::EXTRAS.len()
+                } else {
+                    self.config_rows()
+                };
+                let first = (self.menu_scroll / l::MENU_PITCH) as usize;
+                let shift = -(self.menu_scroll % l::MENU_PITCH);
+                for slot in 0..l::MENU_MAX_ROWS + 1 {
+                    let row = first + slot;
+                    if row >= total {
+                        break;
+                    }
+                    let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
+                    if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
+                        continue;
+                    }
+                    let target = if screen == Screen::Extras {
+                        Target::Extra(row)
+                    } else {
+                        Target::ConfigRow(row)
+                    };
+                    self.zone(
+                        target,
+                        Zone::Rect {
+                            x0: l::MENU_X0,
+                            y0: cy - l::MENU_HALF_H,
+                            x1: l::MENU_X1,
+                            y1: cy + l::MENU_HALF_H,
+                        },
+                    );
+                }
+                // The scrollbar gutter drags the list.
+                self.zone(
+                    Target::List,
+                    Zone::Rect {
+                        x0: 448,
+                        y0: 118,
+                        x1: 478,
+                        y1: 470,
+                    },
+                );
+            }
             Screen::Info => {
                 self.zone(
                     Target::Back,
@@ -1040,6 +1159,8 @@ impl Ui {
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
+            Screen::Extras => self.draw_extras(scene, alpha),
+            Screen::Config => self.draw_config(scene, state, alpha),
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -1296,6 +1417,175 @@ impl Ui {
             alpha,
             Align::Center,
             "MANUAL",
+        );
+    }
+
+    /// Entries of the Extras menu, in display order. Adding a page here is the
+    /// only change needed to surface it - the row count, scrolling, hit testing
+    /// and navigation all derive from this table.
+    const EXTRAS: &'static [(&'static str, &'static str, Screen)] = &[
+        ("CONFIGURATION", "NETWORK \u{b7} CONTROLLERS", Screen::Config),
+        ("ANALOG READOUTS", "LIVE SENSOR INPUTS", Screen::Info),
+    ];
+
+    fn draw_extras(&mut self, scene: &mut Scene, alpha: u8) {
+        self.draw_back(scene, alpha);
+        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "EXTRAS");
+
+        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
+        let shift = -(self.menu_scroll % l::MENU_PITCH);
+        for slot in 0..l::MENU_MAX_ROWS + 1 {
+            let row = first + slot;
+            let Some((title, subtitle, screen)) = Self::EXTRAS.get(row) else {
+                break;
+            };
+            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
+            if cy + l::MENU_HALF_H < 110 || cy - l::MENU_HALF_H > 470 {
+                continue;
+            }
+            self.menu_row(scene, cy, screen.accent(), title, subtitle, alpha, true);
+        }
+
+        self.draw_scrollbar(
+            scene,
+            self.menu_scroll,
+            l::MENU_MAX_ROWS,
+            l::MENU_PITCH,
+            Self::EXTRAS.len(),
+            l::MENU_FIRST_CY - l::MENU_HALF_H,
+            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
+            C_INFO,
+            alpha,
+        );
+    }
+
+    /// One menu row: a tinted plate, a title, a subtitle and a chevron. Shared by
+    /// Extras and Config so the two read as the same kind of list.
+    #[allow(clippy::too_many_arguments)]
+    fn menu_row(
+        &self,
+        scene: &mut Scene,
+        cy: i32,
+        accent: u16,
+        title: &str,
+        subtitle: &str,
+        alpha: u8,
+        chevron: bool,
+    ) {
+        let (x0, x1) = (l::MENU_X0, l::MENU_X1);
+        scene.pill(x0, cy - l::MENU_HALF_H, x1, cy + l::MENU_HALF_H, 20, rgb(20, 34, 44), alpha);
+        // A colour chip, so rows are distinguishable at a glance without icons.
+        scene.pill(x0 + 10, cy - 16, x0 + 18, cy + 16, 4, accent, alpha);
+        scene.label(x0 + 32, cy - 2, FontId::Caption, INK, alpha, Align::Left, title);
+        scene.label(x0 + 32, cy + 22, FontId::Micro, MUTED, alpha, Align::Left, subtitle);
+        if chevron {
+            scene.pill(x1 - 26, cy - 8, x1 - 20, cy + 1, 3, MUTED, alpha);
+            scene.pill(x1 - 26, cy - 1, x1 - 20, cy + 8, 3, MUTED, alpha);
+        }
+    }
+
+    /// Config rows are derived, not hard-coded: Wi-Fi, then one per controller,
+    /// then Add. `config_rows` is the single source of truth for how many there
+    /// are, so drawing, scrolling and hit testing cannot disagree.
+    fn config_rows(&self) -> usize {
+        1 + self.settings.n_controllers + 1
+    }
+
+    fn draw_config(&mut self, scene: &mut Scene, state: &State, alpha: u8) {
+        self.draw_back(scene, alpha);
+        scene.label(CX, 69, FontId::Body, INK, alpha, Align::Center, "CONFIGURATION");
+
+        // The panel's own address, which is what you need when something else has
+        // to reach it - and the first thing to check when nothing works.
+        let mut panel = Buf::<32>::new();
+        match state.local_ip {
+            Some(ip) => {
+                let _ = write!(panel, "THIS PANEL {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+            }
+            None => {
+                let _ = write!(panel, "THIS PANEL \u{b7} NO ADDRESS YET");
+            }
+        }
+        scene.label(CX, 100, FontId::Micro, MUTED, alpha, Align::Center, panel.as_str());
+
+        let total = self.config_rows();
+        let first = (self.menu_scroll / l::MENU_PITCH) as usize;
+        let shift = -(self.menu_scroll % l::MENU_PITCH);
+        for slot in 0..l::MENU_MAX_ROWS + 1 {
+            let row = first + slot;
+            if row >= total {
+                break;
+            }
+            let cy = l::MENU_FIRST_CY + slot as i32 * l::MENU_PITCH + shift;
+            if cy + l::MENU_HALF_H < 118 || cy - l::MENU_HALF_H > 470 {
+                continue;
+            }
+
+            if row == 0 {
+                let mut value = Buf::<40>::new();
+                if self.settings.ssid.is_empty() {
+                    let _ = write!(value, "NOT SET \u{b7} TAP TO CHOOSE");
+                } else {
+                    let _ = write!(value, "{}", self.settings.ssid.as_str());
+                }
+                let accent = match state.link {
+                    Link::Online => C_RUN,
+                    Link::Connecting => C_FORCE,
+                    Link::Offline => C_CANCEL,
+                };
+                self.menu_row(scene, cy, accent, "WI-FI", value.as_str(), alpha, true);
+            } else if row <= self.settings.n_controllers {
+                let index = row - 1;
+                let controller = self.settings.controllers[index];
+                let mut title = Buf::<32>::new();
+                let ip = controller.ip;
+                let _ = write!(title, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                let mut sub = Buf::<40>::new();
+                // Online state comes from the live model, matched by address, so
+                // it stays right when controllers are reordered.
+                let online = state.controller_ips[..state.n_controllers]
+                    .iter()
+                    .position(|a| *a == ip)
+                    .map(|i| state.controller_online[i])
+                    .unwrap_or(false);
+                let _ = write!(
+                    sub,
+                    "RAINBIRD \u{b7} {} \u{b7} {}",
+                    controller.user.as_str(),
+                    if online { "ONLINE" } else { "OFFLINE" }
+                );
+                self.menu_row(
+                    scene,
+                    cy,
+                    if online { C_RUN } else { C_CANCEL },
+                    title.as_str(),
+                    sub.as_str(),
+                    alpha,
+                    true,
+                );
+            } else {
+                self.menu_row(
+                    scene,
+                    cy,
+                    C_CONFIG,
+                    "ADD CONTROLLER",
+                    "ENTER AN IP ADDRESS",
+                    alpha,
+                    false,
+                );
+            }
+        }
+
+        self.draw_scrollbar(
+            scene,
+            self.menu_scroll,
+            l::MENU_MAX_ROWS,
+            l::MENU_PITCH,
+            total,
+            l::MENU_FIRST_CY - l::MENU_HALF_H,
+            l::MENU_FIRST_CY + (l::MENU_MAX_ROWS as i32 - 1) * l::MENU_PITCH + l::MENU_HALF_H,
+            C_CONFIG,
+            alpha,
         );
     }
 

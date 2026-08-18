@@ -19,6 +19,7 @@ mod font;
 mod gfx;
 mod model;
 mod net;
+mod store;
 mod touch;
 mod ui;
 
@@ -115,6 +116,25 @@ fn main() -> ! {
     lcd.set_brightness(0);
     lcd.fill_black();
 
+    // Settings come off flash before the radio starts, so the credentials the
+    // radio is handed are the saved ones rather than whatever was compiled in.
+    let mut store = store::Store::new(p.FLASH);
+    let (settings, restored) = store.load();
+    esp_println::println!(
+        "store: restored={} ssid=\"{}\" controllers={}",
+        restored as u8,
+        settings.ssid.as_str(),
+        settings.n_controllers
+    );
+    if !restored {
+        // First boot, or an unreadable sector: persist the compiled-in defaults
+        // so the panel has a record of its own from here on.
+        match store.save(&settings) {
+            Ok(()) => esp_println::println!("store: seeded defaults into flash"),
+            Err(e) => esp_println::println!("store: save failed: {e}"),
+        }
+    }
+
     // The Wi-Fi blobs need a heap and a scheduler, and the scheduler MUST be
     // started before the radio is initialized. This is why the firmware is no
     // longer strictly RTOS-free: esp-radio requires esp-rtos. The render loop
@@ -150,6 +170,8 @@ fn main() -> ! {
     };
 
     let mut ui = Ui::new();
+    // The UI reads persisted settings directly, so give it the loaded copy.
+    ui.settings = settings;
     let mut scene = Scene::new();
     let mut touch = Touch::new();
 
@@ -337,6 +359,8 @@ fn main() -> ! {
                     ui::Screen::Running => "run",
                     ui::Screen::Detail => "detail",
                     ui::Screen::Info => "info",
+                    ui::Screen::Extras => "extras",
+                    ui::Screen::Config => "config",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
