@@ -318,6 +318,7 @@ pub struct Ui {
     observed_run_total_s: u32,
     /// Screen that opened the full timer; makes Back a true stack pop.
     run_return: Screen,
+    run_finished: bool,
     dragging_list: bool,
     list_start_y: i32,
     list_start_offset: i32,
@@ -359,6 +360,7 @@ impl Ui {
             last_running: false,
             observed_run_total_s: 0,
             run_return: Screen::Force,
+            run_finished: false,
             dragging_list: false,
             list_start_y: 0,
             list_start_offset: 0,
@@ -484,7 +486,13 @@ impl Ui {
                     Target::Inspect => C_INSPECT,
                     Target::Force => C_FORCE,
                     Target::Go => C_RUN,
-                    Target::Cancel => C_CANCEL,
+                    Target::Cancel => {
+                        if state.running {
+                            C_CANCEL
+                        } else {
+                            C_RUN
+                        }
+                    }
                     Target::Info => C_INFO,
                     _ => self.screen.accent(),
                 };
@@ -510,6 +518,7 @@ impl Ui {
                     }
                     Target::RunningBadge => {
                         self.run_return = self.screen;
+                        self.run_finished = false;
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::None
                     }
@@ -535,6 +544,7 @@ impl Ui {
                             return Action::None;
                         };
                         self.run_return = Screen::Force;
+                        self.run_finished = false;
                         self.start_wipe(Screen::Running, x, y, now_ms);
                         Action::Trigger {
                             relay: relay.id,
@@ -544,18 +554,20 @@ impl Ui {
                         }
                     }
                     Target::Cancel => {
-                        // Back to Force, where the run was started - cancelling is
-                        // usually a prelude to starting a different one, and being
-                        // thrown out to Home means navigating back in every time.
-                        // The red disc is the cancel's own feedback.
+                        // Cancel and Done both pop the timer's remembered caller.
+                        // Only an active run needs the network stop operation.
                         self.wipe = Some(Wipe {
-                            to: Screen::Force,
+                            to: self.run_return,
                             x,
                             y,
                             born_ms: now_ms,
-                            color: C_CANCEL,
+                            color: if state.running { C_CANCEL } else { C_RUN },
                         });
-                        Action::Stop
+                        if state.running {
+                            Action::Stop
+                        } else {
+                            Action::None
+                        }
                     }
                     Target::Slider => Action::None,
                     Target::List => Action::None,
@@ -698,9 +710,8 @@ impl Ui {
         // steals navigation. The persistent badge is the explicit way back in.
         let ended = !state.running && self.last_running;
         self.last_running = state.running;
-
-        if self.wipe.is_none() && ended && self.screen == Screen::Running {
-            self.start_wipe(Screen::Home, CX, CY, now_ms);
+        if ended && self.screen == Screen::Running {
+            self.run_finished = true;
         }
     }
 
@@ -711,7 +722,7 @@ impl Ui {
         self.wipe.is_some()
             || self.ripples.iter().any(|r| r.active)
             || self.bubbles.iter().any(|b| b.active)
-            || self.screen == Screen::Running
+            || (self.screen == Screen::Running && !self.run_finished)
             || self.last_running
             || self.dragging_slider
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
@@ -1684,7 +1695,9 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            if name.len > 0 {
+            if self.run_finished && !state.running {
+                "COMPLETE"
+            } else if name.len > 0 {
                 name.as_str()
             } else {
                 "WATERING"
@@ -1706,7 +1719,16 @@ impl Ui {
         );
 
         let (x0, y0, x1, y1) = l::CANCEL;
-        scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, C_CANCEL, alpha);
+        let finished = !state.running && self.run_finished;
+        scene.pill(
+            x0,
+            y0,
+            x1,
+            y1,
+            (y1 - y0) / 2,
+            if finished { C_RUN } else { C_CANCEL },
+            alpha,
+        );
         scene.label(
             CX,
             (y0 + y1) / 2 + 14,
@@ -1714,7 +1736,7 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            "CANCEL",
+            if finished { "DONE!" } else { "CANCEL" },
         );
 
         if state.queued > 0 {
