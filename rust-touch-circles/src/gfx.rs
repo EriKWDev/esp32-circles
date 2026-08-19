@@ -205,6 +205,39 @@ impl Text {
     }
 }
 
+/// A scratch buffer for formatting a label, capped at what a `Text` can hold.
+/// Overflow is dropped rather than panicking - a clipped caption is better than a
+/// dead panel.
+pub struct TextBuf {
+    bytes: [u8; MAX_TEXT],
+    len: usize,
+}
+
+impl TextBuf {
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; MAX_TEXT],
+            len: 0,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Write for TextBuf {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            if self.len < MAX_TEXT {
+                self.bytes[self.len] = b;
+                self.len += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Align {
     Left,

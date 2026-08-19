@@ -14,6 +14,7 @@
 use esp_backtrace as _;
 esp_bootloader_esp_idf::esp_app_desc!();
 
+mod breakout;
 mod bubbles;
 mod display;
 mod font;
@@ -563,6 +564,7 @@ fn main() -> ! {
                     ui::Screen::Confirm => "confirm",
                     ui::Screen::Bubbles => "bubbles",
                     ui::Screen::Pong => "pong",
+                    ui::Screen::Breakout => "breakout",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
