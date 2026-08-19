@@ -1139,7 +1139,7 @@ impl Ui {
                             if x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1 {
                                 self.pomodoro.reset_phase();
                             } else {
-                                self.pomodoro.toggle();
+                                self.pomodoro.press(x, y);
                             }
                         } else {
                             self.game.press(x, y, now_ms);
@@ -1320,6 +1320,8 @@ impl Ui {
                     }
                 } else if self.interactive_screen() == Screen::Match3 {
                     self.match3.drag(x, y, now_ms);
+                } else if self.interactive_screen() == Screen::Pomodoro {
+                    self.pomodoro.drag(x, y);
                 } else if self.interactive_screen() == Screen::Bubbles {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.game.press(x, y, now_ms);
@@ -1338,6 +1340,9 @@ impl Ui {
                 }
                 if self.interactive_screen() == Screen::Match3 {
                     self.match3.release();
+                }
+                if self.interactive_screen() == Screen::Pomodoro {
+                    self.pomodoro.release();
                 }
                 // 2048: the direction of the whole gesture, decided on release, so
                 // a wandering finger still produces one clean move.
