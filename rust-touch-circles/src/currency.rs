@@ -8,7 +8,7 @@
 
 use core::fmt::Write as _;
 
-use crate::fetch::{json_num, micros};
+use crate::fetch::{json_num, micros, scope};
 use crate::font::FontId;
 use crate::gfx::{Align, Scene, TextBuf, W, rgb};
 use crate::net::{Buf, Net};
@@ -93,6 +93,9 @@ impl Currency {
             }
             Stage::Fetching => {
                 if let Some(text) = net.fetch.take() {
+                    // Within `rates`, so a code can never be read off one of the
+                    // metadata fields above it.
+                    let rates = scope(text, "rates");
                     for index in 0..ROWS {
                         let code = if index == CUSTOM {
                             self.custom.as_str()
@@ -102,7 +105,7 @@ impl Currency {
                         let (price, per) = if code.is_empty() {
                             (0, 1)
                         } else {
-                            quote(text, code)
+                            quote(rates, code)
                         };
                         self.price[index] = price;
                         self.per[index] = per;

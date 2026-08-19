@@ -560,6 +560,10 @@ impl Net {
 
         // DHCP: adopt the lease when it arrives, drop the address when it is
         // lost, so the UI's link indicator reflects reality.
+        // The lease borrows the socket, so what is wanted from it is copied out
+        // before anything else touches the set.
+        let mut offered = [Ipv4Address::UNSPECIFIED; 3];
+        let mut n_offered = 0;
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {
             Some(dhcpv4::Event::Configured(cfg)) => {
@@ -571,6 +575,12 @@ impl Net {
                 if let Some(router) = cfg.router {
                     let _ = self.iface.routes_mut().add_default_ipv4_route(router);
                 }
+                for server in cfg.dns_servers.iter() {
+                    if n_offered < offered.len() {
+                        offered[n_offered] = *server;
+                        n_offered += 1;
+                    }
+                }
             }
             Some(dhcpv4::Event::Deconfigured) => {
                 self.ip = None;
@@ -578,6 +588,10 @@ impl Net {
                 self.iface.routes_mut().remove_default_ipv4_route();
             }
             None => {}
+        }
+        if n_offered > 0 {
+            self.fetch
+                .adopt_dhcp_servers(&mut self.sockets, &offered[..n_offered]);
         }
         self.fetch.step(&mut self.sockets, &mut self.iface, now_ms);
     }

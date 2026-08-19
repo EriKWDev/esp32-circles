@@ -11,7 +11,7 @@
 
 use core::fmt::Write as _;
 
-use crate::fetch::{json_array, json_num, json_str, tenths};
+use crate::fetch::{json_array, json_num, json_str, scope, tenths};
 use crate::font::FontId;
 use crate::gfx::{Align, Scene, TextBuf, W, muted, rgb};
 use crate::net::{Buf, Net};
@@ -180,13 +180,16 @@ impl Weather {
 
     fn absorb_forecast(&mut self, text: &str) {
         self.n = 0;
-        // The four arrays are parallel and in a fixed order, so they are walked
+        // Only within `daily`: the units block above it repeats every one of these
+        // key names.
+        let daily = scope(text, "daily");
+        // The five arrays are parallel and in a fixed order, so they are walked
         // together rather than indexed.
-        let mut dates = json_array(text, "time");
-        let mut codes = json_array(text, "weather_code");
-        let mut highs = json_array(text, "temperature_2m_max");
-        let mut lows = json_array(text, "temperature_2m_min");
-        let mut rains = json_array(text, "precipitation_sum");
+        let mut dates = json_array(daily, "time");
+        let mut codes = json_array(daily, "weather_code");
+        let mut highs = json_array(daily, "temperature_2m_max");
+        let mut lows = json_array(daily, "temperature_2m_min");
+        let mut rains = json_array(daily, "precipitation_sum");
         while self.n < MAX_DAYS {
             let (Some(date), Some(code), Some(high), Some(low), Some(rain)) = (
                 dates.next(),
@@ -211,6 +214,7 @@ impl Weather {
             };
             self.n += 1;
         }
+        esp_println::println!("weather: {} days", self.n);
         if self.n == 0 {
             self.stage = Stage::Failed;
             return;

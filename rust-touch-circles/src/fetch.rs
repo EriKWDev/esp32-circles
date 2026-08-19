@@ -27,10 +27,15 @@ use crate::net::Buf;
 const BODY: usize = 6144;
 const TIMEOUT_MS: u32 = 12_000;
 
-pub const DNS_SERVERS: [IpAddress; 2] = [
+/// Public resolvers, tried in this order. The list is longer than one on purpose:
+/// smoltcp caps it at DNS_MAX_SERVER_COUNT, which defaults to *one* and silently
+/// truncates the rest - hence the dns-max-server-count-4 feature.
+const PUBLIC_DNS: [IpAddress; 2] = [
     IpAddress::Ipv4(Ipv4Address::new(1, 1, 1, 1)),
     IpAddress::Ipv4(Ipv4Address::new(8, 8, 8, 8)),
 ];
+/// Room for both of those plus what DHCP offers.
+const MAX_DNS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -64,7 +69,7 @@ impl Fetch {
         tx_buf: &'static mut [u8],
         queries: &'static mut [Option<dns::DnsQuery>],
     ) -> Self {
-        let dns = sockets.add(dns::Socket::new(&DNS_SERVERS, queries));
+        let dns = sockets.add(dns::Socket::new(&PUBLIC_DNS, queries));
         let tcp = sockets.add(tcp::Socket::new(
             tcp::SocketBuffer::new(rx_buf),
             tcp::SocketBuffer::new(tx_buf),
@@ -81,6 +86,24 @@ impl Fetch {
             started_ms: 0,
             seq: 0,
         }
+    }
+
+    /// Put the router's own resolver at the end of the list. A network that
+    /// blocks outbound port 53 - which is common enough - can still be resolved
+    /// through the resolver it handed out itself.
+    pub fn adopt_dhcp_servers(&mut self, sockets: &mut SocketSet<'static>, offered: &[Ipv4Address]) {
+        let mut servers = [IpAddress::Ipv4(Ipv4Address::UNSPECIFIED); MAX_DNS];
+        let mut n = 0;
+        for server in PUBLIC_DNS.iter().copied().chain(offered.iter().map(|ip| IpAddress::Ipv4(*ip))) {
+            if n < MAX_DNS {
+                servers[n] = server;
+                n += 1;
+            }
+        }
+        esp_println::println!("dns: {n} servers, last={}", servers[n - 1]);
+        sockets
+            .get_mut::<dns::Socket>(self.dns)
+            .update_servers(&servers[..n]);
     }
 
     pub fn busy(&self) -> bool {
@@ -123,7 +146,10 @@ impl Fetch {
                 self.query = Some(handle);
                 self.phase = Phase::Resolving;
             }
-            Err(_) => self.phase = Phase::Failed,
+            Err(_) => {
+                esp_println::println!("fetch: cannot start lookup of {host}");
+                self.phase = Phase::Failed;
+            }
         }
     }
 
@@ -148,6 +174,12 @@ impl Fetch {
             return;
         }
         if now_ms.wrapping_sub(self.started_ms) > TIMEOUT_MS {
+            let state = sockets.get::<tcp::Socket>(self.tcp).state();
+            esp_println::println!(
+                "fetch: timed out ({}), tcp={state}, got={}",
+                if self.phase == Phase::Resolving { "resolving" } else { "talking" },
+                self.got
+            );
             sockets.get_mut::<tcp::Socket>(self.tcp).abort();
             self.phase = Phase::Failed;
             return;
@@ -166,6 +198,7 @@ impl Fetch {
                     self.query = None;
                     match addresses.first() {
                         Some(&addr) => {
+                            esp_println::println!("fetch: resolved to {addr}");
                             self.phase = Phase::Talking;
                             self.connect(sockets, iface, addr, now_ms);
                         }
@@ -193,20 +226,33 @@ impl Fetch {
                 }
             }
         }
-        if socket.can_recv() && self.got < BODY {
+        // Drain everything available now rather than a slice per frame: the reply
+        // is only complete once the buffer is empty and the peer has finished, and
+        // that test would otherwise be taken against a buffer still holding data.
+        while socket.can_recv() && self.got < BODY {
             let body = &mut self.body;
             let got = self.got;
-            if let Ok(read) = socket.recv(|data| {
+            let Ok(read) = socket.recv(|data| {
                 let take = data.len().min(BODY - got);
                 body[got..got + take].copy_from_slice(&data[..take]);
                 (take, take)
-            }) {
-                self.got += read;
+            }) else {
+                break;
+            };
+            if read == 0 {
+                break;
             }
+            self.got += read;
         }
-        // The server closing is what marks the end: these replies carry no
-        // content length worth trusting and the request asked for close.
-        if self.sent && !socket.is_active() {
+        // The server closing is what marks the end - the request asked for close,
+        // and these replies are not all framed by a length header.
+        //
+        // `may_recv` is the test, not `is_active`: a peer that has sent its FIN
+        // leaves the socket in CLOSE-WAIT, which counts as active, so the first
+        // version of this waited out its whole timeout on top of a reply that had
+        // arrived complete. `may_recv` goes false exactly when the remote is done
+        // and the buffer is drained.
+        if self.sent && !socket.may_recv() {
             socket.abort();
             let ok = self.got > 0 && status_ok(&self.body[..self.got]);
             esp_println::println!("fetch: {} bytes, ok={}", self.got, ok);
@@ -264,10 +310,25 @@ fn parse_ipv4(host: &str) -> Option<Ipv4Address> {
     Some(Ipv4Address::from(octets))
 }
 
-/// The JSON these APIs return is flat and known, so the whole of it is not worth
-/// parsing: find the key, read what follows. Nothing here recurses into objects,
-/// which is the one thing that would make it wrong - and none of the values we
-/// want are nested under a repeated key.
+/// The JSON these APIs return is shallow and known, so the whole of it is not
+/// worth parsing: find the key, read what follows.
+///
+/// Nothing here tracks nesting, so a key that occurs twice is a trap - and both
+/// APIs set it. Open-meteo precedes `daily` with a `daily_units` object carrying
+/// the same key names, so a flat search for `time` finds the string "iso8601"
+/// instead of the array of dates. `scope` is the answer: narrow to the object
+/// wanted first, then read keys out of that.
+
+/// The text from just inside `"key":{` onwards, for reading keys within one
+/// object rather than the whole document.
+pub fn scope<'a>(text: &'a str, key: &str) -> &'a str {
+    let mut needle = Buf::<32>::new();
+    let _ = write!(needle, "\"{key}\":{{");
+    match text.find(needle.as_str()) {
+        Some(at) => &text[at + needle.len()..],
+        None => text,
+    }
+}
 pub fn json_str<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let after = field(text, key)?;
     let rest = after.strip_prefix('"')?;
