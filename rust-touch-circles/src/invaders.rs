@@ -29,6 +29,9 @@ const BOMB_SPEED: i32 = 190 * Q;
 /// Sideways fleet speed for wave one; each wave adds a share of it.
 const FLEET_SPEED: i32 = 34 * Q;
 const FLEET_DROP: i32 = 16;
+/// Pixels a second for that drop - fast enough to feel like a step, slow enough
+/// to be a movement rather than a jump.
+const DROP_SPEED: i32 = 72;
 const FIRE_EVERY_MS: u32 = 420;
 const BOMB_EVERY_MS: u32 = 900;
 const LIVES: u8 = 3;
@@ -91,7 +94,9 @@ pub struct Invaders {
     alive: [[bool; COLS]; ROWS],
     /// Fleet origin: the top-left invader's centre.
     fleet_x: i32,
+    /// Q, and eased toward `fleet_drop_to`: the step down is a glide, not a jump.
     fleet_y: i32,
+    fleet_drop_to: i32,
     fleet_dir: i32,
     ship_x: i32,
     shots: [Shot; MAX_SHOTS],
@@ -109,7 +114,8 @@ impl Invaders {
         Self {
             alive: [[true; COLS]; ROWS],
             fleet_x: (W as i32 - (COLS as i32 - 1) * CELL_W) / 2,
-            fleet_y: FLEET_TOP,
+            fleet_y: FLEET_TOP * Q,
+            fleet_drop_to: FLEET_TOP * Q,
             fleet_dir: 1,
             ship_x: W as i32 / 2,
             shots: [NO_SHOT; MAX_SHOTS],
@@ -169,7 +175,14 @@ impl Invaders {
             || rightmost > W as i32 - INVADER_R - 8 && self.fleet_dir > 0
         {
             self.fleet_dir = -self.fleet_dir;
-            self.fleet_y += FLEET_DROP;
+            // Only the target moves here; the fleet slides down to it over the next
+            // few frames, so reversing and dropping reads as one diagonal move
+            // rather than a teleport.
+            self.fleet_drop_to += FLEET_DROP * Q;
+        }
+
+        if self.fleet_y < self.fleet_drop_to {
+            self.fleet_y = (self.fleet_y + DROP_SPEED * Q * dt / 1000).min(self.fleet_drop_to);
         }
 
         // Firing.
@@ -214,7 +227,7 @@ impl Invaders {
                 hit = true;
             }
         }
-        let lowest = self.fleet_y + self.lowest_row() * CELL_H;
+        let lowest = self.fleet_y / Q + self.lowest_row() * CELL_H;
         if hit || lowest > SHIP_Y - SHIP_R - INVADER_R {
             self.lives = self.lives.saturating_sub(1);
             bubbles.spawn(
@@ -230,7 +243,7 @@ impl Invaders {
             } else {
                 let (wave, lives, score) = (self.wave, self.lives, self.score);
                 let alive = self.alive;
-                let (fx, fy) = (self.fleet_x, self.fleet_y);
+                let (fx, fy, drop_to) = (self.fleet_x, self.fleet_y, self.fleet_drop_to);
                 *self = Self::new();
                 self.wave = wave;
                 self.lives = lives;
@@ -238,6 +251,7 @@ impl Invaders {
                 self.alive = alive;
                 self.fleet_x = fx;
                 self.fleet_y = fy;
+                self.fleet_drop_to = drop_to;
                 self.ship_x = ship_x;
                 self.settle_ms = now_ms + 700;
             }
@@ -315,7 +329,7 @@ impl Invaders {
     fn invader_at(&self, row: usize, col: usize) -> (i32, i32) {
         (
             self.fleet_x + col as i32 * CELL_W,
-            self.fleet_y + row as i32 * CELL_H,
+            self.fleet_y / Q + row as i32 * CELL_H,
         )
     }
 

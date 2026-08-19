@@ -29,6 +29,20 @@ const LIVES: u8 = 3;
 /// Grace after a collision, so a rock sitting on the spawn point cannot take
 /// every life at once.
 const SPAWN_GRACE_MS: u32 = 1_200;
+/// How far from the centre a wave appears: clear of the ship, comfortably inside
+/// the screen.
+const SPAWN_RING: i32 = 130;
+/// Eight unit directions, as hundredths - a circle without trigonometry.
+const RING: [(i32, i32); 8] = [
+    (0, -100),
+    (71, -71),
+    (100, 0),
+    (71, 71),
+    (0, 100),
+    (-71, 71),
+    (-100, 0),
+    (-71, -71),
+];
 
 pub struct Palette {
     pub rocks: [u16; 3],
@@ -150,22 +164,29 @@ impl Asteroids {
         self.spawn_wave(now_ms);
     }
 
-    /// Four rocks, plus one per level, started around the edges so none of them
-    /// begins on top of the ship.
+    /// Four rocks, plus one per level, on a ring around the ship.
+    ///
+    /// Not on the screen border, which is where these started: a rock sitting on
+    /// the edge is half wrapped around it and awkward to hit, so they begin well
+    /// inside the play area but clear of the middle, where the ship is.
     fn spawn_wave(&mut self, now_ms: u32) {
         self.rocks = [NO_ROCK; MAX_ROCKS];
         let count = (4 + self.level as usize).min(MAX_ROCKS);
         for index in 0..count {
-            // Spread around the border, with the clock nudging the drift so a wave
-            // is never quite a repeat.
-            let along = index as i32 * (2 * (W as i32 + H as i32)) / count as i32;
-            let (x, y) = border_point(along);
+            let (cx, cy) = (W as i32 / 2, H as i32 / 2);
+            // Eight points around the ring, so a wave is spread rather than
+            // clustered, with the clock choosing where the pattern starts.
+            let step = index as i32 + (now_ms as i32 / 97);
+            let (ox, oy) = RING[(step as usize) % RING.len()];
             let seed = now_ms as i32 / 3 + index as i32 * 37;
+            let radius = SPAWN_RING + (seed % 3) * 18;
             self.rocks[index] = Rock {
-                x: x * Q,
-                y: y * Q,
-                vx: ((seed % 7) - 3) * 16 * Q / 8,
-                vy: (((seed / 7) % 7) - 3) * 16 * Q / 8,
+                x: (cx + ox * radius / 100) * Q,
+                y: (cy + oy * radius / 100) * Q,
+                // Drift across the screen rather than creeping: the first version
+                // worked out to about six pixels a second.
+                vx: (((seed % 5) - 2) * 20 + 12) * Q,
+                vy: ((((seed / 5) % 5) - 2) * 20 - 12) * Q,
                 size: Some(0),
             };
         }
@@ -387,21 +408,6 @@ impl Asteroids {
             Align::Center,
             line.as_str(),
         );
-    }
-}
-
-/// A point on the screen border, `along` pixels clockwise from the top left.
-fn border_point(along: i32) -> (i32, i32) {
-    let (w, h) = (W as i32, H as i32);
-    let along = along.rem_euclid(2 * (w + h));
-    if along < w {
-        (along, 0)
-    } else if along < w + h {
-        (w - 1, along - w)
-    } else if along < 2 * w + h {
-        (w - 1 - (along - w - h), h - 1)
-    } else {
-        (0, h - 1 - (along - 2 * w - h))
     }
 }
 
