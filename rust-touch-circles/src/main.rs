@@ -33,6 +33,8 @@ mod net;
 mod pomodoro;
 mod pong;
 mod simon;
+mod snake;
+mod spacewar;
 mod store;
 mod touch;
 mod ui;
@@ -686,6 +688,8 @@ fn main() -> ! {
                     ui::Screen::Calc => "calc",
                     ui::Screen::Weather => "weather",
                     ui::Screen::Currency => "currency",
+                    ui::Screen::Snake => "snake",
+                    ui::Screen::Spacewar => "spacewar",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

@@ -57,6 +57,7 @@ const C_CAT: u16 = rgb(255, 190, 120);
 const C_CALC: u16 = rgb(232, 140, 60);
 const C_WEATHER: u16 = rgb(96, 176, 255);
 const C_CURRENCY: u16 = rgb(120, 220, 170);
+const C_SNAKE: u16 = rgb(120, 230, 140);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -363,6 +364,8 @@ pub enum Screen {
     Calc,
     Weather,
     Currency,
+    Snake,
+    Spacewar,
 }
 
 impl Screen {
@@ -398,7 +401,9 @@ impl Screen {
             | Screen::Cat
             | Screen::Calc
             | Screen::Weather
-            | Screen::Currency => rgb(0, 0, 0),
+            | Screen::Currency
+            | Screen::Snake
+            | Screen::Spacewar => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -430,6 +435,8 @@ impl Screen {
             Screen::Calc => C_CALC,
             Screen::Weather => C_WEATHER,
             Screen::Currency => C_CURRENCY,
+            Screen::Snake => C_SNAKE,
+            Screen::Spacewar => crate::spacewar::P1,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -782,6 +789,8 @@ pub struct Ui {
     calc: crate::calc::Calc,
     weather: crate::weather::Weather,
     currency: crate::currency::Currency,
+    snake: crate::snake::Snake,
+    spacewar: crate::spacewar::Spacewar,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
     pong_last_ms: u32,
@@ -906,6 +915,8 @@ impl Ui {
             calc: crate::calc::Calc::new(),
             weather: crate::weather::Weather::new(),
             currency: crate::currency::Currency::new(),
+            snake: crate::snake::Snake::new(),
+            spacewar: crate::spacewar::Spacewar::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
@@ -1189,7 +1200,12 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        if self.interactive_screen() == Screen::Pong {
+                        if self.interactive_screen() == Screen::Snake {
+                            self.snake.tap(now_ms);
+                            self.snake.press(x, y);
+                        } else if self.interactive_screen() == Screen::Spacewar {
+                            self.spacewar.press(x, y, now_ms);
+                        } else if self.interactive_screen() == Screen::Pong {
                             self.pong.touch(x, y);
                         } else if self.interactive_screen() == Screen::Breakout {
                             self.breakout.touch(x);
@@ -1415,7 +1431,15 @@ impl Ui {
                 // contacts near a live circle's origin, so a moving finger starts
                 // a new one roughly every fingertip's width. That is the original's
                 // behaviour, not an addition.
-                if self.interactive_screen() == Screen::Pong {
+                if self.interactive_screen() == Screen::Snake {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.snake.drag(x, y);
+                    }
+                } else if self.interactive_screen() == Screen::Spacewar {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.spacewar.drag(x, y);
+                    }
+                } else if self.interactive_screen() == Screen::Pong {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.pong.touch(x, y);
                     }
@@ -1456,6 +1480,13 @@ impl Ui {
                 }
                 if self.interactive_screen() == Screen::Pomodoro {
                     self.pomodoro.release();
+                }
+                if self.interactive_screen() == Screen::Snake {
+                    self.snake.release();
+                }
+                // Lifting off stops a turn; thrust stays latched.
+                if self.interactive_screen() == Screen::Spacewar {
+                    self.spacewar.release();
                 }
                 // 2048: the direction of the whole gesture, decided on release, so
                 // a wandering finger still produces one clean move.
@@ -1585,6 +1616,8 @@ impl Ui {
         self.pong_last_ms = now_ms;
         match self.interactive_screen() {
             Screen::Pong => self.pong.update(dt, now_ms, &mut self.game),
+            Screen::Snake => self.snake.update(now_ms, &mut self.game),
+            Screen::Spacewar => self.spacewar.update(dt, now_ms, &mut self.game),
             Screen::Breakout => self.breakout.update(dt, now_ms, &mut self.game),
             Screen::Invaders => self.invaders.update(dt, now_ms, &mut self.game),
             Screen::Asteroids => self.asteroids.update(dt, now_ms, &mut self.game),
@@ -1703,6 +1736,8 @@ impl Ui {
             // circle has faded.
             || self.game.active()
             || self.screen == Screen::Pong
+            || self.screen == Screen::Snake
+            || self.screen == Screen::Spacewar
             || self.screen == Screen::Breakout
             || self.screen == Screen::Invaders
             || self.screen == Screen::Asteroids
@@ -1800,6 +1835,8 @@ impl Ui {
                     | Screen::Calc
                     | Screen::Weather
                     | Screen::Currency
+                    | Screen::Snake
+                    | Screen::Spacewar
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2037,6 +2074,8 @@ impl Ui {
             | Screen::Calc
             | Screen::Weather
             | Screen::Currency
+            | Screen::Snake
+            | Screen::Spacewar
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2267,6 +2306,8 @@ impl Ui {
                 | Screen::Calc
                 | Screen::Weather
                 | Screen::Currency
+                | Screen::Snake
+                | Screen::Spacewar
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2343,6 +2384,14 @@ impl Ui {
             }
             Screen::Currency => {
                 self.currency.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Snake => {
+                self.snake.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Spacewar => {
+                self.spacewar.draw(scene, now_ms, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2649,6 +2698,8 @@ impl Ui {
         ("CALCULATOR", C_CALC, Screen::Calc),
         ("WEATHER", C_WEATHER, Screen::Weather),
         ("CURRENCY", C_CURRENCY, Screen::Currency),
+        ("MASKEN", C_SNAKE, Screen::Snake),
+        ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2845,6 +2896,12 @@ impl Ui {
                     }
                     if *screen == Screen::Currency {
                         self.currency.wake();
+                    }
+                    if *screen == Screen::Snake {
+                        self.snake.restart(now_ms);
+                    }
+                    if *screen == Screen::Spacewar {
+                        self.spacewar.restart();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
