@@ -4,8 +4,18 @@
 //! makes every off-board test a single array lookup, which is what keeps knight
 //! and sliding generation free of edge arithmetic and the bugs that come with it.
 //!
-//! The search is negamax with alpha-beta and iterative deepening, and it runs in
-//! slices. It has to: the think time goes up to twenty seconds and this is the
+//! The search is negamax with alpha-beta and iterative deepening, with a
+//! quiescence search at the leaves, killer moves and the previous iteration's best
+//! move driving the ordering. Quiescence is the one that matters most: without it
+//! a leaf can fall in the middle of a capture exchange, and the engine gives away
+//! a piece for nothing at the horizon. It plays out captures until the position is
+//! quiet before believing what it is looking at.
+//!
+//! Openings come from a small book of main lines rather than from search. Twenty
+//! seconds of this evaluation does not find the Ruy Lopez, and every book move is
+//! checked against the generator before it can be played.
+//!
+//! It runs in slices. It has to: the think time goes up to twenty seconds and this is the
 //! same thread that reads the touch panel and services Wi-Fi, so `think` returns
 //! after a fixed number of nodes and is called again next frame. The screen keeps
 //! animating and the controller keeps being polled while the machine considers.
@@ -42,17 +52,112 @@ const MAX_PLY: usize = 24;
 /// Nodes per call. The host manages thirteen million a second; this chip is two
 /// orders of magnitude slower, so a few hundred nodes is about one frame's worth
 /// of work - and the log reports the real rate per depth so it can be retuned.
-const NODES_PER_SLICE: u32 = 4_000;
-/// Ceiling on a doubled slice. Reached only when one root move has a large subtree,
-/// and a frame that long is only ever spent while the machine is visibly thinking.
-const MAX_SLICE: u32 = 40_000;
+const NODES_PER_SLICE: u32 = 3_000;
+/// Ceiling on a doubled slice. The doubling is what guarantees a root move
+/// eventually completes; the ceiling only stops it growing without bound.
+const MAX_SLICE: u32 = 60_000;
+/// How much more a depth costs than the one before it, roughly, with this ordering.
+/// Used to decide whether the next one is worth starting: a depth that will not
+/// finish is time spent for nothing, since only a completed depth is trusted.
+const DEPTH_COST_FACTOR: u32 = 4;
+/// Captures are followed this deep past the search horizon and no further. A
+/// capture sequence can be long, and an unbounded one makes the cost of a single
+/// leaf unpredictable, which is exactly what the slice budget cannot tolerate.
+const MAX_QUIESCE: usize = 6;
 /// Past this the evaluation has nothing more to give and the wait is not repaid.
 const MAX_DEPTH: u8 = 6;
 
 const VALUE: [i32; 7] = [0, 100, 320, 330, 500, 900, 20_000];
-/// A pawn's worth of preference for the middle, by rank and file distance from
-/// the centre - enough that the machine develops rather than shuffling.
-const CENTRE: [i32; 8] = [-20, -5, 5, 12, 12, 5, -5, -20];
+
+/// Where each piece wants to stand, in centipawns, written from white's side with
+/// rank 8 first. Black reads the same tables mirrored. This replaces a generic pull
+/// towards the centre, which valued a knight on the rim the same as a rook there
+/// and gave the machine no reason to castle or to push a pawn.
+const PST: [[i8; 64]; 7] = [
+    [0; 64],
+    // Pawn: advance, but not the ones in front of a castled king.
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, //
+        50, 50, 50, 50, 50, 50, 50, 50, //
+        10, 10, 20, 30, 30, 20, 10, 10, //
+        5, 5, 10, 25, 25, 10, 5, 5, //
+        0, 0, 0, 20, 20, 0, 0, 0, //
+        5, -5, -10, 0, 0, -10, -5, 5, //
+        5, 10, 10, -20, -20, 10, 10, 5, //
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ],
+    // Knight: the rim is poison.
+    [
+        -50, -40, -30, -30, -30, -30, -40, -50, //
+        -40, -20, 0, 0, 0, 0, -20, -40, //
+        -30, 0, 10, 15, 15, 10, 0, -30, //
+        -30, 5, 15, 20, 20, 15, 5, -30, //
+        -30, 0, 15, 20, 20, 15, 0, -30, //
+        -30, 5, 10, 15, 15, 10, 5, -30, //
+        -40, -20, 0, 5, 5, 0, -20, -40, //
+        -50, -40, -30, -30, -30, -30, -40, -50,
+    ],
+    // Bishop: long diagonals.
+    [
+        -20, -10, -10, -10, -10, -10, -10, -20, //
+        -10, 0, 0, 0, 0, 0, 0, -10, //
+        -10, 0, 5, 10, 10, 5, 0, -10, //
+        -10, 5, 5, 10, 10, 5, 5, -10, //
+        -10, 0, 10, 10, 10, 10, 0, -10, //
+        -10, 10, 10, 10, 10, 10, 10, -10, //
+        -10, 5, 0, 0, 0, 0, 5, -10, //
+        -20, -10, -10, -10, -10, -10, -10, -20,
+    ],
+    // Rook: the seventh rank, and the centre files.
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, //
+        5, 10, 10, 10, 10, 10, 10, 5, //
+        -5, 0, 0, 0, 0, 0, 0, -5, //
+        -5, 0, 0, 0, 0, 0, 0, -5, //
+        -5, 0, 0, 0, 0, 0, 0, -5, //
+        -5, 0, 0, 0, 0, 0, 0, -5, //
+        -5, 0, 0, 0, 0, 0, 0, -5, //
+        0, 0, 0, 5, 5, 0, 0, 0,
+    ],
+    // Queen: no early adventures.
+    [
+        -20, -10, -10, -5, -5, -10, -10, -20, //
+        -10, 0, 0, 0, 0, 0, 0, -10, //
+        -10, 0, 5, 5, 5, 5, 0, -10, //
+        -5, 0, 5, 5, 5, 5, 0, -5, //
+        0, 0, 5, 5, 5, 5, 0, -5, //
+        -10, 5, 5, 5, 5, 5, 0, -10, //
+        -10, 0, 5, 0, 0, 0, 0, -10, //
+        -20, -10, -10, -5, -5, -10, -10, -20,
+    ],
+    // King, while there are still pieces about: behind the pawns, castled.
+    [
+        -30, -40, -40, -50, -50, -40, -40, -30, //
+        -30, -40, -40, -50, -50, -40, -40, -30, //
+        -30, -40, -40, -50, -50, -40, -40, -30, //
+        -30, -40, -40, -50, -50, -40, -40, -30, //
+        -20, -30, -30, -40, -40, -30, -30, -20, //
+        -10, -20, -20, -20, -20, -20, -20, -10, //
+        20, 20, 0, 0, 0, 0, 20, 20, //
+        20, 30, 10, 0, 0, 10, 30, 20,
+    ],
+];
+
+/// The king wants the opposite thing once the board empties, so it has a second
+/// table - a king that hides in the corner in a pawn endgame loses it.
+const KING_END: [i8; 64] = [
+    -50, -40, -30, -20, -20, -30, -40, -50, //
+    -30, -20, -10, 0, 0, -10, -20, -30, //
+    -30, -10, 20, 30, 30, 20, -10, -30, //
+    -30, -10, 30, 40, 40, 30, -10, -30, //
+    -30, -10, 30, 40, 40, 30, -10, -30, //
+    -30, -10, 20, 30, 30, 20, -10, -30, //
+    -30, -30, 0, 0, 0, 0, -30, -30, //
+    -50, -30, -30, -30, -30, -30, -30, -50,
+];
+
+/// Non-pawn material below which the endgame king table takes over.
+const ENDGAME_MATERIAL: i32 = 1_300;
 
 const OFFSETS: [[i8; 8]; 7] = [
     [0; 8],
@@ -150,6 +255,9 @@ pub struct Chess {
     n_hints: usize,
     /// Search state, kept between slices.
     started_ms: u32,
+    /// When the depth being searched began, so the next one can be costed before it
+    /// is started.
+    depth_started_ms: u32,
     deadline_ms: u32,
     depth: u8,
     best: Move,
@@ -164,6 +272,11 @@ pub struct Chess {
     slice_budget: u32,
     /// Set deep in the search when the budget runs out, unwinding it at once.
     aborted: bool,
+    /// Two quiet moves per ply that have caused a cutoff before.
+    killers: [[Move; 2]; MAX_PLY],
+    /// The game so far, for matching against the opening book.
+    history: [(u8, u8); 64],
+    n_history: usize,
     /// The reply being played out, so the board shows it a moment after the
     /// machine has decided rather than in the same frame the finger lifted.
     show_at_ms: u32,
@@ -193,6 +306,7 @@ impl Chess {
             hints: [0; 32],
             n_hints: 0,
             started_ms: 0,
+            depth_started_ms: 0,
             deadline_ms: 0,
             depth: 0,
             best: NO_MOVE,
@@ -203,6 +317,9 @@ impl Chess {
             root_alpha: -1_000_000,
             slice_budget: NODES_PER_SLICE,
             aborted: false,
+            killers: [[NO_MOVE; 2]; MAX_PLY],
+            history: [(0, 0); 64],
+            n_history: 0,
             show_at_ms: 0,
             outcome: Outcome::Playing,
         }
@@ -270,6 +387,7 @@ impl Chess {
         self.outcome = Outcome::Playing;
         self.searching = false;
         self.has_game = true;
+        self.n_history = 0;
         if self.human_white {
             self.phase = Phase::HumanTurn;
         } else {
@@ -333,6 +451,7 @@ impl Chess {
             .copied()
             .find(|m| m.from == from && m.to == square)
         {
+            self.record(chosen);
             let _ = self.make(chosen);
             self.picked = None;
             self.n_hints = 0;
@@ -357,9 +476,69 @@ impl Chess {
         }
     }
 
+    /// A reply from the book, if the game so far is still in one of its lines.
+    ///
+    /// Every candidate is checked against the generator. The book is written by
+    /// hand, so a typo is a question of when rather than whether, and an illegal
+    /// move would be far worse than no book at all.
+    fn book_move(&mut self, now_ms: u32) -> Option<Move> {
+        let mut legal = [NO_MOVE; MAX_MOVES];
+        let n = self.legal_moves(&mut legal);
+        let mut candidates = [NO_MOVE; 8];
+        let mut count = 0;
+        for line in BOOK {
+            let mut moves = line.split(' ');
+            // Follow the line as far as the game has gone; it stays a candidate
+            // only while every ply matches.
+            let mut matched = true;
+            for played in 0..self.n_history {
+                match moves.next().and_then(parse_move) {
+                    Some(step) if step == self.history[played] => {}
+                    _ => {
+                        matched = false;
+                        break;
+                    }
+                }
+            }
+            if !matched {
+                continue;
+            }
+            let Some((from, to)) = moves.next().and_then(parse_move) else {
+                continue;
+            };
+            let Some(found) = legal[..n]
+                .iter()
+                .copied()
+                .find(|m| m.from == from && m.to == to)
+            else {
+                continue;
+            };
+            if !candidates[..count].contains(&found) && count < candidates.len() {
+                candidates[count] = found;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        // Any of the matching lines will do, and varying keeps successive games
+        // from being identical.
+        Some(candidates[(now_ms as usize / 7) % count])
+    }
+
     fn start_search(&mut self, now_ms: u32) {
         self.phase = Phase::Thinking;
+        if let Some(m) = self.book_move(now_ms) {
+            // Straight to the played-out state: there is nothing to search, but the
+            // move still arrives after the same short beat as any other.
+            self.best = m;
+            self.searching = false;
+            self.show_at_ms = now_ms + 250;
+            esp_println::println!("chess: book move");
+            return;
+        }
         self.started_ms = now_ms;
+        self.depth_started_ms = now_ms;
         self.deadline_ms = now_ms + self.think_seconds() as u32 * 1000;
         self.depth = 1;
         self.best = NO_MOVE;
@@ -370,6 +549,7 @@ impl Chess {
         self.root_alpha = -1_000_000;
         self.slice_budget = NODES_PER_SLICE;
         self.aborted = false;
+        self.killers = [[NO_MOVE; 2]; MAX_PLY];
     }
 
     /// One slice of search, then the move once the clock is up. Returns true when
@@ -388,6 +568,7 @@ impl Chess {
                     self.outcome = self.decide_outcome();
                     return true;
                 }
+                self.record(chosen);
                 let _ = self.make(chosen);
                 self.phase = if self.finished() {
                     self.has_game = false;
@@ -418,7 +599,14 @@ impl Chess {
             self.show_at_ms = now_ms;
             return false;
         }
-        order(&mut legal[..n], &self.board);
+        order(&mut legal[..n], &self.board, &[NO_MOVE; 2]);
+        // The previous depth's answer goes first: it is the most likely to be best
+        // again, and a good first move is what makes everything after it cheap.
+        if self.best != NO_MOVE
+            && let Some(at) = legal[..n].iter().position(|m| *m == self.best)
+        {
+            legal[..=at].rotate_right(1);
+        }
         if self.root_index >= n {
             self.root_index = 0;
         }
@@ -443,8 +631,7 @@ impl Chess {
             if self.aborted {
                 // This subtree did not fit in what was left of the slice. Its score
                 // is meaningless, so it is not recorded and the root does not
-                // advance - but the next attempt gets a larger slice, which is what
-                // guarantees the search moves forward however deep it goes.
+                // advance - the next attempt gets a larger slice.
                 self.slice_budget = (self.slice_budget * 2).min(MAX_SLICE);
                 return false;
             }
@@ -468,13 +655,22 @@ impl Chess {
             now_ms.wrapping_sub(self.started_ms)
         );
         let mate = self.root_alpha > 90_000;
+        let spent = now_ms.wrapping_sub(self.depth_started_ms);
         self.depth += 1;
+        self.depth_started_ms = now_ms;
         self.root_index = 0;
         self.root_alpha = -1_000_000;
         self.best_this_depth = NO_MOVE;
         self.slice_budget = NODES_PER_SLICE;
-        // Mate found, or deeper than this evaluation can use anything from.
-        if mate || self.depth > MAX_DEPTH || self.out_of_time(now_ms) {
+        // Starting a depth that cannot finish is time spent for nothing, since only
+        // a completed depth is trusted. The next one costs several times this one,
+        // so if that will not fit, stop here and play what this depth chose. This is
+        // also what makes the time setting mean something: a longer budget affords
+        // another doubling, and another ply.
+        let next_needs = spent.saturating_mul(DEPTH_COST_FACTOR).max(2);
+        let left = self.deadline_ms.wrapping_sub(now_ms);
+        let no_time_for_more = self.out_of_time(now_ms) || left < next_needs;
+        if mate || self.depth > MAX_DEPTH || no_time_for_more {
             self.stop_searching(now_ms);
         }
         false
@@ -496,29 +692,135 @@ impl Chess {
         if self.aborted {
             return alpha;
         }
-        if depth <= 0 || ply >= MAX_PLY {
-            return self.evaluate();
-        }
         if self.nodes >= budget {
             self.aborted = true;
             return alpha;
+        }
+        // A check is never a quiet position, so the search is extended rather than
+        // handed to quiescence - otherwise a forced sequence gets cut off exactly
+        // where it matters.
+        let checked = self.in_check(self.white_to_move);
+        let depth = if checked && depth < 4 { depth + 1 } else { depth };
+        if depth <= 0 || ply >= MAX_PLY {
+            return self.quiesce(alpha, beta, ply, budget, MAX_QUIESCE);
         }
         let mut legal = [NO_MOVE; MAX_MOVES];
         let n = self.legal_moves(&mut legal);
         if n == 0 {
             // Mate is worse the sooner it comes, so a forced mate is preferred to
             // a slow one and avoided as long as possible when it is ours.
-            return if self.in_check(self.white_to_move) {
-                -100_000 + ply as i32
-            } else {
-                0
-            };
+            return if checked { -100_000 + ply as i32 } else { 0 };
         }
-        order(&mut legal[..n], &self.board);
+        order(&mut legal[..n], &self.board, &self.killers[ply.min(MAX_PLY - 1)]);
         for index in 0..n {
             let m = legal[index];
             let undo = self.make(m);
             let score = -self.search(depth - 1, -beta, -alpha, ply + 1, budget);
+            self.unmake(m, undo);
+            if self.aborted {
+                return alpha;
+            }
+            if score >= beta {
+                // A quiet move good enough to cut is worth trying first in its
+                // sibling positions, which is most of what ordering can learn
+                // without a table of positions to remember.
+                if m.taken == EMPTY {
+                    let slot = ply.min(MAX_PLY - 1);
+                    self.killers[slot][1] = self.killers[slot][0];
+                    self.killers[slot][0] = m;
+                }
+                return beta;
+            }
+            if score > alpha {
+                alpha = score;
+            }
+        }
+        alpha
+    }
+
+    /// Material and placement, from the side to move's view.
+    fn evaluate(&self) -> i32 {
+        // Two passes: the king tables depend on how much is left on the board, and
+        // that is not known until everything has been counted.
+        let mut heavy = 0;
+        for square in START..START + 80 {
+            let piece = self.board[square];
+            if piece == EMPTY || piece == EDGE {
+                continue;
+            }
+            let kind = piece.unsigned_abs() as usize;
+            if kind != PAWN as usize && kind != KING as usize {
+                heavy += VALUE[kind.min(6)];
+            }
+        }
+        let endgame = heavy < ENDGAME_MATERIAL;
+
+        let mut score = 0;
+        for rank in 0..8usize {
+            for file in 0..8usize {
+                let piece = self.board[START + rank * 10 + file];
+                if piece == EMPTY || piece == EDGE {
+                    continue;
+                }
+                let kind = piece.unsigned_abs() as usize;
+                // White reads the tables as written; black reads them mirrored.
+                let index = if piece > 0 {
+                    rank * 8 + file
+                } else {
+                    (7 - rank) * 8 + file
+                };
+                let placement = if kind == KING as usize && endgame {
+                    KING_END[index]
+                } else {
+                    PST[kind.min(6)][index]
+                } as i32;
+                let value = VALUE[kind.min(6)] + placement;
+                score += if piece > 0 { value } else { -value };
+            }
+        }
+        if self.white_to_move { score } else { -score }
+    }
+
+    /// Captures and promotions only, played out until nothing is hanging.
+    ///
+    /// This is what stops the engine believing a position it has caught halfway
+    /// through an exchange. Standing pat first means a side is never forced to
+    /// capture when sitting still is better.
+    fn quiesce(&mut self, mut alpha: i32, beta: i32, ply: usize, budget: u32, left: usize) -> i32 {
+        self.nodes += 1;
+        if self.aborted {
+            return alpha;
+        }
+        if self.nodes >= budget {
+            self.aborted = true;
+            return alpha;
+        }
+        let stand_pat = self.evaluate();
+        if stand_pat >= beta {
+            return beta;
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+        if ply >= MAX_PLY || left == 0 {
+            return alpha;
+        }
+
+        let mut legal = [NO_MOVE; MAX_MOVES];
+        let n = self.legal_moves(&mut legal);
+        let mut loud = [NO_MOVE; MAX_MOVES];
+        let mut count = 0;
+        for m in legal[..n].iter() {
+            if m.taken != EMPTY || m.promote != EMPTY {
+                loud[count] = *m;
+                count += 1;
+            }
+        }
+        order(&mut loud[..count], &self.board, &[NO_MOVE; 2]);
+        for index in 0..count {
+            let m = loud[index];
+            let undo = self.make(m);
+            let score = -self.quiesce(-beta, -alpha, ply + 1, budget, left - 1);
             self.unmake(m, undo);
             if self.aborted {
                 return alpha;
@@ -531,27 +833,6 @@ impl Chess {
             }
         }
         alpha
-    }
-
-    /// Material and a pull towards the centre, from the side to move's view.
-    fn evaluate(&self) -> i32 {
-        let mut score = 0;
-        for rank in 0..8usize {
-            for file in 0..8usize {
-                let piece = self.board[START + rank * 10 + file];
-                if piece == EMPTY || piece == EDGE {
-                    continue;
-                }
-                let kind = piece.unsigned_abs() as usize;
-                let mut value = VALUE[kind.min(6)];
-                // Kings are not drawn towards the middle; everything else is.
-                if kind != KING as usize {
-                    value += (CENTRE[file] + CENTRE[rank]) / 2;
-                }
-                score += if piece > 0 { value } else { -value };
-            }
-        }
-        if self.white_to_move { score } else { -score }
     }
 
     /// Pseudo-legal moves filtered by whether they leave the king attacked.
@@ -744,6 +1025,15 @@ impl Chess {
             }
         }
         n
+    }
+
+    /// Records a move as played, for the book to match against. Only the moves
+    /// actually played reach this - the search makes and unmakes far too many.
+    fn record(&mut self, m: Move) {
+        if self.n_history < self.history.len() {
+            self.history[self.n_history] = (m.from, m.to);
+            self.n_history += 1;
+        }
     }
 
     fn make(&mut self, m: Move) -> Undo {
@@ -1110,11 +1400,17 @@ fn letter(kind: i8) -> &'static str {
     }
 }
 
-/// Captures first, by what they take. Cheap, and it is most of what alpha-beta
-/// needs to prune well - without it the search is several plies shallower for the
-/// same time.
-fn order(moves: &mut [Move], board: &[i8; BOARD]) {
+/// Captures first, by what they take, then killers. Cheap, and it is most of what
+/// alpha-beta needs to prune well - without it the search is several plies
+/// shallower for the same time.
+fn order(moves: &mut [Move], board: &[i8; BOARD], killers: &[Move; 2]) {
     moves.sort_unstable_by_key(|m| {
+        if killers[0] == *m {
+            return -1_000_000;
+        }
+        if killers[1] == *m {
+            return -900_000;
+        }
         let mut gain = if m.taken == EMPTY {
             0
         } else {
@@ -1137,4 +1433,60 @@ fn promotions(last: bool) -> &'static [i8] {
     } else {
         &[EMPTY]
     }
+}
+
+/// Main lines, as plies in plain coordinate notation.
+///
+/// Kept as text because that is the form these can be checked in - by eye against
+/// any opening reference, and by the generator, which is asked whether a book move
+/// is legal before it is ever played. A line that turned out to be nonsense would
+/// otherwise be unanswerable: the machine would simply make an impossible move.
+static BOOK: [&str; 24] = [
+    // King's pawn: Italian, Ruy Lopez, Scotch, Four Knights, Petrov, Vienna.
+    "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 d2d3 f8c5 c2c3 d7d6",
+    "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d3 d7d6",
+    "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7",
+    "e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6e4 d2d4 e4d6",
+    "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6 b1c3 f8b4",
+    "e2e4 e7e5 g1f3 b8c6 b1c3 g8f6 f1b5 f8b4 e1g1 e8g8",
+    "e2e4 e7e5 g1f3 g8f6 f3e5 d7d6 e5f3 f6e4 d2d4 d6d5",
+    "e2e4 e7e5 b1c3 g8f6 g1f3 b8c6 f1b5 f8b4 e1g1 e8g8",
+    // Sicilian: open, dragon, Najdorf-ish.
+    "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6",
+    "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 g7g6",
+    "e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5",
+    "e2e4 c7c5 b1c3 b8c6 g1f3 e7e5 f1c4 f8e7 d2d3 d7d6",
+    // French, Caro-Kann, Scandinavian, Pirc.
+    "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 e4e5 f6d7 f2f4 c7c5",
+    "e2e4 e7e6 d2d4 d7d5 e4e5 c7c5 c2c3 b8c6 g1f3 d8b6",
+    "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5 e4g3 f5g6",
+    "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5 c1e3 e7e6 c2c3 c6c5",
+    "e2e4 d7d5 e4d5 d8d5 b1c3 d5a5 d2d4 g8f6 g1f3 c7c6",
+    "e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 g1f3 f8g7 f1e2 e8g8",
+    // Queen's pawn: Queen's Gambit, Slav, Nimzo, King's Indian, London.
+    "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 g1f3 f8e7 c1f4 e8g8",
+    "d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 e7e6 e2e3 b8d7",
+    "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 e2e3 e8g8 f1d3 d7d5",
+    "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8",
+    "d2d4 g8f6 g1f3 g7g6 c1f4 f8g7 e2e3 e8g8 f1e2 d7d6",
+    // Flank: English, Reti.
+    "c2c4 e7e5 b1c3 g8f6 g1f3 b8c6 g2g3 f8b4 f1g2 e8g8",
+];
+
+/// A square in coordinate notation to a mailbox index.
+fn parse_square(text: &[u8]) -> Option<u8> {
+    let file = text.first()?.checked_sub(b'a')?;
+    let rank = text.get(1)?.checked_sub(b'1')?;
+    if file > 7 || rank > 7 {
+        return None;
+    }
+    Some((START + (7 - rank as usize) * 10 + file as usize) as u8)
+}
+
+fn parse_move(text: &str) -> Option<(u8, u8)> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 4 {
+        return None;
+    }
+    Some((parse_square(&bytes[0..2])?, parse_square(&bytes[2..4])?))
 }
