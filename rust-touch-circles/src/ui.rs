@@ -332,6 +332,8 @@ pub enum Screen {
     Confirm,
     /// The circles demo from the project's main branch, as a page of its own.
     Bubbles,
+    /// Two-player pong, which drives the same circles.
+    Pong,
 }
 
 impl Screen {
@@ -356,7 +358,7 @@ impl Screen {
             // Black, as the demo has it - and since the transition disc grows in
             // the destination's background colour, arriving here is a wipe to
             // black, which is the right way into it.
-            Screen::Bubbles => rgb(0, 0, 0),
+            Screen::Bubbles | Screen::Pong => rgb(0, 0, 0),
         }
     }
     fn accent(self) -> u16 {
@@ -370,6 +372,7 @@ impl Screen {
             Screen::Extras => C_INFO,
             Screen::Confirm => C_CANCEL,
             Screen::Bubbles => C_BUBBLES,
+            Screen::Pong => crate::pong::LEFT_COLOR,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -680,6 +683,8 @@ pub struct Ui {
     /// see `bubbles`. Called `game` because `bubbles` is already the ambient
     /// decoration on the other screens, and the two are unrelated.
     game: crate::bubbles::Bubbles,
+    pong: crate::pong::Pong,
+    pong_last_ms: u32,
     /// When the current join attempt started, and whether it has been given up
     /// on. The connecting screen is driven from these two.
     connect_started_ms: u32,
@@ -787,6 +792,8 @@ impl Ui {
             key_hot_ms: 0,
             pending_ssid: crate::store::FixedStr::EMPTY,
             game: crate::bubbles::Bubbles::new(),
+            pong: crate::pong::Pong::new(),
+            pong_last_ms: 0,
             connect_started_ms: 0,
             connect_failed: false,
             connect_ok_ms: None,
@@ -1051,7 +1058,11 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        self.game.press(x, y, now_ms);
+                        if self.interactive_screen() == Screen::Pong {
+                            self.pong.touch(x, y);
+                        } else {
+                            self.game.press(x, y, now_ms);
+                        }
                         Action::None
                     }
                     Target::RunNow => {
@@ -1204,7 +1215,11 @@ impl Ui {
                 // contacts near a live circle's origin, so a moving finger starts
                 // a new one roughly every fingertip's width. That is the original's
                 // behaviour, not an addition.
-                if self.interactive_screen() == Screen::Bubbles {
+                if self.interactive_screen() == Screen::Pong {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.pong.touch(x, y);
+                    }
+                } else if self.interactive_screen() == Screen::Bubbles {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.game.press(x, y, now_ms);
                     }
@@ -1329,6 +1344,11 @@ impl Ui {
         }
         self.update_connect(state, now_ms);
         self.game.update(now_ms);
+        if self.interactive_screen() == Screen::Pong {
+            let dt = now_ms.wrapping_sub(self.pong_last_ms).min(60);
+            self.pong.update(dt, now_ms, &mut self.game);
+        }
+        self.pong_last_ms = now_ms;
         for bubble in self.bubbles.iter_mut() {
             if bubble.active && now_ms.wrapping_sub(bubble.born_ms) >= BUBBLE_MS {
                 bubble.active = false;
@@ -1423,6 +1443,7 @@ impl Ui {
             // does on its own branch, and stops asking for frames once the last
             // circle has faded.
             || self.game.active()
+            || self.screen == Screen::Pong
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1493,7 +1514,7 @@ impl Ui {
         if ((run_is_active(state) && !self.completion_acknowledged) || self.completion_pending)
             && !matches!(
                 self.interactive_screen(),
-                Screen::Running | Screen::Bubbles
+                Screen::Running | Screen::Bubbles | Screen::Pong
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1706,7 +1727,7 @@ impl Ui {
                 let (x0, y0, x1, y1) = l::CONFIRM_YES;
                 self.zone(Target::Confirm, Zone::Rect { x0, y0, x1, y1 });
             }
-            Screen::Bubbles => {
+            Screen::Pong | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
                 // contact anywhere starts a circle.
@@ -1921,7 +1942,7 @@ impl Ui {
         // The ambient decoration is skipped on the demo page: its own circles are
         // the content there, and a second, different kind of circle drifting
         // behind them would not read as the same animation.
-        if screen != Screen::Bubbles && !self.idle {
+        if !matches!(screen, Screen::Bubbles | Screen::Pong) && !self.idle {
             self.draw_bubbles(scene, screen, now_ms, alpha);
         }
         match screen {
@@ -1939,6 +1960,11 @@ impl Ui {
             Screen::Connecting => self.draw_connecting(scene, state, now_ms, alpha),
             Screen::Confirm => self.draw_confirm(scene, alpha),
             Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
+            Screen::Pong => {
+                self.game.draw(scene, now_ms, alpha);
+                self.pong.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -2222,6 +2248,7 @@ impl Ui {
         ("SETTINGS", C_CONFIG, Screen::Config),
         ("SENSORS", C_INFO, Screen::Info),
         ("BUBBLES", C_BUBBLES, Screen::Bubbles),
+        ("PONG", crate::pong::RIGHT_COLOR, Screen::Pong),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2354,6 +2381,9 @@ impl Ui {
                 if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
                     self.menu_scroll = 0;
                     self.info_scroll = 0;
+                    if *screen == Screen::Pong {
+                        self.pong.reset(now_ms);
+                    }
                     self.open(*screen, x, y, now_ms);
                 }
                 Action::None

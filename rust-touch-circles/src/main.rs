@@ -20,6 +20,7 @@ mod font;
 mod gfx;
 mod model;
 mod net;
+mod pong;
 mod store;
 mod touch;
 mod ui;
@@ -54,16 +55,22 @@ const INFO_POLL_INTERVAL_MS: u32 = 500;
 /// the next is only visible through a poll, and at two seconds that reads as the
 /// progress bar sticking and then jumping.
 const RUN_POLL_INTERVAL_MS: u32 = 500;
-/// Idle: the panel is on a wall doing nothing, so it asks less often too.
-const IDLE_POLL_INTERVAL_MS: u32 = 15_000;
-/// How long without a touch before dimming.
-const IDLE_AFTER_MS: u32 = 45_000;
-/// Backlight while idle. Low enough to save real power, high enough to read the
-/// clock across a room.
-const IDLE_BRIGHTNESS: u8 = 14;
+/// Untouched for this long: dim, and draw the quiet outlined look. Still polling,
+/// because someone glancing at the panel should see the truth.
+const DIM_AFTER_MS: u32 = 45_000;
+/// Untouched for this long: stop talking to the network altogether. Nobody is
+/// looking, so there is nothing to be current for, and the traffic was what kept
+/// the radio awake.
+const SLEEP_AFTER_MS: u32 = 180_000;
+const DIM_BRIGHTNESS: u8 = 14;
+/// Asleep: a glow, so the panel can still be found and the clock read in the dark.
+const SLEEP_BRIGHTNESS: u8 = 4;
 /// Backlight steps per loop pass, which at frame rate is a fade of about a
 /// second either way - the register is free to write, so this costs nothing.
 const BRIGHTNESS_STEP: u8 = 6;
+/// How long the render thread blocks per pass while asleep. The cost is wake
+/// latency on the first touch, which at this length is not perceptible.
+const SLEEP_NAP_MS: u32 = 25;
 
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
@@ -226,7 +233,8 @@ fn main() -> ! {
     // headroom is worth being able to see.
     let mut peak_prims = 0usize;
     let mut last_input_ms = now_ms();
-    let mut idle = false;
+    let mut dim = false;
+    let mut asleep = false;
     let mut brightness = 255u8;
     let mut dirty = true;
 
@@ -266,7 +274,7 @@ fn main() -> ! {
         // The touch that wakes the panel is not a button press. Waking on the
         // press and then acting on it would mean a blind tap on a dim screen
         // could start watering.
-        let event = if idle {
+        let event = if dim {
             touch::Event::None
         } else {
             event
@@ -379,9 +387,7 @@ fn main() -> ! {
             // polling for the whole of a multi-entry schedule, so the countdown
             // stuck at 00:00 and every progress bar froze after the first entry.
             // A running schedule is when fresh state matters most.
-            let poll_interval = if idle {
-                IDLE_POLL_INTERVAL_MS
-            } else if ui.screen == ui::Screen::Info {
+            let poll_interval = if ui.screen == ui::Screen::Info {
                 INFO_POLL_INTERVAL_MS
             } else if state.running || state.queued > 0 {
                 // Following a sequence: the interesting transitions are the
@@ -391,7 +397,11 @@ fn main() -> ! {
             } else {
                 POLL_INTERVAL_MS
             };
-            if !ui.interaction_active()
+            // Nothing is fetched while asleep. Nobody is looking, so there is
+            // nothing to be up to date for - and a request every so often is what
+            // kept the radio awake, defeating the point. Waking polls at once.
+            if !asleep
+                && !ui.interaction_active()
                 && n.ip.is_some()
                 && t.wrapping_sub(last_poll_ms) >= poll_interval
             {
@@ -401,21 +411,32 @@ fn main() -> ! {
             }
         }
 
-        // Idle after a while untouched, awake the moment anything is touched.
-        // Both the backlight and the radio's beacon interval follow, since those
-        // are what actually draw current - the display far more than the radio.
-        let want_idle = t.wrapping_sub(last_input_ms) >= IDLE_AFTER_MS;
-        if want_idle != idle {
-            idle = want_idle;
-            ui.idle = idle;
-            if !idle {
-                // Show the current state immediately on waking, not up to fifteen
-                // seconds later.
-                last_poll_ms = t.wrapping_sub(IDLE_POLL_INTERVAL_MS);
+        // Two stages, because they cost different things. Dimming is free to
+        // reverse and keeps the panel truthful; going quiet saves the radio but
+        // means the display is stale until touched. Any touch returns to awake.
+        let untouched = t.wrapping_sub(last_input_ms);
+        let want_dim = untouched >= DIM_AFTER_MS;
+        let want_sleep = untouched >= SLEEP_AFTER_MS;
+        if want_dim != dim || want_sleep != asleep {
+            dim = want_dim;
+            asleep = want_sleep;
+            ui.idle = dim;
+            if let Some(n) = net.as_mut() {
+                n.set_power_saving(asleep);
+            }
+            if !asleep {
+                // Waking is exactly when the panel is out of date, so ask at once.
+                last_poll_ms = t.wrapping_sub(POLL_INTERVAL_MS);
             }
             dirty = true;
         }
-        let target = if idle { IDLE_BRIGHTNESS } else { 255 };
+        let target = if asleep {
+            SLEEP_BRIGHTNESS
+        } else if dim {
+            DIM_BRIGHTNESS
+        } else {
+            255
+        };
         if brightness != target {
             brightness = if brightness < target {
                 brightness.saturating_add(BRIGHTNESS_STEP).min(target)
@@ -471,8 +492,31 @@ fn main() -> ! {
             dirty = false;
             frames += 1;
         } else {
-            // Nothing to repaint: yield a little rather than spinning flat out.
-            delay.delay_micros(600);
+            // Nothing to repaint: *block* the thread rather than busy-waiting.
+            //
+            // This is the difference between an idle panel that spins the core at
+            // full clock and one that spends its time halted. `delay_micros` is a
+            // busy loop, so the render thread stayed permanently runnable, the
+            // scheduler never reached its idle task - which is a plain
+            // `wait_for_interrupt` - and the radio's own tasks only ever got the
+            // CPU when the tick preempted us. Blocking here gates the core clock
+            // between interrupts and hands the radio the time it needs, which is
+            // also what makes Wi-Fi modem sleep viable at all.
+            //
+            // The sleep is bounded by what still has to feel immediate: touch
+            // wakes the panel, so idle can afford a coarse period, while an
+            // in-flight request wants the stack pumped promptly.
+            let nap_ms = if net.as_ref().is_some_and(|n| n.busy()) {
+                2
+            } else if asleep {
+                SLEEP_NAP_MS
+            } else if dim {
+                12
+            } else {
+                4
+            };
+            esp_rtos::CurrentThreadHandle::get()
+                .delay(esp_hal::time::Duration::from_millis(nap_ms as u64));
         }
 
         // Heartbeat on the serial link. Cheap, once a second, and the fastest way
@@ -508,6 +552,7 @@ fn main() -> ! {
                     ui::Screen::Connecting => "connecting",
                     ui::Screen::Confirm => "confirm",
                     ui::Screen::Bubbles => "bubbles",
+                    ui::Screen::Pong => "pong",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

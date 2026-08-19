@@ -74,6 +74,23 @@ impl Bubbles {
                 return false;
             }
         }
+        self.spawn(x, y, now_ms, None, None)
+    }
+
+    /// A circle with a chosen colour and reach, for callers other than touch -
+    /// the same animation, so a game gets the demo's look for free.
+    ///
+    /// No same-origin rejection here: that rule exists to fold the touch
+    /// controller's repeat reports into one press, and a caller that asks for a
+    /// circle means it.
+    pub fn spawn(
+        &mut self,
+        x: i32,
+        y: i32,
+        now_ms: u32,
+        color: Option<u16>,
+        reach: Option<i32>,
+    ) -> bool {
         if self.len >= MAX_CIRCLES {
             return false;
         }
@@ -81,15 +98,18 @@ impl Bubbles {
         let y = y.clamp(0, H as i32 - 1);
         let dx = x.max(W as i32 - 1 - x) as u32;
         let dy = y.max(H as i32 - 1 - y) as u32;
+        let to_corner = (dx * dx + dy * dy).isqrt() as i32 + 2;
         self.circles[self.len] = Circle {
             x,
             y,
             born_ms: now_ms,
-            full_r: (dx * dx + dy * dy).isqrt() as i32 + 2,
-            color: PALETTE[self.next_color % PALETTE.len()],
+            full_r: reach.map_or(to_corner, |r| r.min(to_corner)),
+            color: color.unwrap_or(PALETTE[self.next_color % PALETTE.len()]),
         };
         self.len += 1;
-        self.next_color += 1;
+        if color.is_none() {
+            self.next_color += 1;
+        }
         true
     }
 

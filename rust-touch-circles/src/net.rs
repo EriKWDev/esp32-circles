@@ -263,7 +263,10 @@ struct Http {
     started_ms: u32,
     sent: bool,
     got: usize,
+    /// Digest attempt: 0 is the unauthenticated probe, 1 carries the response.
     attempt: u8,
+    /// Transport attempts already spent on this request - see the timeout.
+    tries: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -496,10 +499,31 @@ impl Net {
         out.scanned = true;
     }
 
-    // Wi-Fi modem sleep was tried here and removed. Maximum put idle polls past
-    // the request timeout outright; Minimum still made them fail more often than
-    // leaving the receiver on. Against an OLED at full brightness the radio is a
-    // rounding error, so it bought little and cost freshness.
+    /// Anything in flight, so the caller knows whether it may sleep deeply.
+    pub fn busy(&self) -> bool {
+        self.http.is_some() || self.job != Job::Idle
+    }
+
+    /// Modem sleep: the receiver wakes for beacons instead of staying on.
+    ///
+    /// This failed the first time it was tried, and the reason was not the radio.
+    /// The render thread busy-waited, so esp-radio's tasks only ran when the tick
+    /// preempted them - too late to service a DTIM wake, and idle polls timed out.
+    /// With the render loop blocking instead, the radio gets the CPU when it needs
+    /// it and this works. Minimum rather than Maximum: Maximum sleeps for whole
+    /// listen intervals, which is longer than a request is willing to wait.
+    pub fn set_power_saving(&mut self, idle: bool) {
+        use esp_radio::wifi::PowerSaveMode;
+        let mode = if idle {
+            PowerSaveMode::Minimum
+        } else {
+            PowerSaveMode::None
+        };
+        if self.controller.set_power_saving(mode).is_err() {
+            self.last_error = Some("wifi power save rejected");
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.controller.is_connected()
     }
@@ -590,12 +614,31 @@ impl Net {
         }
 
         let mut http = self.http.take().unwrap();
-        // Generous, because it only ever fires on a request that has already
-        // gone wrong: a slow reply costs nothing here, while a timeout that is
-        // merely impatient drops a good response and marks a live controller
-        // offline.
         if now_ms.wrapping_sub(http.started_ms) > REQUEST_TIMEOUT_MS {
             self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+            // One silent retry before this becomes anybody's problem.
+            //
+            // The first exchange after a long quiet gap is the slow one - ARP to
+            // redo, a sleeping receiver to wake at the next beacon - and while
+            // idle the gap is fifteen seconds, so a single stall would show as
+            // fifteen seconds of "offline" for a controller that is answering
+            // perfectly well. Retrying costs a moment nobody is waiting on, and it
+            // is what makes modem sleep affordable at all.
+            if http.tries == 0 {
+                if let Err(e) = self.start_http_tried(
+                    http.kind,
+                    http.host,
+                    http.post,
+                    http.path,
+                    http.attempt,
+                    1,
+                    now_ms,
+                ) {
+                    self.finish_error(http, state, e);
+                    return true;
+                }
+                return false;
+            }
             self.finish_error(http, state, "request timed out");
             return true;
         }
@@ -682,6 +725,20 @@ impl Net {
         attempt: u8,
         now_ms: u32,
     ) -> Result<(), &'static str> {
+        self.start_http_tried(kind, host, post, path, attempt, 0, now_ms)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_http_tried(
+        &mut self,
+        kind: HttpKind,
+        host: usize,
+        post: bool,
+        path: Buf<96>,
+        attempt: u8,
+        tries: u8,
+        now_ms: u32,
+    ) -> Result<(), &'static str> {
         let method = if post { "POST" } else { "GET" };
         let mut head = Buf::<512>::new();
         let _ = write!(
@@ -726,6 +783,7 @@ impl Net {
             sent: false,
             got: 0,
             attempt,
+            tries,
         });
         Ok(())
     }
