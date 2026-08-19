@@ -19,10 +19,13 @@ mod breakout;
 mod bubbles;
 mod display;
 mod font;
+mod g2048;
 mod gfx;
 mod invaders;
+mod match3;
 mod model;
 mod net;
+mod pomodoro;
 mod pong;
 mod store;
 mod touch;
@@ -579,6 +582,10 @@ fn main() -> ! {
                     ui::Screen::Breakout => "breakout",
                     ui::Screen::Invaders => "invaders",
                     ui::Screen::Asteroids => "asteroids",
+                    ui::Screen::Apps => "apps",
+                    ui::Screen::G2048 => "2048",
+                    ui::Screen::Match3 => "match3",
+                    ui::Screen::Pomodoro => "pomodoro",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

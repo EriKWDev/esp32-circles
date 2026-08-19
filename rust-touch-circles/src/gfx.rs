@@ -28,7 +28,7 @@ pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 // headroom exists because anything past the cap is silently dropped, so a shortage
 // would present as a button that is simply not drawn. `prims=` in the heartbeat
 // reports the peak against this.
-pub const MAX_PRIMS: usize = 112;
+pub const MAX_PRIMS: usize = 144;
 /// Longest string any single text primitive can hold. Relay names are the only
 /// unbounded input and are truncated to this on the way in.
 pub const MAX_TEXT: usize = 28;

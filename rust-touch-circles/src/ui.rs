@@ -48,6 +48,10 @@ const C_BUBBLES: u16 = rgb(255, 55, 125);
 const C_BREAKOUT: u16 = rgb(88, 190, 255);
 const C_INVADERS: u16 = rgb(120, 230, 170);
 const C_ASTEROIDS: u16 = rgb(190, 200, 230);
+const C_APPS: u16 = rgb(255, 150, 90);
+const C_2048: u16 = rgb(242, 177, 121);
+const C_MATCH3: u16 = rgb(255, 110, 140);
+const C_POMODORO: u16 = rgb(255, 120, 90);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -252,7 +256,7 @@ struct RowGeom {
 }
 
 fn geom(screen: Screen) -> RowGeom {
-    if screen == Screen::Extras {
+    if screen == Screen::Extras || screen == Screen::Apps {
         RowGeom {
             x0: l::EXTRA_X0,
             x1: l::EXTRA_X1,
@@ -344,6 +348,11 @@ pub enum Screen {
     Breakout,
     Invaders,
     Asteroids,
+    /// The games and demos, moved off Extras onto a page of their own.
+    Apps,
+    G2048,
+    Match3,
+    Pomodoro,
 }
 
 impl Screen {
@@ -368,9 +377,15 @@ impl Screen {
             // Black, as the demo has it - and since the transition disc grows in
             // the destination's background colour, arriving here is a wipe to
             // black, which is the right way into it.
-            Screen::Bubbles | Screen::Pong | Screen::Invaders | Screen::Asteroids => {
-                rgb(0, 0, 0)
-            }
+            Screen::Bubbles
+            | Screen::Pong
+            | Screen::Invaders
+            | Screen::Asteroids
+            | Screen::G2048
+            | Screen::Match3
+            | Screen::Pomodoro => rgb(0, 0, 0),
+            // Apps is Extras' twin, so it shares the palette.
+            Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
             // the fallback keeps the transition disc a sensible colour.
             Screen::Breakout => rgb(6, 10, 20),
@@ -391,6 +406,10 @@ impl Screen {
             Screen::Breakout => C_BREAKOUT,
             Screen::Invaders => C_INVADERS,
             Screen::Asteroids => C_ASTEROIDS,
+            Screen::Apps => C_APPS,
+            Screen::G2048 => C_2048,
+            Screen::Match3 => C_MATCH3,
+            Screen::Pomodoro => C_POMODORO,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -405,7 +424,7 @@ impl Screen {
     fn is_menu(self) -> bool {
         matches!(
             self,
-            Screen::Extras | Screen::Config | Screen::Wifi | Screen::Controller
+            Screen::Extras | Screen::Apps | Screen::Config | Screen::Wifi | Screen::Controller
         )
     }
 }
@@ -585,6 +604,10 @@ const EDIT_CONTROLS: [&str; 6] = ["UP", "DOWN", "RELAY", "LONGER", "SHORTER", "R
 /// How long a pressed key stays lit. Long enough to see on a panel refreshing at
 /// 40-60 fps, short enough not to lag a fast typist.
 const KEY_FLASH_MS: u32 = 130;
+/// Shortest gesture 2048 accepts as a swipe, so a tap does not move the board.
+const SWIPE_MIN: i32 = 26;
+/// List pages that remember a scroll offset - see `scroll_slot`.
+const MENU_PAGES: usize = 5;
 
 /// How long to wait for a network to let us in before offering a retry.
 ///
@@ -673,7 +696,10 @@ pub struct Ui {
     pub selected: usize,
     relay_scroll: i32,
     info_scroll: i32,
-    menu_scroll: i32,
+    /// One offset per list page, so leaving a page and coming back finds it where
+    /// it was left. A single shared value meant every page snapped to the top -
+    /// and worse, that Apps and Settings fought over the same number.
+    menu_scroll: [i32; MENU_PAGES],
     /// Which controller the Controller page is showing.
     controller_selected: usize,
     /// The UI's copy of persisted settings. Held here rather than threaded
@@ -709,6 +735,11 @@ pub struct Ui {
     breakout: crate::breakout::Breakout,
     invaders: crate::invaders::Invaders,
     asteroids: crate::asteroids::Asteroids,
+    g2048: crate::g2048::G2048,
+    match3: crate::match3::Match3,
+    pomodoro: crate::pomodoro::Pomodoro,
+    /// Where the current drag began, for 2048's swipes.
+    swipe_from: (i32, i32),
     pong_last_ms: u32,
     /// When the current join attempt started, and whether it has been given up
     /// on. The connecting screen is driven from these two.
@@ -803,7 +834,7 @@ impl Ui {
             selected: 0,
             relay_scroll: 0,
             info_scroll: 0,
-            menu_scroll: 0,
+            menu_scroll: [0; MENU_PAGES],
             controller_selected: 0,
             settings: crate::store::Settings::EMPTY,
             networks: crate::net::Networks::EMPTY,
@@ -822,6 +853,10 @@ impl Ui {
             breakout: crate::breakout::Breakout::new(),
             invaders: crate::invaders::Invaders::new(),
             asteroids: crate::asteroids::Asteroids::new(),
+            g2048: crate::g2048::G2048::new(),
+            match3: crate::match3::Match3::new(),
+            pomodoro: crate::pomodoro::Pomodoro::new(),
+            swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
             connect_failed: false,
@@ -1007,7 +1042,7 @@ impl Ui {
                         Screen::Detail => self.detail_scroll,
                         Screen::Info => self.info_scroll,
                         Screen::Force => self.relay_scroll,
-                        screen if screen.is_menu() => self.menu_scroll,
+                        screen if screen.is_menu() => self.scroll_of(screen),
                         _ => 0,
                     };
                     self.pending_row = self.row_at(y, state);
@@ -1054,7 +1089,6 @@ impl Ui {
                         // keyboard this also cancels the edit: the buffer is
                         // simply dropped. On the confirmation screen it is the
                         // "no".
-                        self.menu_scroll = 0;
                         self.back(x, y, now_ms);
                         Action::None
                     }
@@ -1075,7 +1109,6 @@ impl Ui {
                     }
                     Target::Info => {
                         // The cog opens the menu now, not the analog page.
-                        self.menu_scroll = 0;
                         self.open(Screen::Extras, x, y, now_ms);
                         Action::None
                     }
@@ -1095,6 +1128,19 @@ impl Ui {
                             self.invaders.touch(x);
                         } else if self.interactive_screen() == Screen::Asteroids {
                             self.asteroids.touch(x, y);
+                        } else if self.interactive_screen() == Screen::G2048 {
+                            // The swipe is measured on release; the press only
+                            // records where it began.
+                            self.swipe_from = (x, y);
+                        } else if self.interactive_screen() == Screen::Match3 {
+                            self.match3.touch(x, y, now_ms);
+                        } else if self.interactive_screen() == Screen::Pomodoro {
+                            let (rx0, ry0, rx1, ry1) = crate::pomodoro::RESET;
+                            if x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1 {
+                                self.pomodoro.reset_phase();
+                            } else {
+                                self.pomodoro.toggle();
+                            }
                         } else {
                             self.game.press(x, y, now_ms);
                         }
@@ -1248,7 +1294,7 @@ impl Ui {
                         Screen::Detail => self.detail_scroll = offset,
                         Screen::Info => self.info_scroll = offset,
                         Screen::Force => self.relay_scroll = offset,
-                        screen if screen.is_menu() => self.menu_scroll = offset,
+                        screen if screen.is_menu() => self.set_scroll(screen, offset),
                         _ => {}
                     }
                 }
@@ -1287,6 +1333,18 @@ impl Ui {
                 // Lifting off stops the thrust, so the ship coasts.
                 if self.interactive_screen() == Screen::Asteroids {
                     self.asteroids.release();
+                }
+                // 2048: the direction of the whole gesture, decided on release, so
+                // a wandering finger still produces one clean move.
+                if self.interactive_screen() == Screen::G2048 {
+                    let (dx, dy) = (x - self.swipe_from.0, y - self.swipe_from.1);
+                    if dx.abs().max(dy.abs()) >= SWIPE_MIN {
+                        if dx.abs() > dy.abs() {
+                            self.g2048.swipe(dx.signum(), 0, now_ms);
+                        } else {
+                            self.g2048.swipe(0, dy.signum(), now_ms);
+                        }
+                    }
                 }
                 if self.dragging_list {
                     self.dragging_list = false;
@@ -1339,7 +1397,7 @@ impl Ui {
     fn row_at(&self, y: i32, state: &State) -> Option<Target> {
         if self.screen.is_menu() {
             let g = geom(self.screen);
-            let from_top = y - (g.first_cy - g.half_h) + self.menu_scroll;
+            let from_top = y - (g.first_cy - g.half_h) + self.scroll_of(self.screen);
             if from_top < 0 {
                 return None;
             }
@@ -1407,6 +1465,9 @@ impl Ui {
             Screen::Breakout => self.breakout.update(dt, now_ms, &mut self.game),
             Screen::Invaders => self.invaders.update(dt, now_ms, &mut self.game),
             Screen::Asteroids => self.asteroids.update(dt, now_ms, &mut self.game),
+            Screen::G2048 => self.g2048.update(now_ms, &mut self.game),
+            Screen::Match3 => self.match3.update(now_ms, &mut self.game),
+            Screen::Pomodoro => self.pomodoro.update(dt, now_ms, &mut self.game),
             _ => {}
         }
         for bubble in self.bubbles.iter_mut() {
@@ -1507,6 +1568,9 @@ impl Ui {
             || self.screen == Screen::Breakout
             || self.screen == Screen::Invaders
             || self.screen == Screen::Asteroids
+            || self.screen == Screen::G2048
+            || self.screen == Screen::Match3
+            || self.screen == Screen::Pomodoro
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1588,6 +1652,9 @@ impl Ui {
                     | Screen::Breakout
                     | Screen::Invaders
                     | Screen::Asteroids
+                    | Screen::G2048
+                    | Screen::Match3
+                    | Screen::Pomodoro
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1767,7 +1834,11 @@ impl Ui {
             // resolved by `row_at` on release. Registering a zone per row instead
             // meant a drag that started on a row - which is to say, almost every
             // drag - scrolled nothing at all.
-            Screen::Extras | Screen::Config | Screen::Wifi | Screen::Controller => {
+            Screen::Extras
+            | Screen::Apps
+            | Screen::Config
+            | Screen::Wifi
+            | Screen::Controller => {
                 self.zone(
                     Target::Back,
                     Zone::Disc {
@@ -1813,6 +1884,9 @@ impl Ui {
             | Screen::Breakout
             | Screen::Invaders
             | Screen::Asteroids
+            | Screen::G2048
+            | Screen::Match3
+            | Screen::Pomodoro
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2035,6 +2109,9 @@ impl Ui {
                 | Screen::Breakout
                 | Screen::Invaders
                 | Screen::Asteroids
+                | Screen::G2048
+                | Screen::Match3
+                | Screen::Pomodoro
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2046,7 +2123,8 @@ impl Ui {
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
-            Screen::Extras => self.draw_extras(scene, alpha),
+            Screen::Extras => self.draw_extras(scene, alpha, Screen::Extras),
+            Screen::Apps => self.draw_extras(scene, alpha, Screen::Apps),
             Screen::Config => self.draw_config(scene, state, alpha),
             Screen::Wifi => self.draw_wifi(scene, alpha),
             Screen::Controller => self.draw_controller(scene, state, alpha),
@@ -2072,6 +2150,22 @@ impl Ui {
             Screen::Asteroids => {
                 self.game.draw(scene, now_ms, alpha);
                 self.asteroids.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::G2048 => {
+                self.game.draw(scene, now_ms, alpha);
+                self.g2048.draw(scene, now_ms, alpha);
+                self.g2048.draw_header(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Match3 => {
+                self.game.draw(scene, now_ms, alpha);
+                self.match3.draw(scene, now_ms, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Pomodoro => {
+                self.game.draw(scene, now_ms, alpha);
+                self.pomodoro.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2360,18 +2454,34 @@ impl Ui {
     const EXTRAS: &'static [(&'static str, u16, Screen)] = &[
         ("SETTINGS", C_CONFIG, Screen::Config),
         ("SENSORS", C_INFO, Screen::Info),
+        ("APPS", C_APPS, Screen::Apps),
+    ];
+
+    /// The games and toys. Same table shape as EXTRAS, so one page draws both.
+    const APPS: &'static [(&'static str, u16, Screen)] = &[
         ("BUBBLES", C_BUBBLES, Screen::Bubbles),
         ("PONG", crate::pong::RIGHT_COLOR, Screen::Pong),
         ("BREAKOUT", C_BREAKOUT, Screen::Breakout),
         ("INVADERS", C_INVADERS, Screen::Invaders),
         ("ASTEROIDS", C_ASTEROIDS, Screen::Asteroids),
+        ("2048", C_2048, Screen::G2048),
+        ("MATCH 3", C_MATCH3, Screen::Match3),
+        ("POMODORO", C_POMODORO, Screen::Pomodoro),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
     /// Home's buttons: same width, same height, same fully-rounded ends, one word
     /// centred in each. It scrolls, because this is where games and other toys
     /// will land.
-    fn draw_extras(&mut self, scene: &mut Scene, alpha: u8) {
+    fn table_for(screen: Screen) -> &'static [(&'static str, u16, Screen)] {
+        if screen == Screen::Apps {
+            Self::APPS
+        } else {
+            Self::EXTRAS
+        }
+    }
+
+    fn draw_extras(&mut self, scene: &mut Scene, alpha: u8, page: Screen) {
         self.draw_back(scene, alpha);
         scene.label(
             CX,
@@ -2380,12 +2490,12 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            "EXTRAS",
+            if page == Screen::Apps { "APPS" } else { "EXTRAS" },
         );
 
         scene.clip(l::EXTRA_VIEW_TOP, l::EXTRA_VIEW_BOTTOM);
-        self.menu_rows(Screen::Extras, |_, row, cy| {
-            if let Some((title, color, _)) = Self::EXTRAS.get(row) {
+        self.menu_rows(page, |_, row, cy| {
+            if let Some((title, color, _)) = Self::table_for(page).get(row) {
                 let (x0, x1) = (l::EXTRA_X0, l::EXTRA_X1);
                 scene.pill(
                     x0,
@@ -2409,7 +2519,7 @@ impl Ui {
         });
         scene.clip_reset();
 
-        self.menu_scrollbar(scene, Screen::Extras, C_INFO, alpha);
+        self.menu_scrollbar(scene, page, C_INFO, alpha);
     }
 
     /// Built exactly like a schedule row, and on one baseline: a title stacked
@@ -2468,6 +2578,7 @@ impl Ui {
     fn menu_total(&self, screen: Screen) -> usize {
         match screen {
             Screen::Extras => Self::EXTRAS.len(),
+            Screen::Apps => Self::APPS.len(),
             Screen::Config => self.config_rows(),
             // The networks found, then "scan again", then "type it in".
             Screen::Wifi => self.networks.n + 2,
@@ -2477,9 +2588,32 @@ impl Ui {
         }
     }
 
+    fn scroll_slot(screen: Screen) -> usize {
+        match screen {
+            Screen::Extras => 0,
+            Screen::Apps => 1,
+            Screen::Config => 2,
+            Screen::Wifi => 3,
+            _ => 4,
+        }
+    }
+
+    /// Clamped on the way out, so a list that has since shrunk - a controller
+    /// removed, fewer networks found - cannot be left scrolled past its end.
+    fn scroll_of(&self, screen: Screen) -> i32 {
+        let g = geom(screen);
+        let total = self.menu_total(screen);
+        let max = total.saturating_sub(g.max_rows) as i32 * g.pitch;
+        self.menu_scroll[Self::scroll_slot(screen)].clamp(0, max)
+    }
+
+    fn set_scroll(&mut self, screen: Screen, value: i32) {
+        self.menu_scroll[Self::scroll_slot(screen)] = value;
+    }
+
     fn menu_target(screen: Screen, row: usize) -> Target {
         match screen {
-            Screen::Extras => Target::Extra(row),
+            Screen::Extras | Screen::Apps => Target::Extra(row),
             Screen::Wifi => Target::WifiRow(row),
             Screen::Controller => Target::CtlRow(row),
             _ => Target::ConfigRow(row),
@@ -2494,8 +2628,8 @@ impl Ui {
     fn activate_row(&mut self, target: Target, x: i32, y: i32, now_ms: u32) -> Action {
         match target {
             Target::Extra(row) => {
-                if let Some((_, _, screen)) = Self::EXTRAS.get(row) {
-                    self.menu_scroll = 0;
+                let page = self.interactive_screen();
+                if let Some((_, _, screen)) = Self::table_for(page).get(row) {
                     self.info_scroll = 0;
                     if *screen == Screen::Pong {
                         self.pong.reset(now_ms);
@@ -2509,6 +2643,12 @@ impl Ui {
                     if *screen == Screen::Asteroids {
                         self.asteroids.restart(now_ms);
                     }
+                    if *screen == Screen::G2048 {
+                        self.g2048.restart(now_ms);
+                    }
+                    if *screen == Screen::Match3 {
+                        self.match3.restart(now_ms);
+                    }
                     self.open(*screen, x, y, now_ms);
                 }
                 Action::None
@@ -2518,11 +2658,9 @@ impl Ui {
                     // Ask for a scan on the way in, so the picker has something in
                     // it by the time the transition lands.
                     self.want_scan = !self.networks.scanned;
-                    self.menu_scroll = 0;
                     self.open(Screen::Wifi, x, y, now_ms);
                 } else if row <= self.settings.n_controllers {
                     self.controller_selected = row - 1;
-                    self.menu_scroll = 0;
                     self.open(Screen::Controller, x, y, now_ms);
                 } else {
                     self.open_keyboard(Edit::NewControllerIp, "", x, y, now_ms);
@@ -2779,7 +2917,6 @@ impl Ui {
     /// there is a second case to generalise from.
     fn confirm_action(&mut self, x: i32, y: i32, now_ms: u32) -> Action {
         self.settings.remove_controller(self.controller_selected);
-        self.menu_scroll = 0;
         self.unwind_to(Screen::Config, x, y, now_ms);
         Action::SaveSettings
     }
@@ -2803,7 +2940,6 @@ impl Ui {
             let since = *self.connect_ok_ms.get_or_insert(now_ms);
             self.connect_failed = false;
             if now_ms.wrapping_sub(since) >= CONNECT_SETTLE_MS && self.wipe.is_none() {
-                self.menu_scroll = 0;
                 self.unwind_to(Screen::Config, CX, 262, now_ms);
             }
         } else if !self.connect_failed
@@ -2928,7 +3064,6 @@ impl Ui {
             Edit::WifiPsk => {
                 self.settings.ssid = self.pending_ssid;
                 self.settings.psk = value;
-                self.menu_scroll = 0;
                 self.begin_connect(x, y, now_ms);
                 Action::ApplyWifi
             }
@@ -2942,7 +3077,6 @@ impl Ui {
                     self.edit_invalid = true;
                     return Action::None;
                 }
-                self.menu_scroll = 0;
                 self.unwind_to(Screen::Config, x, y, now_ms);
                 Action::SaveSettings
             }
@@ -3100,8 +3234,9 @@ impl Ui {
     fn menu_rows(&self, screen: Screen, mut row: impl FnMut(&Self, usize, i32)) {
         let g = geom(screen);
         let total = self.menu_total(screen);
-        let first = (self.menu_scroll / g.pitch) as usize;
-        let shift = -(self.menu_scroll % g.pitch);
+        let offset = self.scroll_of(screen);
+        let first = (offset / g.pitch) as usize;
+        let shift = -(offset % g.pitch);
         for slot in 0..g.max_rows + 1 {
             let index = first + slot;
             if index >= total {
@@ -3120,7 +3255,7 @@ impl Ui {
         let g = geom(screen);
         self.draw_scrollbar(
             scene,
-            self.menu_scroll,
+            self.scroll_of(screen),
             g.max_rows,
             g.pitch,
             self.menu_total(screen),

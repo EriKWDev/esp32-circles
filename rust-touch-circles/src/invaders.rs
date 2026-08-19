@@ -36,6 +36,14 @@ const FIRE_EVERY_MS: u32 = 420;
 const BOMB_EVERY_MS: u32 = 900;
 const LIVES: u8 = 3;
 
+/// Four bunkers of BUNKER_W by BUNKER_H blocks. Deliberately coarse: each block
+/// is a primitive, and the fleet above already accounts for most of the frame.
+const BUNKERS: usize = 4;
+const BUNKER_W: usize = 4;
+const BUNKER_H: usize = 2;
+const BLOCK: i32 = 22;
+const BUNKER_TOP: i32 = SHIP_Y - 78;
+
 /// Row colours, per wave. Six sets, so the wave keeps changing appearance long
 /// after the fleet itself repeats.
 const PALETTES: [[u16; ROWS]; 6] = [
@@ -92,6 +100,10 @@ const NO_SHOT: Shot = Shot {
 
 pub struct Invaders {
     alive: [[bool; COLS]; ROWS],
+    /// Bunker blocks, eroded from either side: bombs chew down through them and
+    /// the gun shoots up through them, which is what makes hiding a decision
+    /// rather than a free shelter.
+    bunkers: [[[bool; BUNKER_W]; BUNKER_H]; BUNKERS],
     /// Fleet origin: the top-left invader's centre.
     fleet_x: i32,
     /// Q, and eased toward `fleet_drop_to`: the step down is a glide, not a jump.
@@ -113,6 +125,7 @@ impl Invaders {
     pub const fn new() -> Self {
         Self {
             alive: [[true; COLS]; ROWS],
+            bunkers: [[[true; BUNKER_W]; BUNKER_H]; BUNKERS],
             fleet_x: (W as i32 - (COLS as i32 - 1) * CELL_W) / 2,
             fleet_y: FLEET_TOP * Q,
             fleet_drop_to: FLEET_TOP * Q,
@@ -214,6 +227,7 @@ impl Invaders {
             }
         }
 
+        self.erode(now_ms, bubbles);
         self.resolve_hits(now_ms, bubbles);
 
         // Bombs against the ship, and the fleet arriving.
@@ -243,12 +257,14 @@ impl Invaders {
             } else {
                 let (wave, lives, score) = (self.wave, self.lives, self.score);
                 let alive = self.alive;
+                let bunkers = self.bunkers;
                 let (fx, fy, drop_to) = (self.fleet_x, self.fleet_y, self.fleet_drop_to);
                 *self = Self::new();
                 self.wave = wave;
                 self.lives = lives;
                 self.score = score;
                 self.alive = alive;
+                self.bunkers = bunkers;
                 self.fleet_x = fx;
                 self.fleet_y = fy;
                 self.fleet_drop_to = drop_to;
@@ -283,6 +299,55 @@ impl Invaders {
                     return;
                 }
                 seen += 1;
+            }
+        }
+    }
+
+    /// Bunker geometry, so drawing and collision share one source.
+    fn block_rect(index: usize, col: usize, row: usize) -> (i32, i32, i32, i32) {
+        let span = BUNKER_W as i32 * BLOCK;
+        let gap = (W as i32 - BUNKERS as i32 * span) / (BUNKERS as i32 + 1);
+        let x0 = gap + index as i32 * (span + gap) + col as i32 * BLOCK;
+        let y0 = BUNKER_TOP + row as i32 * BLOCK;
+        (x0, y0, x0 + BLOCK - 2, y0 + BLOCK - 2)
+    }
+
+    /// Anything in flight that is inside a block takes it away and stops there.
+    fn erode(&mut self, now_ms: u32, bubbles: &mut Bubbles) {
+        for index in 0..BUNKERS {
+            for row in 0..BUNKER_H {
+                for col in 0..BUNKER_W {
+                    if !self.bunkers[index][row][col] {
+                        continue;
+                    }
+                    let (x0, y0, x1, y1) = Self::block_rect(index, col, row);
+                    let mut struck = false;
+                    for shot in self.shots.iter_mut().filter(|s| s.live) {
+                        let (x, y) = (shot.x / Q, shot.y / Q);
+                        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+                            shot.live = false;
+                            struck = true;
+                        }
+                    }
+                    for bomb in self.bombs.iter_mut().filter(|b| b.live) {
+                        let (x, y) = (bomb.x / Q, bomb.y / Q);
+                        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+                            bomb.live = false;
+                            struck = true;
+                        }
+                    }
+                    if struck {
+                        self.bunkers[index][row][col] = false;
+                        bubbles.spawn(
+                            (x0 + x1) / 2,
+                            (y0 + y1) / 2,
+                            now_ms,
+                            Some(muted(rgb(140, 220, 160))),
+                            Some(70),
+                            true,
+                        );
+                    }
+                }
             }
         }
     }
@@ -385,6 +450,18 @@ impl Invaders {
                     palette[row],
                     alpha,
                 );
+            }
+        }
+
+        for index in 0..BUNKERS {
+            for row in 0..BUNKER_H {
+                for col in 0..BUNKER_W {
+                    if !self.bunkers[index][row][col] {
+                        continue;
+                    }
+                    let (x0, y0, x1, y1) = Self::block_rect(index, col, row);
+                    scene.pill(x0, y0, x1, y1, 4, rgb(70, 150, 100), alpha);
+                }
             }
         }
 
