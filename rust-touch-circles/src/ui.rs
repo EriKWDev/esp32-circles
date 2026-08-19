@@ -46,6 +46,8 @@ const C_CONFIG: u16 = rgb(58, 158, 178);
 /// page announces itself before you open it.
 const C_BUBBLES: u16 = rgb(255, 55, 125);
 const C_BREAKOUT: u16 = rgb(88, 190, 255);
+const C_INVADERS: u16 = rgb(120, 230, 170);
+const C_ASTEROIDS: u16 = rgb(190, 200, 230);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -340,6 +342,8 @@ pub enum Screen {
     Pong,
     /// Breakout, which brings its own palette per level.
     Breakout,
+    Invaders,
+    Asteroids,
 }
 
 impl Screen {
@@ -364,7 +368,9 @@ impl Screen {
             // Black, as the demo has it - and since the transition disc grows in
             // the destination's background colour, arriving here is a wipe to
             // black, which is the right way into it.
-            Screen::Bubbles | Screen::Pong => rgb(0, 0, 0),
+            Screen::Bubbles | Screen::Pong | Screen::Invaders | Screen::Asteroids => {
+                rgb(0, 0, 0)
+            }
             // Breakout's ground comes from the level, so `build` overrides this -
             // the fallback keeps the transition disc a sensible colour.
             Screen::Breakout => rgb(6, 10, 20),
@@ -383,6 +389,8 @@ impl Screen {
             Screen::Bubbles => C_BUBBLES,
             Screen::Pong => crate::pong::LEFT_COLOR,
             Screen::Breakout => C_BREAKOUT,
+            Screen::Invaders => C_INVADERS,
+            Screen::Asteroids => C_ASTEROIDS,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -699,6 +707,8 @@ pub struct Ui {
     game: crate::bubbles::Bubbles,
     pong: crate::pong::Pong,
     breakout: crate::breakout::Breakout,
+    invaders: crate::invaders::Invaders,
+    asteroids: crate::asteroids::Asteroids,
     pong_last_ms: u32,
     /// When the current join attempt started, and whether it has been given up
     /// on. The connecting screen is driven from these two.
@@ -810,6 +820,8 @@ impl Ui {
             game: crate::bubbles::Bubbles::new(),
             pong: crate::pong::Pong::new(),
             breakout: crate::breakout::Breakout::new(),
+            invaders: crate::invaders::Invaders::new(),
+            asteroids: crate::asteroids::Asteroids::new(),
             pong_last_ms: 0,
             connect_started_ms: 0,
             connect_failed: false,
@@ -1079,6 +1091,10 @@ impl Ui {
                             self.pong.touch(x, y);
                         } else if self.interactive_screen() == Screen::Breakout {
                             self.breakout.touch(x);
+                        } else if self.interactive_screen() == Screen::Invaders {
+                            self.invaders.touch(x);
+                        } else if self.interactive_screen() == Screen::Asteroids {
+                            self.asteroids.touch(x, y);
                         } else {
                             self.game.press(x, y, now_ms);
                         }
@@ -1248,6 +1264,14 @@ impl Ui {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.breakout.touch(x);
                     }
+                } else if self.interactive_screen() == Screen::Invaders {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.invaders.touch(x);
+                    }
+                } else if self.interactive_screen() == Screen::Asteroids {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.asteroids.touch(x, y);
+                    }
                 } else if self.interactive_screen() == Screen::Bubbles {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.game.press(x, y, now_ms);
@@ -1260,6 +1284,10 @@ impl Ui {
             }
             Event::Release { x, y, tap } => {
                 self.dragging_slider = false;
+                // Lifting off stops the thrust, so the ship coasts.
+                if self.interactive_screen() == Screen::Asteroids {
+                    self.asteroids.release();
+                }
                 if self.dragging_list {
                     self.dragging_list = false;
                     if tap {
@@ -1377,6 +1405,8 @@ impl Ui {
         match self.interactive_screen() {
             Screen::Pong => self.pong.update(dt, now_ms, &mut self.game),
             Screen::Breakout => self.breakout.update(dt, now_ms, &mut self.game),
+            Screen::Invaders => self.invaders.update(dt, now_ms, &mut self.game),
+            Screen::Asteroids => self.asteroids.update(dt, now_ms, &mut self.game),
             _ => {}
         }
         for bubble in self.bubbles.iter_mut() {
@@ -1475,6 +1505,8 @@ impl Ui {
             || self.game.active()
             || self.screen == Screen::Pong
             || self.screen == Screen::Breakout
+            || self.screen == Screen::Invaders
+            || self.screen == Screen::Asteroids
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1550,7 +1582,12 @@ impl Ui {
         if ((run_is_active(state) && !self.completion_acknowledged) || self.completion_pending)
             && !matches!(
                 self.interactive_screen(),
-                Screen::Running | Screen::Bubbles | Screen::Pong | Screen::Breakout
+                Screen::Running
+                    | Screen::Bubbles
+                    | Screen::Pong
+                    | Screen::Breakout
+                    | Screen::Invaders
+                    | Screen::Asteroids
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1772,7 +1809,11 @@ impl Ui {
                 let (x0, y0, x1, y1) = l::CONFIRM_YES;
                 self.zone(Target::Confirm, Zone::Rect { x0, y0, x1, y1 });
             }
-            Screen::Pong | Screen::Breakout | Screen::Bubbles => {
+            Screen::Pong
+            | Screen::Breakout
+            | Screen::Invaders
+            | Screen::Asteroids
+            | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
                 // contact anywhere starts a circle.
@@ -1987,7 +2028,15 @@ impl Ui {
         // The ambient decoration is skipped on the demo page: its own circles are
         // the content there, and a second, different kind of circle drifting
         // behind them would not read as the same animation.
-        if !matches!(screen, Screen::Bubbles | Screen::Pong | Screen::Breakout) && !self.idle {
+        if !matches!(
+            screen,
+            Screen::Bubbles
+                | Screen::Pong
+                | Screen::Breakout
+                | Screen::Invaders
+                | Screen::Asteroids
+        ) && !self.idle
+        {
             self.draw_bubbles(scene, screen, now_ms, alpha);
         }
         match screen {
@@ -2013,6 +2062,16 @@ impl Ui {
             Screen::Breakout => {
                 self.game.draw(scene, now_ms, alpha);
                 self.breakout.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Invaders => {
+                self.game.draw(scene, now_ms, alpha);
+                self.invaders.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Asteroids => {
+                self.game.draw(scene, now_ms, alpha);
+                self.asteroids.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2304,6 +2363,8 @@ impl Ui {
         ("BUBBLES", C_BUBBLES, Screen::Bubbles),
         ("PONG", crate::pong::RIGHT_COLOR, Screen::Pong),
         ("BREAKOUT", C_BREAKOUT, Screen::Breakout),
+        ("INVADERS", C_INVADERS, Screen::Invaders),
+        ("ASTEROIDS", C_ASTEROIDS, Screen::Asteroids),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2441,6 +2502,12 @@ impl Ui {
                     }
                     if *screen == Screen::Breakout {
                         self.breakout.restart(now_ms);
+                    }
+                    if *screen == Screen::Invaders {
+                        self.invaders.restart(now_ms);
+                    }
+                    if *screen == Screen::Asteroids {
+                        self.asteroids.restart(now_ms);
                     }
                     self.open(*screen, x, y, now_ms);
                 }

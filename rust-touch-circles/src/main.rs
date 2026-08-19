@@ -14,11 +14,13 @@
 use esp_backtrace as _;
 esp_bootloader_esp_idf::esp_app_desc!();
 
+mod asteroids;
 mod breakout;
 mod bubbles;
 mod display;
 mod font;
 mod gfx;
+mod invaders;
 mod model;
 mod net;
 mod pong;
@@ -575,6 +577,8 @@ fn main() -> ! {
                     ui::Screen::Bubbles => "bubbles",
                     ui::Screen::Pong => "pong",
                     ui::Screen::Breakout => "breakout",
+                    ui::Screen::Invaders => "invaders",
+                    ui::Screen::Asteroids => "asteroids",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
