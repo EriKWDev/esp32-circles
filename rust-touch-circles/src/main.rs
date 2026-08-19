@@ -32,6 +32,7 @@ mod match3;
 mod model;
 mod net;
 mod pomodoro;
+mod rain;
 mod pong;
 mod simon;
 mod snake;
@@ -262,6 +263,13 @@ fn main() -> ! {
     let mut ui = Ui::new();
     // The UI reads persisted settings directly, so give it the loaded copy.
     ui.settings = settings;
+    // A reboot must not lose an override in progress: without this the schedules
+    // would stay disarmed and nothing would know to put them back.
+    ui.rain.restore(
+        settings.rain_active,
+        settings.rain_armed_mask,
+        settings.rain_manual,
+    );
     let mut scene = Scene::new();
     let mut touch = Touch::new();
 
@@ -581,6 +589,25 @@ fn main() -> ! {
 
         ui.update(&state, t);
 
+        // The rain override runs whatever page is up: it is the only thing here
+        // that has to happen at a particular time of day.
+        if let Some(n) = net.as_mut() {
+            if ui.want_forecast {
+                ui.want_forecast = false;
+                ui.rain.begin(n, t);
+            }
+            ui.rain.step(n, &state, t);
+            if ui.rain.dirty {
+                ui.rain.dirty = false;
+                let (active, mask, manual) = ui.rain.saved();
+                ui.settings.rain_active = active;
+                ui.settings.rain_armed_mask = mask;
+                ui.settings.rain_manual = manual;
+                persist(&mut store, &ui.settings);
+                dirty = true;
+            }
+        }
+
         // The network-backed apps fetch for themselves, and only while their page
         // is up.
         if let Some(n) = net.as_mut() {
@@ -709,6 +736,7 @@ fn main() -> ! {
                     ui::Screen::Snake => "snake",
                     ui::Screen::Spacewar => "spacewar",
                     ui::Screen::About => "about",
+                    ui::Screen::Rain => "rain",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

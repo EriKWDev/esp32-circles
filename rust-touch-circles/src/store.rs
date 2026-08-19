@@ -24,7 +24,7 @@ const MAGIC: u32 = 0x5242_4E31; // "RBN1"
 /// Bumped to 2 when controllers gained a name. Version 1 records are still read
 /// (see `decode`), because falling back to defaults would silently discard
 /// controllers someone had already added by hand.
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
 pub const MAX_CONTROLLERS: usize = 6;
 pub const MAX_SSID: usize = 32;
@@ -107,6 +107,12 @@ pub struct Settings {
     pub psk: FixedStr<MAX_SECRET>,
     pub controllers: [Controller; MAX_CONTROLLERS],
     pub n_controllers: usize,
+    /// Rain override, persisted because a reboot in the middle of one would
+    /// otherwise leave the schedules disarmed with nothing remembering that it
+    /// was us who did it - silent until a dry spell.
+    pub rain_active: bool,
+    pub rain_armed_mask: u16,
+    pub rain_manual: u8,
 }
 
 impl Settings {
@@ -116,6 +122,9 @@ impl Settings {
         psk: FixedStr::EMPTY,
         controllers: [Controller::EMPTY; MAX_CONTROLLERS],
         n_controllers: 0,
+        rain_active: false,
+        rain_armed_mask: 0,
+        rain_manual: 0,
     };
 
     /// The compiled-in configuration from `wifi.txt`. Used on first boot, and
@@ -126,6 +135,9 @@ impl Settings {
             psk: FixedStr::new(WIFI_PASS),
             controllers: [Controller::EMPTY; MAX_CONTROLLERS],
             n_controllers: 0,
+            rain_active: false,
+            rain_armed_mask: 0,
+            rain_manual: 0,
         };
         if let Some(ip) = parse_ip(RB_HOST) {
             out.controllers[0] = Controller {
@@ -248,6 +260,11 @@ fn encode(settings: &Settings, out: &mut [u8; SECTOR]) -> usize {
         put(&controller.name.bytes, &mut at);
     }
 
+    // Appended again, after the version 2 fields, on the same principle.
+    put(&[settings.rain_active as u8], &mut at);
+    put(&settings.rain_armed_mask.to_le_bytes(), &mut at);
+    put(&[settings.rain_manual], &mut at);
+
     let payload_len = at - HEADER;
     let crc = crc32(&out[HEADER..at]);
     out[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -266,9 +283,12 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     // firmware is not readable, and falling back to defaults is safer than
     // guessing at a layout we do not know.
     let version = u16::from_le_bytes(raw[4..6].try_into().ok()?);
-    let has_names = match version {
-        1 => false,
-        v if v == VERSION => true,
+    // Each version only appends, so an older record is this layout minus its
+    // tail and reads back with the new fields left at their defaults.
+    let (has_names, has_rain) = match version {
+        1 => (false, false),
+        2 => (true, false),
+        v if v == VERSION => (true, true),
         _ => return None,
     };
     let payload_len = u16::from_le_bytes(raw[6..8].try_into().ok()?) as usize;
@@ -292,6 +312,9 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         psk: FixedStr::EMPTY,
         controllers: [Controller::EMPTY; MAX_CONTROLLERS],
         n_controllers: 0,
+        rain_active: false,
+        rain_armed_mask: 0,
+        rain_manual: 0,
     };
     settings.ssid.len = take(1, &mut at)[0].min(MAX_SSID as u8);
     settings.ssid.bytes.copy_from_slice(take(MAX_SSID, &mut at));
@@ -324,6 +347,11 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         settings.controllers[index] = controller;
     }
     settings.n_controllers = count.min(MAX_CONTROLLERS);
+    if has_rain {
+        settings.rain_active = take(1, &mut at)[0] != 0;
+        settings.rain_armed_mask = u16::from_le_bytes(take(2, &mut at).try_into().ok()?);
+        settings.rain_manual = take(1, &mut at)[0];
+    }
     Some(settings)
 }
 

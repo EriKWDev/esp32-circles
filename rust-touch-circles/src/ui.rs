@@ -58,6 +58,7 @@ const C_CALC: u16 = rgb(232, 140, 60);
 const C_WEATHER: u16 = rgb(96, 176, 255);
 const C_CURRENCY: u16 = rgb(120, 220, 170);
 const C_SNAKE: u16 = rgb(120, 230, 140);
+const C_SKY: u16 = rgb(96, 176, 255);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -91,6 +92,12 @@ mod l {
     /// Sleep now, bottom left on Home - diagonally opposite the cog and clear of
     /// both buttons.
     pub const MOON: (i32, i32, i32) = (58, 422, 34);
+    /// The forecast symbol, right of the clock, with a target far larger than the
+    /// drawing - it is a small thing to hit and the page behind it is harmless.
+    pub const SKY: (i32, i32, i32) = (376, 140, 46);
+    /// The three choices on the rain page.
+    pub const RAIN_CHOICE: [(i32, i32, i32, i32); 3] =
+        [(56, 250, 424, 314), (56, 326, 424, 390), (56, 402, 424, 452)];
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
     /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
@@ -367,6 +374,8 @@ pub enum Screen {
     Snake,
     Spacewar,
     About,
+    /// What to do about tomorrow's forecast.
+    Rain,
 }
 
 impl Screen {
@@ -405,7 +414,8 @@ impl Screen {
             | Screen::Currency
             | Screen::Snake
             | Screen::Spacewar
-            | Screen::About => rgb(0, 0, 0),
+            | Screen::About
+            | Screen::Rain => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -440,6 +450,7 @@ impl Screen {
             Screen::Snake => C_SNAKE,
             Screen::Spacewar => crate::spacewar::P1,
             Screen::About => crate::about::ACCENT,
+            Screen::Rain => C_SKY,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -488,6 +499,10 @@ enum Target {
     RunNow,
     /// Sleep immediately, without waiting out the idle timer.
     SleepNow,
+    /// The forecast symbol on the home screen.
+    Sky,
+    /// Water anyway, skip tomorrow, or follow the forecast.
+    RainChoice(usize),
     /// Enter edit mode, or save and leave it.
     EditSave,
     /// Edit mode: one entry of the schedule being edited, or the row past the
@@ -798,6 +813,9 @@ pub struct Ui {
     /// Filled in by main, which is the only place that can see the heap and the
     /// flash.
     pub sys: crate::about::Sys,
+    pub rain: crate::rain::Rain,
+    /// Set when the rain page is opened, so main asks for a fresh forecast.
+    pub want_forecast: bool,
     about_page: usize,
     spacewar: crate::spacewar::Spacewar,
     /// Where the current drag began, for 2048's swipes.
@@ -929,6 +947,8 @@ impl Ui {
             currency: crate::currency::Currency::new(),
             snake: crate::snake::Snake::new(),
             sys: crate::about::Sys::EMPTY,
+            rain: crate::rain::Rain::new(),
+            want_forecast: false,
             about_page: 0,
             spacewar: crate::spacewar::Spacewar::new(),
             swipe_from: (0, 0),
@@ -1323,6 +1343,22 @@ impl Ui {
                     Target::EditCtl(which) => {
                         self.edit_control(which, state);
                         Action::None
+                    }
+                    Target::Sky => {
+                        // Asked for afresh on the way in, so a symbol that has
+                        // been on screen since 11:00 is not what you decide on.
+                        self.want_forecast = true;
+                        self.open(Screen::Rain, x, y, now_ms);
+                        Action::None
+                    }
+                    Target::RainChoice(index) => {
+                        match index {
+                            0 => self.rain.choose_water(state),
+                            1 => self.rain.choose_skip(state),
+                            _ => self.rain.choose_auto(state),
+                        }
+                        self.unwind_to(Screen::Home, x, y, now_ms);
+                        Action::SaveSettings
                     }
                     Target::SleepNow => {
                         self.want_sleep = true;
@@ -1938,6 +1974,15 @@ impl Ui {
                 self.zone(Target::Inspect, Zone::Rect { x0, y0, x1, y1 });
                 let (x0, y0, x1, y1) = l::HOME_FORCE;
                 self.zone(Target::Force, Zone::Rect { x0, y0, x1, y1 });
+                let (sx, sy, sr) = l::SKY;
+                self.zone(
+                    Target::Sky,
+                    Zone::Disc {
+                        cx: sx,
+                        cy: sy,
+                        r: sr,
+                    },
+                );
                 let (mx, my, mr) = l::MOON;
                 self.zone(
                     Target::SleepNow,
@@ -2094,6 +2139,20 @@ impl Ui {
                         y1: g.bottom,
                     },
                 );
+            }
+            Screen::Rain => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                for (index, rect) in l::RAIN_CHOICE.iter().enumerate() {
+                    let (x0, y0, x1, y1) = *rect;
+                    self.zone(Target::RainChoice(index), Zone::Rect { x0, y0, x1, y1 });
+                }
             }
             Screen::Confirm => {
                 self.zone(
@@ -2373,6 +2432,7 @@ impl Ui {
             Screen::Keyboard => self.draw_keyboard(scene, now_ms, alpha),
             Screen::Connecting => self.draw_connecting(scene, state, now_ms, alpha),
             Screen::Confirm => self.draw_confirm(scene, alpha),
+            Screen::Rain => self.draw_rain(scene, alpha),
             Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
             Screen::Pong => {
                 self.game.draw(scene, now_ms, alpha);
@@ -2660,8 +2720,22 @@ impl Ui {
             clock.as_str(),
         );
 
+        // Tomorrow's sky, beside the clock. Only once a forecast has been
+        // fetched - an empty ring would be a puzzle rather than information.
+        if self.rain.have_forecast {
+            let (sx, sy, _) = l::SKY;
+            self.rain.symbol(scene, sx, sy, alpha);
+        }
+
         let mut next = Buf::<40>::new();
-        match state.next_start() {
+        if self.rain.skipping() {
+            let _ = write!(next, "RAIN EXPECTED · NO WATERING");
+        } else if self.rain.manual == crate::rain::Manual::Water && self.rain.wet() {
+            let _ = write!(next, "WATERING ANYWAY TOMORROW");
+        } else if self.rain.manual == crate::rain::Manual::Skip {
+            let _ = write!(next, "SKIPPING TOMORROW");
+        } else {
+            match state.next_start() {
             Some((s, minutes)) => {
                 if minutes < 60 {
                     let _ = write!(next, "NEXT {:02}:{:02} IN {} MIN", s.hh, s.mm, minutes);
@@ -2681,6 +2755,7 @@ impl Ui {
             }
             None => {
                 let _ = write!(next, "NO SCHEDULE ARMED");
+                }
             }
         }
         scene.label(
@@ -3739,6 +3814,83 @@ impl Ui {
 
     /// A full screen rather than a dialog: the panel has no notion of a modal, and
     /// an address may have taken a walk to find.
+    /// Tomorrow, and what to do about it. Three choices rather than a yes/no:
+    /// the interesting case is not confirming the forecast's decision but
+    /// overruling it in either direction, and "follow the forecast" has to be a
+    /// way back from having done so.
+    fn draw_rain(&mut self, scene: &mut Scene, alpha: u8) {
+        self.page_head(scene, "TOMORROW", "", alpha);
+        let (sx, sy, _) = l::SKY;
+        self.rain.symbol(scene, sx - 26, sy + 12, alpha);
+
+        let mut headline = Buf::<40>::new();
+        if self.rain.have_forecast {
+            let tenths = self.rain.tomorrow_tenths;
+            let _ = write!(headline, "{}.{} MM RAIN", tenths / 10, tenths % 10);
+        } else {
+            let _ = write!(headline, "NO FORECAST YET");
+        }
+        scene.label(
+            CX,
+            172,
+            FontId::Body,
+            INK,
+            alpha,
+            Align::Center,
+            headline.as_str(),
+        );
+
+        let mut verdict = Buf::<40>::new();
+        let _ = match self.rain.manual {
+            crate::rain::Manual::Water => write!(verdict, "SET TO WATER ANYWAY"),
+            crate::rain::Manual::Skip => write!(verdict, "SET TO SKIP"),
+            crate::rain::Manual::Auto if self.rain.wet() => write!(verdict, "TOO WET TO WATER"),
+            crate::rain::Manual::Auto => write!(verdict, "DRY ENOUGH TO WATER"),
+        };
+        scene.label(
+            CX,
+            208,
+            FontId::Micro,
+            MUTED,
+            alpha,
+            Align::Center,
+            verdict.as_str(),
+        );
+
+        let chosen = match self.rain.manual {
+            crate::rain::Manual::Water => 0,
+            crate::rain::Manual::Skip => 1,
+            crate::rain::Manual::Auto => 2,
+        };
+        for (index, caption) in [
+            "WATER ANYWAY",
+            "NO NEED TOMORROW",
+            "FOLLOW FORECAST",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (x0, y0, x1, y1) = l::RAIN_CHOICE[index];
+            let color = match index {
+                0 => C_RUN,
+                1 => C_SKY,
+                _ => MUTED,
+            };
+            let here = index == chosen;
+            let r = (y1 - y0) / 2;
+            scene.pill(x0, y0, x1, y1, r, if here { color } else { rgb(22, 26, 32) }, alpha);
+            scene.label(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2 + 13,
+                FontId::Body,
+                if here { rgb(8, 12, 16) } else { color },
+                alpha,
+                Align::Center,
+                caption,
+            );
+        }
+    }
+
     fn draw_confirm(&mut self, scene: &mut Scene, alpha: u8) {
         let controller = self
             .settings
