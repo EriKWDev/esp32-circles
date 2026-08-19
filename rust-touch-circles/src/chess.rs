@@ -42,7 +42,12 @@ const MAX_PLY: usize = 24;
 /// Nodes per call. The host manages thirteen million a second; this chip is two
 /// orders of magnitude slower, so a few hundred nodes is about one frame's worth
 /// of work - and the log reports the real rate per depth so it can be retuned.
-const NODES_PER_SLICE: u32 = 1_200;
+const NODES_PER_SLICE: u32 = 4_000;
+/// Ceiling on a doubled slice. Reached only when one root move has a large subtree,
+/// and a frame that long is only ever spent while the machine is visibly thinking.
+const MAX_SLICE: u32 = 40_000;
+/// Past this the evaluation has nothing more to give and the wait is not repaid.
+const MAX_DEPTH: u8 = 6;
 
 const VALUE: [i32; 7] = [0, 100, 320, 330, 500, 900, 20_000];
 /// A pawn's worth of preference for the middle, by rank and file distance from
@@ -135,6 +140,9 @@ pub struct Chess {
     /// True when the human plays white.
     pub human_white: bool,
     pub think_index: usize,
+    /// Whether there is a game to go back to. The pieces are left standing when
+    /// the page is left, so leaving it is not resigning.
+    pub has_game: bool,
     /// Square the human has picked up, if any.
     picked: Option<u8>,
     /// Legal destinations for the picked piece.
@@ -148,6 +156,14 @@ pub struct Chess {
     best_this_depth: Move,
     searching: bool,
     nodes: u32,
+    /// How far through the root move list this depth has got.
+    root_index: usize,
+    root_alpha: i32,
+    /// Nodes this slice may spend. Doubles whenever one root move needs more than
+    /// a whole slice, so progress is guaranteed at any depth.
+    slice_budget: u32,
+    /// Set deep in the search when the budget runs out, unwinding it at once.
+    aborted: bool,
     /// The reply being played out, so the board shows it a moment after the
     /// machine has decided rather than in the same frame the finger lifted.
     show_at_ms: u32,
@@ -172,6 +188,7 @@ impl Chess {
             phase: Phase::Setup,
             human_white: true,
             think_index: 1,
+            has_game: false,
             picked: None,
             hints: [0; 32],
             n_hints: 0,
@@ -182,29 +199,48 @@ impl Chess {
             best_this_depth: NO_MOVE,
             searching: false,
             nodes: 0,
+            root_index: 0,
+            root_alpha: -1_000_000,
+            slice_budget: NODES_PER_SLICE,
+            aborted: false,
             show_at_ms: 0,
             outcome: Outcome::Playing,
         }
     }
 
-    /// Back to the setup panel, keeping the chosen side and think time.
-    pub fn restart(&mut self) {
-        let (human_white, think_index) = (self.human_white, self.think_index);
-        *self = Self::new();
-        self.human_white = human_white;
-        self.think_index = think_index;
-    }
-
+    /// Show the setup panel without disturbing the board, so a game survives a
+    /// trip to the schedules and back.
     pub fn setup(&mut self) {
         self.phase = Phase::Setup;
     }
 
+    /// Choosing a side abandons whatever was on the board: the two are the same
+    /// decision, since a side cannot be swapped mid-game.
     pub fn choose_side(&mut self, white: bool) {
         self.human_white = white;
+        self.has_game = false;
+        self.searching = false;
+    }
+
+    /// Pick the game back up. The machine takes over again if it was its move.
+    pub fn resume(&mut self, now_ms: u32) {
+        if !self.has_game {
+            return;
+        }
+        if self.white_to_move == self.human_white {
+            self.phase = Phase::HumanTurn;
+        } else {
+            self.start_search(now_ms);
+        }
     }
 
     pub fn cycle_think(&mut self) {
         self.think_index = (self.think_index + 1) % THINK_CHOICES.len();
+    }
+
+    /// True while the machine is on the clock, so the page can animate.
+    pub fn thinking(&self) -> bool {
+        self.phase == Phase::Thinking
     }
 
     pub fn think_seconds(&self) -> u16 {
@@ -233,6 +269,7 @@ impl Chess {
         self.n_hints = 0;
         self.outcome = Outcome::Playing;
         self.searching = false;
+        self.has_game = true;
         if self.human_white {
             self.phase = Phase::HumanTurn;
         } else {
@@ -300,6 +337,7 @@ impl Chess {
             self.picked = None;
             self.n_hints = 0;
             if self.finished() {
+                self.has_game = false;
                 self.phase = Phase::Done;
             } else {
                 self.start_search(now_ms);
@@ -328,6 +366,10 @@ impl Chess {
         self.best_this_depth = NO_MOVE;
         self.searching = true;
         self.nodes = 0;
+        self.root_index = 0;
+        self.root_alpha = -1_000_000;
+        self.slice_budget = NODES_PER_SLICE;
+        self.aborted = false;
     }
 
     /// One slice of search, then the move once the clock is up. Returns true when
@@ -348,6 +390,7 @@ impl Chess {
                 }
                 let _ = self.make(chosen);
                 self.phase = if self.finished() {
+                    self.has_game = false;
                     Phase::Done
                 } else {
                     Phase::HumanTurn
@@ -357,7 +400,16 @@ impl Chess {
             return false;
         }
 
-        let budget = self.nodes + NODES_PER_SLICE;
+        // The clock is checked here, once per frame, and not only where a depth
+        // finishes. That was the bug behind thinking for ever: a depth too large
+        // for one slice never completed, so the only time check in the code was
+        // never reached. It also makes the setting mean what it says - a maximum,
+        // not a duration.
+        if self.out_of_time(now_ms) && self.best != NO_MOVE {
+            self.stop_searching(now_ms);
+            return false;
+        }
+
         let mut legal = [NO_MOVE; MAX_MOVES];
         let n = self.legal_moves(&mut legal);
         if n == 0 {
@@ -367,47 +419,89 @@ impl Chess {
             return false;
         }
         order(&mut legal[..n], &self.board);
+        if self.root_index >= n {
+            self.root_index = 0;
+        }
 
-        // One depth per slice group: the root is re-searched each time, which is
-        // what iterative deepening does anyway, and it keeps all the state that
-        // has to survive a return in one place - the depth and the best move.
-        let mut alpha = -1_000_000;
-        for index in 0..n {
-            let m = legal[index];
+        // Where the root got to survives the return, so a slice continues the depth
+        // it was in the middle of rather than starting it again. Throwing that work
+        // away was the other half of the problem: nothing past depth two could ever
+        // finish.
+        let budget = self.nodes + self.slice_budget;
+        while self.root_index < n {
+            let m = legal[self.root_index];
             let undo = self.make(m);
-            let score = -self.search(self.depth as i32 - 1, -1_000_000, -alpha, 1, budget);
+            self.aborted = false;
+            let score = -self.search(
+                self.depth as i32 - 1,
+                -1_000_000,
+                -self.root_alpha,
+                1,
+                budget,
+            );
             self.unmake(m, undo);
-            if score > alpha {
-                alpha = score;
+            if self.aborted {
+                // This subtree did not fit in what was left of the slice. Its score
+                // is meaningless, so it is not recorded and the root does not
+                // advance - but the next attempt gets a larger slice, which is what
+                // guarantees the search moves forward however deep it goes.
+                self.slice_budget = (self.slice_budget * 2).min(MAX_SLICE);
+                return false;
+            }
+            if score > self.root_alpha {
+                self.root_alpha = score;
                 self.best_this_depth = m;
             }
+            self.root_index += 1;
             if self.nodes >= budget {
-                // Out of nodes for this frame. The depth is not finished, so what
-                // it found is not trusted - the next call starts it again.
                 return false;
             }
         }
+
+        // A finished depth is the only kind whose answer is trusted.
         self.best = self.best_this_depth;
         esp_println::println!(
-            "chess: depth {} done, {} nodes in {} ms",
+            "chess: depth {} = {} cp, {} nodes, {} ms",
             self.depth,
+            self.root_alpha,
             self.nodes,
             now_ms.wrapping_sub(self.started_ms)
         );
+        let mate = self.root_alpha > 90_000;
         self.depth += 1;
-        // Deep enough, or out of time: eighteen ply is past anything this
-        // evaluation can use and stops a mate-in-two search spinning.
-        if now_ms.wrapping_sub(self.deadline_ms) < u32::MAX / 2 || self.depth > 18 {
-            self.searching = false;
-            self.show_at_ms = now_ms + 150;
+        self.root_index = 0;
+        self.root_alpha = -1_000_000;
+        self.best_this_depth = NO_MOVE;
+        self.slice_budget = NODES_PER_SLICE;
+        // Mate found, or deeper than this evaluation can use anything from.
+        if mate || self.depth > MAX_DEPTH || self.out_of_time(now_ms) {
+            self.stop_searching(now_ms);
         }
         false
     }
 
+    fn out_of_time(&self, now_ms: u32) -> bool {
+        now_ms.wrapping_sub(self.deadline_ms) < u32::MAX / 2
+    }
+
+    fn stop_searching(&mut self, now_ms: u32) {
+        self.searching = false;
+        // A short beat before the piece moves, so it reads as a reply rather than
+        // part of the same instant the finger lifted.
+        self.show_at_ms = now_ms + 150;
+    }
+
     fn search(&mut self, depth: i32, mut alpha: i32, beta: i32, ply: usize, budget: u32) -> i32 {
         self.nodes += 1;
+        if self.aborted {
+            return alpha;
+        }
         if depth <= 0 || ply >= MAX_PLY {
             return self.evaluate();
+        }
+        if self.nodes >= budget {
+            self.aborted = true;
+            return alpha;
         }
         let mut legal = [NO_MOVE; MAX_MOVES];
         let n = self.legal_moves(&mut legal);
@@ -426,14 +520,14 @@ impl Chess {
             let undo = self.make(m);
             let score = -self.search(depth - 1, -beta, -alpha, ply + 1, budget);
             self.unmake(m, undo);
+            if self.aborted {
+                return alpha;
+            }
             if score >= beta {
                 return beta;
             }
             if score > alpha {
                 alpha = score;
-            }
-            if self.nodes >= budget {
-                break;
             }
         }
         alpha
@@ -922,6 +1016,11 @@ impl Chess {
             "CHESS",
         );
         for (index, rect) in SETUP.iter().enumerate() {
+            // Nothing to continue, nothing drawn - an inert button is worse than
+            // an absent one.
+            if index == CONTINUE && !self.has_game {
+                continue;
+            }
             let (x0, y0, x1, y1) = *rect;
             let chosen = match index {
                 0 => self.human_white,
@@ -932,7 +1031,8 @@ impl Chess {
                 0 => WHITE_PIECE,
                 1 => rgb(90, 96, 108),
                 2 => ACCENT,
-                _ => HINT,
+                CONTINUE => HINT,
+                _ => rgb(120, 170, 255),
             };
             let r = (y1 - y0) / 2;
             scene.pill(
@@ -952,8 +1052,9 @@ impl Chess {
             let _ = match index {
                 0 => write!(caption, "YOU PLAY WHITE"),
                 1 => write!(caption, "YOU PLAY BLACK"),
-                2 => write!(caption, "THINKS {} S", self.think_seconds()),
-                _ => write!(caption, "START"),
+                2 => write!(caption, "THINKS {} S MAX", self.think_seconds()),
+                CONTINUE => write!(caption, "CONTINUE"),
+                _ => write!(caption, "NEW GAME"),
             };
             scene.label(
                 (x0 + x1) / 2,
@@ -976,18 +1077,21 @@ impl Chess {
             rgb(140, 152, 166),
             alpha,
             Align::Center,
-            "TAP THE TIME TO CHANGE IT",
+            "PICKING A SIDE STARTS OVER",
         );
     }
 }
 
-/// The setup panel's four controls: two sides, the think time, and start.
-pub const SETUP: [(i32, i32, i32, i32); 4] = [
-    (60, 140, 420, 200),
-    (60, 212, 420, 272),
-    (60, 284, 420, 344),
-    (60, 366, 420, 434),
+/// The setup panel: two sides, the think time, continue, and a new game.
+pub const SETUP: [(i32, i32, i32, i32); 5] = [
+    (60, 128, 420, 184),
+    (60, 190, 420, 246),
+    (60, 252, 420, 308),
+    (60, 320, 420, 376),
+    (60, 382, 420, 438),
 ];
+/// Continue is the only one the tap handler names; the rest fall out in order.
+pub const CONTINUE: usize = 3;
 
 pub fn setup_at(x: i32, y: i32) -> Option<usize> {
     SETUP.iter().position(|(x0, y0, x1, y1)| {

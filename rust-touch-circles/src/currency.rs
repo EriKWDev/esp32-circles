@@ -46,6 +46,9 @@ pub struct Currency {
     custom: Buf<8>,
     /// What the feed resolved to last, for the About page.
     host_ip: Option<[u8; 4]>,
+    /// Controller clock when the rates landed. Rates move slowly and a stale
+    /// table looks exactly like a fresh one, so the page says which it is.
+    refreshed: Option<(u8, u8)>,
 }
 
 impl Currency {
@@ -56,6 +59,7 @@ impl Currency {
             per: [1; ROWS],
             custom: Buf::new(),
             host_ip: None,
+            refreshed: None,
         }
     }
 
@@ -70,7 +74,10 @@ impl Currency {
     }
 
     pub fn fingerprint(&self) -> u32 {
-        self.stage as u32 + self.price[0] as u32 * 8 + self.custom.len() as u32 * 65_536
+        self.stage as u32
+            + self.price[0] as u32 * 8
+            + self.custom.len() as u32 * 65_536
+            + self.refreshed.map_or(0, |(hh, mm)| hh as u32 * 60 + mm as u32) * 1_048_576
     }
 
     pub fn custom_code(&self) -> &str {
@@ -89,7 +96,7 @@ impl Currency {
         self.stage = Stage::Cold;
     }
 
-    pub fn step(&mut self, net: &mut Net, now_ms: u32) {
+    pub fn step(&mut self, net: &mut Net, now_ms: u32, clock: Option<(u8, u8)>) {
         match self.stage {
             Stage::Cold => {
                 if net.fetch.busy() {
@@ -102,6 +109,7 @@ impl Currency {
                 let resolved = net.fetch.resolved().map(|ip| ip.octets());
                 if let Some(text) = net.fetch.take() {
                     self.host_ip = resolved;
+                    self.refreshed = clock;
                     // Within `rates`, so a code can never be read off one of the
                     // metadata fields above it.
                     let rates = scope(text, "rates");
@@ -206,6 +214,27 @@ impl Currency {
                 right.as_str(),
             );
         }
+
+        // Where the numbers came from and when, in small print: a rate with no
+        // provenance is just a number.
+        let mut source = TextBuf::new();
+        match self.refreshed {
+            Some((hh, mm)) => {
+                let _ = write!(source, "{HOST} {hh:02}:{mm:02}");
+            }
+            None => {
+                let _ = write!(source, "{HOST}");
+            }
+        }
+        scene.label(
+            W as i32 / 2,
+            398,
+            FontId::Micro,
+            DIM,
+            alpha,
+            Align::Center,
+            source.as_str(),
+        );
 
         let (x0, y0, x1, y1) = SYMBOL;
         scene.pill(x0, y0, x1, y1, (y1 - y0) / 2, rgb(26, 30, 38), alpha);

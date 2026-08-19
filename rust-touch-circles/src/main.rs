@@ -316,6 +316,10 @@ fn main() -> ! {
     // sleep, and the drag reports that follow it - still the same touch - look
     // like fresh activity and wake the panel straight back up.
     let mut sleep_until_release = false;
+    // Set by the moon and held until the next touch. Without it, sleeping on mains
+    // would last exactly as long as the finger: the idle timers are pinned open
+    // while powered, so the release would wake the panel it had just put out.
+    let mut asked_to_sleep = false;
     let mut brightness = 255u8;
     let mut dirty = true;
 
@@ -357,6 +361,7 @@ fn main() -> ! {
         if event != touch::Event::None {
             dirty = true;
             if !sleep_until_release {
+                asked_to_sleep = false;
                 last_input_ms = t;
             }
         }
@@ -502,14 +507,24 @@ fn main() -> ! {
         // The moon button asks for sleep now rather than in three minutes, by
         // backdating the last touch - so there is still exactly one thing that
         // decides the power state.
+        let mut forced_sleep = false;
         if ui.take_sleep_request() {
             last_input_ms = t.wrapping_sub(SLEEP_AFTER_MS);
             sleep_until_release = true;
+            forced_sleep = true;
+            asked_to_sleep = true;
         }
         // Watering holds the panel awake. A run is the one thing worth watching
         // without touching anything, and a countdown that dims itself away is
         // worse than the battery it saves. The moon is the way out of that.
         let watching = state.running || state.queued > 0 || state.queue_gap;
+        // On mains, the timers do not run at all: there is no battery to save and a
+        // wall panel that has gone dark is a panel you have to touch before it can
+        // tell you anything. The moon is then the only way to a dark screen, and it
+        // latches until the next touch.
+        if state.external_power && !forced_sleep && !asked_to_sleep {
+            last_input_ms = t;
+        }
         let untouched = t.wrapping_sub(last_input_ms);
         let want_dim = untouched >= DIM_AFTER_MS && !watching;
         let want_sleep = untouched >= SLEEP_AFTER_MS && !watching;
@@ -612,7 +627,8 @@ fn main() -> ! {
         // The network-backed apps fetch for themselves, and only while their page
         // is up.
         if let Some(n) = net.as_mut() {
-            if ui.step_apps(n, t) {
+            let clock = state.clock_valid.then_some((state.hh, state.mm));
+            if ui.step_apps(n, t, clock) {
                 dirty = true;
             }
         }

@@ -818,6 +818,7 @@ pub struct Ui {
     pub sys: crate::about::Sys,
     pub rain: crate::rain::Rain,
     chess: crate::chess::Chess,
+    chess_bubble_ms: u32,
     /// Set when the rain page is opened, so main asks for a fresh forecast.
     pub want_forecast: bool,
     about_page: usize,
@@ -953,6 +954,7 @@ impl Ui {
             sys: crate::about::Sys::EMPTY,
             rain: crate::rain::Rain::new(),
             chess: crate::chess::Chess::new(),
+            chess_bubble_ms: 0,
             want_forecast: false,
             about_page: 0,
             spacewar: crate::spacewar::Spacewar::new(),
@@ -1102,7 +1104,12 @@ impl Ui {
     /// Let the network-backed apps advance their fetches, and say whether the
     /// screen changed as a result. Only the page on screen gets to ask: nothing
     /// here should be talking to the internet in the background.
-    pub fn step_apps(&mut self, net: &mut crate::net::Net, now_ms: u32) -> bool {
+    pub fn step_apps(
+        &mut self,
+        net: &mut crate::net::Net,
+        now_ms: u32,
+        clock: Option<(u8, u8)>,
+    ) -> bool {
         match self.interactive_screen() {
             Screen::Weather => {
                 let before = self.weather.fingerprint();
@@ -1111,7 +1118,7 @@ impl Ui {
             }
             Screen::Currency => {
                 let before = self.currency.fingerprint();
-                self.currency.step(net, now_ms);
+                self.currency.step(net, now_ms, clock);
                 self.currency.fingerprint() != before
             }
             _ => false,
@@ -1699,6 +1706,31 @@ impl Ui {
             // costs the loop a few milliseconds per frame instead of stalling it.
             Screen::Chess => {
                 self.chess.think(now_ms);
+                // A circle every so often while it thinks, so a long search looks
+                // like work rather than a hang. They land round the edges, which is
+                // all the board leaves visible.
+                if self.chess.thinking()
+                    && now_ms.wrapping_sub(self.chess_bubble_ms) > 520
+                {
+                    self.chess_bubble_ms = now_ms;
+                    const AT: [(i32, i32); 6] = [
+                        (40, 120),
+                        (440, 150),
+                        (30, 380),
+                        (450, 400),
+                        (240, 20),
+                        (240, 462),
+                    ];
+                    let (x, y) = AT[(now_ms / 520) as usize % AT.len()];
+                    self.game.spawn(
+                        x,
+                        y,
+                        now_ms,
+                        Some(crate::chess::ACCENT),
+                        Some(150),
+                        true,
+                    );
+                }
             }
             Screen::Spacewar => self.spacewar.update(dt, now_ms, &mut self.game),
             Screen::Breakout => self.breakout.update(dt, now_ms, &mut self.game),
@@ -2447,6 +2479,7 @@ impl Ui {
             Screen::Confirm => self.draw_confirm(scene, alpha),
             Screen::Rain => self.draw_rain(scene, alpha),
             Screen::Chess => {
+                self.game.draw(scene, now_ms, alpha);
                 self.chess.draw(scene, now_ms, alpha);
                 self.draw_back(scene, alpha);
             }
@@ -2502,10 +2535,12 @@ impl Ui {
                 self.draw_back(scene, alpha);
             }
             Screen::Weather => {
+                Self::draw_ring_theme(scene, C_WEATHER, alpha);
                 self.weather.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Currency => {
+                Self::draw_ring_theme(scene, C_CURRENCY, alpha);
                 self.currency.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
@@ -2541,6 +2576,16 @@ impl Ui {
         // put two things in one place. Home is also where it belongs: it is
         // ambient status, not something you consult mid-task, and the link dot it
         // shares that strip with is already Home-only.
+    }
+
+    /// Three thin rings, off-centre and clipped by the edges, so the data pages
+    /// share the circle theme without anything moving behind text that has to be
+    /// read.
+    fn draw_ring_theme(scene: &mut Scene, accent: u16, alpha: u8) {
+        let color = mix565(rgb(0, 0, 0), accent, 40);
+        for (cx, cy, r) in [(96, 96, 150), (400, 250, 190), (200, 470, 120)] {
+            scene.ring(cx, cy, r, r - 2, color, alpha);
+        }
     }
 
     fn draw_bubbles(&self, scene: &mut Scene, screen: Screen, now_ms: u32, alpha: u8) {
@@ -3064,7 +3109,7 @@ impl Ui {
                         self.about_page = 0;
                     }
                     if *screen == Screen::Chess {
-                        self.chess.restart();
+                        self.chess.setup();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
@@ -3844,6 +3889,7 @@ impl Ui {
                 Some(0) => self.chess.choose_side(true),
                 Some(1) => self.chess.choose_side(false),
                 Some(2) => self.chess.cycle_think(),
+                Some(crate::chess::CONTINUE) => self.chess.resume(now_ms),
                 Some(_) => self.chess.begin(now_ms),
                 None => {}
             },
