@@ -13,7 +13,7 @@ use crate::font::FontId;
 use crate::gfx::{Align, Scene, TextBuf, W, rgb};
 use crate::net::{Buf, Net};
 
-const HOST: &str = "open.er-api.com";
+pub const HOST: &str = "open.er-api.com";
 const PATH: &str = "/v6/latest/SEK";
 
 /// The four asked for, plus one slot the keyboard fills in.
@@ -44,6 +44,8 @@ pub struct Currency {
     price: [i32; ROWS],
     per: [i32; ROWS],
     custom: Buf<8>,
+    /// What the feed resolved to last, for the About page.
+    host_ip: Option<[u8; 4]>,
 }
 
 impl Currency {
@@ -53,7 +55,12 @@ impl Currency {
             price: [0; ROWS],
             per: [1; ROWS],
             custom: Buf::new(),
+            host_ip: None,
         }
+    }
+
+    pub fn host_ip(&self) -> Option<[u8; 4]> {
+        self.host_ip
     }
 
     pub fn wake(&mut self) {
@@ -92,7 +99,9 @@ impl Currency {
                 self.stage = Stage::Fetching;
             }
             Stage::Fetching => {
+                let resolved = net.fetch.resolved().map(|ip| ip.octets());
                 if let Some(text) = net.fetch.take() {
+                    self.host_ip = resolved;
                     // Within `rates`, so a code can never be read off one of the
                     // metadata fields above it.
                     let rates = scope(text, "rates");

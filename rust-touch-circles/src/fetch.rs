@@ -60,6 +60,8 @@ pub struct Fetch {
     /// Bumped per request so consecutive connections do not reuse a port that
     /// the other end still has in TIME_WAIT.
     seq: u32,
+    /// What the last lookup came back with, which the About page reports.
+    resolved: Option<Ipv4Address>,
 }
 
 impl Fetch {
@@ -85,7 +87,12 @@ impl Fetch {
             sent: false,
             started_ms: 0,
             seq: 0,
+            resolved: None,
         }
+    }
+
+    pub fn resolved(&self) -> Option<Ipv4Address> {
+        self.resolved
     }
 
     /// Put the router's own resolver at the end of the list. A network that
@@ -134,6 +141,7 @@ impl Fetch {
         // A literal address needs no lookup, and asking 1.1.1.1 to resolve one
         // would fail.
         if let Some(ip) = parse_ipv4(host) {
+            self.resolved = Some(ip);
             self.phase = Phase::Talking;
             self.connect(sockets, iface, IpAddress::Ipv4(ip), now_ms);
             return;
@@ -199,6 +207,9 @@ impl Fetch {
                     match addresses.first() {
                         Some(&addr) => {
                             esp_println::println!("fetch: resolved to {addr}");
+                            // Only one variant exists: this build has no IPv6.
+                            let IpAddress::Ipv4(v4) = addr;
+                            self.resolved = Some(v4);
                             self.phase = Phase::Talking;
                             self.connect(sockets, iface, addr, now_ms);
                         }

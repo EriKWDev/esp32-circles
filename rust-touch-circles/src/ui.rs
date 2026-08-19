@@ -366,6 +366,7 @@ pub enum Screen {
     Currency,
     Snake,
     Spacewar,
+    About,
 }
 
 impl Screen {
@@ -403,7 +404,8 @@ impl Screen {
             | Screen::Weather
             | Screen::Currency
             | Screen::Snake
-            | Screen::Spacewar => rgb(0, 0, 0),
+            | Screen::Spacewar
+            | Screen::About => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -437,6 +439,7 @@ impl Screen {
             Screen::Currency => C_CURRENCY,
             Screen::Snake => C_SNAKE,
             Screen::Spacewar => crate::spacewar::P1,
+            Screen::About => crate::about::ACCENT,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -714,6 +717,8 @@ const WIPE_REVEAL_MS: u32 = 240;
 /// Belt and braces: no transition may ever outlive this, whatever the clock
 /// does. A stuck wipe would swallow all input, which is the worst failure this
 /// UI can have.
+/// How long DONE stays on the timer page before it returns to the clock.
+const DONE_LINGER_MS: u32 = 3_000;
 const WIPE_MAX_MS: u32 = 2_000;
 
 /// How deep the navigation history goes. The longest real route is
@@ -790,6 +795,10 @@ pub struct Ui {
     weather: crate::weather::Weather,
     currency: crate::currency::Currency,
     snake: crate::snake::Snake,
+    /// Filled in by main, which is the only place that can see the heap and the
+    /// flash.
+    pub sys: crate::about::Sys,
+    about_page: usize,
     spacewar: crate::spacewar::Spacewar,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
@@ -847,6 +856,9 @@ pub struct Ui {
     run_anchor_ms: u32,
     run_anchor_left_ms: u32,
     run_finished: bool,
+    /// When to leave the timer page of its own accord, set once a run watched
+    /// there has finished.
+    auto_home_at_ms: Option<u32>,
     /// A completed run remains available as a 00:00 badge until DONE is used.
     completion_pending: bool,
     /// Cancel/DONE consumes the next falling edge; otherwise the optimistic
@@ -916,6 +928,8 @@ impl Ui {
             weather: crate::weather::Weather::new(),
             currency: crate::currency::Currency::new(),
             snake: crate::snake::Snake::new(),
+            sys: crate::about::Sys::EMPTY,
+            about_page: 0,
             spacewar: crate::spacewar::Spacewar::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
@@ -938,6 +952,7 @@ impl Ui {
             run_anchor_ms: 0,
             run_anchor_left_ms: 0,
             run_finished: false,
+            auto_home_at_ms: None,
             completion_pending: false,
             completion_acknowledged: false,
             dragging_list: false,
@@ -1200,9 +1215,11 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        if self.interactive_screen() == Screen::Snake {
+                        if self.interactive_screen() == Screen::About {
+                            self.about_page = (self.about_page + 1) % crate::about::PAGES;
+                        } else if self.interactive_screen() == Screen::Snake {
                             self.snake.tap(now_ms);
-                            self.snake.press(x, y);
+                            self.snake.steer(x, y);
                         } else if self.interactive_screen() == Screen::Spacewar {
                             self.spacewar.press(x, y, now_ms);
                         } else if self.interactive_screen() == Screen::Pong {
@@ -1433,7 +1450,7 @@ impl Ui {
                 // behaviour, not an addition.
                 if self.interactive_screen() == Screen::Snake {
                     if self.hit(x, y) == Some(Target::Bubble) {
-                        self.snake.drag(x, y);
+                        self.snake.steer(x, y);
                     }
                 } else if self.interactive_screen() == Screen::Spacewar {
                     if self.hit(x, y) == Some(Target::Bubble) {
@@ -1480,9 +1497,6 @@ impl Ui {
                 }
                 if self.interactive_screen() == Screen::Pomodoro {
                     self.pomodoro.release();
-                }
-                if self.interactive_screen() == Screen::Snake {
-                    self.snake.release();
                 }
                 // Lifting off stops a turn; thrust stays latched.
                 if self.interactive_screen() == Screen::Spacewar {
@@ -1595,6 +1609,27 @@ impl Ui {
 
     /// Advance animations, and follow the controller into and out of a run.
     pub fn update(&mut self, state: &State, now_ms: u32) {
+        // Leaving the finished timer page. Treated exactly as the DONE button is,
+        // so the outcome still rides in on the green transition, and only from the
+        // page itself: if it was left in the meantime, the badge takes over.
+        if let Some(at) = self.auto_home_at_ms
+            && now_ms.wrapping_sub(at) < u32::MAX / 2
+        {
+            self.auto_home_at_ms = None;
+            if self.screen == Screen::Running && self.wipe.is_none() {
+                let (cx, cy) = (W as i32 / 2, H as i32 / 2);
+                self.unwind_to(Screen::Home, cx, cy, now_ms);
+                self.wipe = Some(Wipe {
+                    to: Screen::Home,
+                    x: cx,
+                    y: cy,
+                    born_ms: now_ms,
+                    color: C_RUN,
+                });
+                self.completion_pending = false;
+                self.completion_acknowledged = true;
+            }
+        }
         if let Some(w) = self.wipe {
             let age = now_ms.wrapping_sub(w.born_ms);
             if age >= WIPE_COVER_MS + WIPE_REVEAL_MS || age > WIPE_MAX_MS {
@@ -1698,8 +1733,16 @@ impl Ui {
             self.completion_pending = false;
             self.completion_acknowledged = false;
         }
+        if started {
+            self.auto_home_at_ms = None;
+        }
         if ended && !self.completion_acknowledged {
             self.run_finished = true;
+            // Watched to the end, so the page has done its job: show DONE long
+            // enough to be read, then fall back to the clock by itself.
+            if self.screen == Screen::Running {
+                self.auto_home_at_ms = Some(now_ms + DONE_LINGER_MS);
+            }
             // Completion waits in the corner badge rather than seizing the screen.
             // Opening the timer page unasked interrupted whatever was being done,
             // once per finished run; the badge is the invitation, and tapping it
@@ -1724,6 +1767,7 @@ impl Ui {
             || self.ripples.iter().any(|r| r.active)
             || self.bubbles.iter().any(|b| b.active)
             || (self.screen == Screen::Running && !self.run_finished)
+            || self.auto_home_at_ms.is_some()
             || self.last_running
             || self.dragging_slider
             // A lit key has to be un-lit again, which needs one more frame.
@@ -1837,6 +1881,7 @@ impl Ui {
                     | Screen::Currency
                     | Screen::Snake
                     | Screen::Spacewar
+                    | Screen::About
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2076,6 +2121,7 @@ impl Ui {
             | Screen::Currency
             | Screen::Snake
             | Screen::Spacewar
+            | Screen::About
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2394,6 +2440,23 @@ impl Ui {
                 self.spacewar.draw(scene, now_ms, alpha);
                 self.draw_back(scene, alpha);
             }
+            Screen::About => {
+                let (city, lat, lon) = self.weather.place();
+                let (geo_ip, met_ip) = self.weather.hosts();
+                let facts = crate::about::Facts {
+                    sys: self.sys,
+                    settings: &self.settings,
+                    online: &state.controller_online,
+                    city,
+                    lat,
+                    lon,
+                    geo: (crate::weather::HOST_GEO, geo_ip),
+                    met: (crate::weather::HOST_MET, met_ip),
+                    rates: (crate::currency::HOST, self.currency.host_ip()),
+                };
+                crate::about::draw(scene, self.about_page, &facts, alpha);
+                self.draw_back(scene, alpha);
+            }
         }
         // The battery is drawn by draw_home, not here. It occupies the top centre
         // strip, which every other screen uses for its own heading - the minutes
@@ -2700,6 +2763,7 @@ impl Ui {
         ("CURRENCY", C_CURRENCY, Screen::Currency),
         ("MASKEN", C_SNAKE, Screen::Snake),
         ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
+        ("ABOUT", crate::about::ACCENT, Screen::About),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2902,6 +2966,9 @@ impl Ui {
                     }
                     if *screen == Screen::Spacewar {
                         self.spacewar.restart();
+                    }
+                    if *screen == Screen::About {
+                        self.about_page = 0;
                     }
                     self.open(*screen, x, y, now_ms);
                 }

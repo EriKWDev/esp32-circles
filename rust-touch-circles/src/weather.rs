@@ -18,9 +18,9 @@ use crate::net::{Buf, Net};
 
 pub const MAX_DAYS: usize = 6;
 
-const HOST_GEO: &str = "ip-api.com";
+pub const HOST_GEO: &str = "ip-api.com";
 const PATH_GEO: &str = "/json/?fields=lat,lon,city";
-const HOST_MET: &str = "api.open-meteo.com";
+pub const HOST_MET: &str = "api.open-meteo.com";
 
 const INK: u16 = rgb(238, 245, 250);
 const DIM: u16 = rgb(140, 152, 166);
@@ -75,6 +75,9 @@ pub struct Weather {
     n: usize,
     /// Which day is on screen. Starts on tomorrow.
     day: usize,
+    /// What each host resolved to last, for the About page.
+    geo_ip: Option<[u8; 4]>,
+    met_ip: Option<[u8; 4]>,
 }
 
 impl Weather {
@@ -87,7 +90,18 @@ impl Weather {
             days: [NO_DAY; MAX_DAYS],
             n: 0,
             day: 1,
+            geo_ip: None,
+            met_ip: None,
         }
+    }
+
+    /// Where it looked, what it found, and what it resolved - all read by About.
+    pub fn place(&self) -> (&str, &str, &str) {
+        (self.city.as_str(), self.lat.as_str(), self.lon.as_str())
+    }
+
+    pub fn hosts(&self) -> (Option<[u8; 4]>, Option<[u8; 4]>) {
+        (self.geo_ip, self.met_ip)
     }
 
     /// Called when the page is opened. A forecast in hand is kept - it is hours
@@ -135,7 +149,9 @@ impl Weather {
             }
             Stage::Locating => {
                 let mut located = false;
+                let resolved = net.fetch.resolved().map(|ip| ip.octets());
                 if let Some(text) = net.fetch.take() {
+                    self.geo_ip = resolved;
                     self.city = Buf::new();
                     self.lat = Buf::new();
                     self.lon = Buf::new();
@@ -168,7 +184,9 @@ impl Weather {
                 }
             }
             Stage::Forecasting => {
+                let resolved = net.fetch.resolved().map(|ip| ip.octets());
                 if let Some(text) = net.fetch.take() {
+                    self.met_ip = resolved;
                     self.absorb_forecast(text);
                 } else if net.fetch.take_failure() {
                     self.stage = Stage::Failed;

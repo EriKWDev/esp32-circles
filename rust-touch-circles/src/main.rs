@@ -14,6 +14,7 @@
 use esp_backtrace as _;
 esp_bootloader_esp_idf::esp_app_desc!();
 
+mod about;
 mod asteroids;
 mod audio;
 mod breakout;
@@ -188,6 +189,8 @@ fn main() -> ! {
     // radio is handed are the saved ones rather than whatever was compiled in.
     let mut store = store::Store::new(p.FLASH);
     let (settings, restored) = store.load();
+    // Asked once: the answer cannot change, and it costs an SPI round trip.
+    let flash_bytes = store.flash_bytes();
     esp_println::println!(
         "store: restored={} ssid=\"{}\" controllers={}",
         restored as u8,
@@ -561,6 +564,21 @@ fn main() -> ! {
             dirty = true;
         }
 
+        // The About page reports on the machine, which only this loop can see.
+        // Refreshed while it is up rather than every frame: reading the heap is
+        // cheap, but there is no reason to do it sixty times a second.
+        if ui.screen == ui::Screen::About {
+            ui.sys = about::Sys {
+                ip: net.as_ref().and_then(|n| n.ip).map(|ip| ip.octets()),
+                heap_free: esp_alloc::HEAP.free() as u32,
+                heap_used: esp_alloc::HEAP.used() as u32,
+                flash_bytes,
+                nvs_offset: store::NVS_OFFSET,
+                nvs_sector: store::SECTOR as u32,
+                record_len: store.record_len as u32,
+            };
+        }
+
         ui.update(&state, t);
 
         // The network-backed apps fetch for themselves, and only while their page
@@ -690,6 +708,7 @@ fn main() -> ! {
                     ui::Screen::Currency => "currency",
                     ui::Screen::Snake => "snake",
                     ui::Screen::Spacewar => "spacewar",
+                    ui::Screen::About => "about",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

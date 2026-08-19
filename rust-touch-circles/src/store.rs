@@ -15,9 +15,10 @@ use esp_storage::FlashStorage;
 use crate::net::{RB_HOST, RB_PASS, RB_USER, WIFI_PASS, WIFI_SSID};
 
 /// Offset of the `nvs` partition, from the partition table.
-const NVS_OFFSET: u32 = 0x9000;
+/// The parameter partition this record lives in, reported by the About page.
+pub const NVS_OFFSET: u32 = 0x9000;
 /// One flash sector: the erase granularity, and all we need.
-const SECTOR: usize = 4096;
+pub const SECTOR: usize = 4096;
 
 const MAGIC: u32 = 0x5242_4E31; // "RBN1"
 /// Bumped to 2 when controllers gained a name. Version 1 records are still read
@@ -327,6 +328,8 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
 }
 
 pub struct Store<'d> {
+    /// Bytes the last encoded record occupied, for the About page.
+    pub record_len: usize,
     flash: FlashStorage<'d>,
 }
 
@@ -334,6 +337,7 @@ impl<'d> Store<'d> {
     pub fn new(flash: esp_hal::peripherals::FLASH<'d>) -> Self {
         // esp-storage's `Flash` is an alias for the HAL's FLASH peripheral.
         Self {
+            record_len: 0,
             flash: FlashStorage::new(flash),
         }
     }
@@ -343,16 +347,22 @@ impl<'d> Store<'d> {
         let mut raw = [0u8; SECTOR];
         if self.flash.read(NVS_OFFSET, &mut raw).is_ok() {
             if let Some(settings) = decode(&raw) {
+                self.record_len = encode(&settings, &mut raw);
                 return (settings, true);
             }
         }
         (Settings::defaults(), false)
     }
 
+    /// Size of the whole flash chip, for the About page.
+    pub fn flash_bytes(&mut self) -> u32 {
+        use embedded_storage::nor_flash::ReadNorFlash as _;
+        self.flash.capacity() as u32
+    }
+
     pub fn save(&mut self, settings: &Settings) -> Result<(), &'static str> {
         let mut raw = [0u8; SECTOR];
-        let len = encode(settings, &mut raw);
-        let _ = len;
+        self.record_len = encode(settings, &mut raw);
         self.flash
             .erase(NVS_OFFSET, NVS_OFFSET + SECTOR as u32)
             .map_err(|_| "flash erase failed")?;

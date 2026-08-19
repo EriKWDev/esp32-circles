@@ -254,7 +254,35 @@ fn emit_secrets(manifest: &Path, out_dir: &Path) {
     writeln!(out, "pub const RB_HOST: &str = {host:?};").unwrap();
     writeln!(out, "pub const RB_USER: &str = {user:?};").unwrap();
     writeln!(out, "pub const RB_PASS: &str = {api_pass:?};").unwrap();
+    // Stamped here because nothing on the device knows the date: there is no RTC
+    // battery and the clock comes from the controller, which is not up yet when
+    // the About page wants to say when this firmware was built.
+    writeln!(out, "pub const BUILD_STAMP: &str = {:?};", build_stamp()).unwrap();
     fs::write(out_dir.join("secrets.rs"), out).unwrap();
+}
+
+/// UTC, as `YYYY-MM-DD HH:MM`. Days to a civil date by Hinnant's algorithm, which
+/// avoids a date crate for one line of output.
+fn build_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        rest / 3600,
+        rest / 60 % 60
+    )
 }
 
 // Tiny shim so the writeln! above can borrow the entries buffer inline.

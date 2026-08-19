@@ -1,7 +1,13 @@
 //! Masken: the Nokia worm. Eat, grow, and do not bite yourself.
 //!
-//! Swipe anywhere to turn. The grid is coarse on purpose - a fingertip is about
-//! one cell wide, and the original was coarser still.
+//! Touch where you want to go: the panel is split into four wedges around the
+//! board's centre, so press the top half's middle to go up, the left to go left.
+//! The whole screen steers and every target is a quarter of it - a swipe was the
+//! first attempt and read as confusing, because a gesture gives no clue which way
+//! it thinks you meant.
+//!
+//! The grid is coarse on purpose - a fingertip is about one cell wide, and the
+//! original was coarser still.
 //!
 //! The body is drawn as merged runs rather than a disc per cell. That is not only
 //! tidier - straight lengths become one rounded bar, which is how the phone drew
@@ -31,8 +37,6 @@ const STEP_MS: u32 = 190;
 const STEP_MIN_MS: u32 = 85;
 /// Taken off the step for each apple eaten.
 const STEP_GAIN_MS: u32 = 4;
-/// How far a finger must travel before it counts as a turn.
-const SWIPE: i32 = 26;
 
 const C_BODY: u16 = rgb(120, 230, 140);
 const C_HEAD: u16 = rgb(200, 255, 200);
@@ -65,8 +69,6 @@ pub struct Snake {
     pub best: u32,
     step_ms: u32,
     next_step_ms: u32,
-    /// Where the current drag began, for reading a swipe out of it.
-    touch_from: Option<(i32, i32)>,
     seed: u32,
 }
 
@@ -85,7 +87,6 @@ impl Snake {
             best: 0,
             step_ms: STEP_MS,
             next_step_ms: 0,
-            touch_from: None,
             seed: 0x1234_5678,
         }
     }
@@ -117,35 +118,25 @@ impl Snake {
         }
     }
 
-    pub fn press(&mut self, x: i32, y: i32) {
-        self.touch_from = Some((x, y));
-    }
-
-    /// Turn on the dominant axis of the swipe so far, then treat the current point
-    /// as the new origin - which lets one continuous drag steer several corners.
-    pub fn drag(&mut self, x: i32, y: i32) {
-        let Some((fx, fy)) = self.touch_from else {
-            return;
-        };
-        let (ox, oy) = (x - fx, y - fy);
-        let (dx, dy) = if ox.abs() > oy.abs() {
-            (ox.signum() as i8, 0)
+    /// Steer towards the touch. The wedge is decided by which offset from the
+    /// board's centre is the larger, so the four regions are triangles meeting at
+    /// the middle and between them they cover the panel.
+    pub fn steer(&mut self, x: i32, y: i32) {
+        let dx = x - (BOARD_X + BOARD_W / 2);
+        let dy = y - (BOARD_Y + BOARD_H / 2);
+        let (dx, dy) = if dx.abs() > dy.abs() {
+            (dx.signum() as i8, 0)
         } else {
-            (0, oy.signum() as i8)
+            (0, dy.signum() as i8)
         };
-        if ox.abs().max(oy.abs()) < SWIPE || (dx == 0 && dy == 0) {
+        if dx == 0 && dy == 0 {
             return;
         }
-        self.touch_from = Some((x, y));
         // Reversing into your own neck is the one turn that is never wanted.
         if dx == -self.dx && dy == -self.dy {
             return;
         }
         self.pending = Some((dx, dy));
-    }
-
-    pub fn release(&mut self) {
-        self.touch_from = None;
     }
 
     pub fn update(&mut self, now_ms: u32, bubbles: &mut Bubbles) {
