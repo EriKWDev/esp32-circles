@@ -376,6 +376,7 @@ pub enum Screen {
     About,
     /// What to do about tomorrow's forecast.
     Rain,
+    Chess,
 }
 
 impl Screen {
@@ -415,7 +416,8 @@ impl Screen {
             | Screen::Snake
             | Screen::Spacewar
             | Screen::About
-            | Screen::Rain => rgb(0, 0, 0),
+            | Screen::Rain
+            | Screen::Chess => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -451,6 +453,7 @@ impl Screen {
             Screen::Spacewar => crate::spacewar::P1,
             Screen::About => crate::about::ACCENT,
             Screen::Rain => C_SKY,
+            Screen::Chess => crate::chess::ACCENT,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -814,6 +817,7 @@ pub struct Ui {
     /// flash.
     pub sys: crate::about::Sys,
     pub rain: crate::rain::Rain,
+    chess: crate::chess::Chess,
     /// Set when the rain page is opened, so main asks for a fresh forecast.
     pub want_forecast: bool,
     about_page: usize,
@@ -948,6 +952,7 @@ impl Ui {
             snake: crate::snake::Snake::new(),
             sys: crate::about::Sys::EMPTY,
             rain: crate::rain::Rain::new(),
+            chess: crate::chess::Chess::new(),
             want_forecast: false,
             about_page: 0,
             spacewar: crate::spacewar::Spacewar::new(),
@@ -1235,7 +1240,9 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        if self.interactive_screen() == Screen::About {
+                        if self.interactive_screen() == Screen::Chess {
+                            self.chess_tap(x, y, now_ms);
+                        } else if self.interactive_screen() == Screen::About {
                             self.about_page = (self.about_page + 1) % crate::about::PAGES;
                         } else if self.interactive_screen() == Screen::Snake {
                             self.snake.tap(now_ms);
@@ -1688,6 +1695,11 @@ impl Ui {
         match self.interactive_screen() {
             Screen::Pong => self.pong.update(dt, now_ms, &mut self.game),
             Screen::Snake => self.snake.update(now_ms, &mut self.game),
+            // The search runs in slices from here, so twenty seconds of thinking
+            // costs the loop a few milliseconds per frame instead of stalling it.
+            Screen::Chess => {
+                self.chess.think(now_ms);
+            }
             Screen::Spacewar => self.spacewar.update(dt, now_ms, &mut self.game),
             Screen::Breakout => self.breakout.update(dt, now_ms, &mut self.game),
             Screen::Invaders => self.invaders.update(dt, now_ms, &mut self.game),
@@ -1817,6 +1829,7 @@ impl Ui {
             || self.game.active()
             || self.screen == Screen::Pong
             || self.screen == Screen::Snake
+            || self.screen == Screen::Chess
             || self.screen == Screen::Spacewar
             || self.screen == Screen::Breakout
             || self.screen == Screen::Invaders
@@ -1918,6 +1931,7 @@ impl Ui {
                     | Screen::Snake
                     | Screen::Spacewar
                     | Screen::About
+                    | Screen::Chess
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2181,6 +2195,7 @@ impl Ui {
             | Screen::Snake
             | Screen::Spacewar
             | Screen::About
+            | Screen::Chess
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2409,8 +2424,6 @@ impl Ui {
                 | Screen::Simon
                 | Screen::Cat
                 | Screen::Calc
-                | Screen::Weather
-                | Screen::Currency
                 | Screen::Snake
                 | Screen::Spacewar
         ) && !self.idle
@@ -2433,6 +2446,10 @@ impl Ui {
             Screen::Connecting => self.draw_connecting(scene, state, now_ms, alpha),
             Screen::Confirm => self.draw_confirm(scene, alpha),
             Screen::Rain => self.draw_rain(scene, alpha),
+            Screen::Chess => {
+                self.chess.draw(scene, now_ms, alpha);
+                self.draw_back(scene, alpha);
+            }
             Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
             Screen::Pong => {
                 self.game.draw(scene, now_ms, alpha);
@@ -2838,6 +2855,7 @@ impl Ui {
         ("CURRENCY", C_CURRENCY, Screen::Currency),
         ("MASKEN", C_SNAKE, Screen::Snake),
         ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
+        ("CHESS", crate::chess::ACCENT, Screen::Chess),
         ("ABOUT", crate::about::ACCENT, Screen::About),
     ];
 
@@ -3044,6 +3062,9 @@ impl Ui {
                     }
                     if *screen == Screen::About {
                         self.about_page = 0;
+                    }
+                    if *screen == Screen::Chess {
+                        self.chess.restart();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
@@ -3814,6 +3835,26 @@ impl Ui {
 
     /// A full screen rather than a dialog: the panel has no notion of a modal, and
     /// an address may have taken a walk to find.
+    /// Setup taps pick a side, cycle the think time, or start. Board taps pick a
+    /// piece up and put it down; a finished game restarts from the setup panel.
+    fn chess_tap(&mut self, x: i32, y: i32, now_ms: u32) {
+        use crate::chess::Phase;
+        match self.chess.phase {
+            Phase::Setup => match crate::chess::setup_at(x, y) {
+                Some(0) => self.chess.choose_side(true),
+                Some(1) => self.chess.choose_side(false),
+                Some(2) => self.chess.cycle_think(),
+                Some(_) => self.chess.begin(now_ms),
+                None => {}
+            },
+            Phase::Done => self.chess.setup(),
+            // Ignored while it thinks: a move taken mid-search would be played
+            // against a board the search no longer describes.
+            Phase::Thinking => {}
+            Phase::HumanTurn => self.chess.tap(x, y, now_ms),
+        }
+    }
+
     /// Tomorrow, and what to do about it. Three choices rather than a yes/no:
     /// the interesting case is not confirming the forecast's decision but
     /// overruling it in either direction, and "follow the forecast" has to be a

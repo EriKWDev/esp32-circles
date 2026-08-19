@@ -20,6 +20,7 @@ mod audio;
 mod breakout;
 mod calc;
 mod cat;
+mod chess;
 mod bubbles;
 mod currency;
 mod display;
@@ -737,6 +738,7 @@ fn main() -> ! {
                     ui::Screen::Spacewar => "spacewar",
                     ui::Screen::About => "about",
                     ui::Screen::Rain => "rain",
+                    ui::Screen::Chess => "chess",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
