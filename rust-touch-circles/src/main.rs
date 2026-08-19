@@ -501,14 +501,17 @@ fn main() -> ! {
             && let Some(audio) = audio.as_mut()
         {
             match sound {
-                ui::Sound::Pad(pad) => audio.tone(&audio::Tone {
-                    freq: audio::NOTES[pad.min(3)],
-                    ms: 190,
-                }),
-                ui::Sound::Win => audio.play(&audio::win()),
-                ui::Sound::Lose => audio.play(&audio::lose()),
-                ui::Sound::Purr => audio.play(&audio::purr()),
-                ui::Sound::Meow => audio.play(&audio::meow()),
+                ui::Sound::Pad(pad) => audio.tone(
+                    &mut i2c,
+                    &audio::Tone {
+                        freq: audio::NOTES[pad.min(3)],
+                        ms: 190,
+                    },
+                ),
+                ui::Sound::Win => audio.play(&mut i2c, &audio::win()),
+                ui::Sound::Lose => audio.play(&mut i2c, &audio::lose()),
+                ui::Sound::Purr => audio.play(&mut i2c, &audio::purr()),
+                ui::Sound::Meow => audio.play(&mut i2c, &audio::meow()),
             }
             // The tone ate real time; do not let the frame clock blame the UI.
             last_ms = now_ms();

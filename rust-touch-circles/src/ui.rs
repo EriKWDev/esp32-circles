@@ -1524,7 +1524,7 @@ impl Ui {
                 self.simon.update(now_ms);
                 // Sounding a step is main's job; the pattern only advances once it
                 // reports back through `advance_show`.
-                if let Some(pad) = self.simon.pending_show()
+                if let Some(pad) = self.simon.pending_show(now_ms)
                     && self.want_sound.is_none()
                 {
                     self.want_sound = Some(Sound::Pad(pad));
@@ -3046,7 +3046,7 @@ impl Ui {
     /// was waiting to be heard.
     pub fn take_sound(&mut self, now_ms: u32) -> Option<Sound> {
         let sound = self.want_sound.take()?;
-        if self.screen == Screen::Simon && self.simon.pending_show().is_some() {
+        if self.screen == Screen::Simon && self.simon.pending_show(now_ms).is_some() {
             self.simon.advance_show(now_ms);
         }
         Some(sound)

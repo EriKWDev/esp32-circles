@@ -12,6 +12,13 @@ use crate::font::FontId;
 use crate::gfx::{Align, Scene, TextBuf, W, muted, rgb};
 
 pub const MAX_STEPS: usize = 32;
+/// Quiet between the notes of a pattern. Without it the sequence runs together
+/// and cannot be memorised, which is the entire game.
+const GAP_MS: u32 = 230;
+/// Pause before a pattern begins, so the start is never a surprise.
+const LEAD_MS: u32 = 650;
+/// How long every pad stays lit after a round is completed.
+const FLASH_MS: u32 = 700;
 pub const COLORS: [u16; 4] = [
     rgb(255, 96, 110),
     rgb(120, 210, 255),
@@ -24,6 +31,8 @@ pub enum Phase {
     Ready,
     Showing { at: usize },
     Input { at: usize },
+    /// Round complete: all four lit while the win tune plays.
+    Won,
     Lost,
 }
 
@@ -39,6 +48,8 @@ pub struct Simon {
     len: usize,
     pub phase: Phase,
     lit: Option<(usize, u32)>,
+    /// Earliest the next thing may happen, which is what paces the whole game.
+    next_at_ms: u32,
     rng: u32,
     pub best: usize,
 }
@@ -50,6 +61,7 @@ impl Simon {
             len: 0,
             phase: Phase::Ready,
             lit: None,
+            next_at_ms: 0,
             rng: 0x1234_5678,
             best: 0,
         }
@@ -62,6 +74,7 @@ impl Simon {
         self.rng = now_ms | 1;
         self.extend();
         self.phase = Phase::Showing { at: 0 };
+        self.next_at_ms = now_ms + LEAD_MS;
     }
 
     fn next_rand(&mut self) -> u32 {
@@ -79,7 +92,10 @@ impl Simon {
     }
 
     /// The pad to light and sound now, while the pattern plays.
-    pub fn pending_show(&self) -> Option<usize> {
+    pub fn pending_show(&self, now_ms: u32) -> Option<usize> {
+        if now_ms < self.next_at_ms {
+            return None;
+        }
         match self.phase {
             Phase::Showing { at } if at < self.len => Some(self.steps[at] as usize),
             _ => None,
@@ -89,7 +105,8 @@ impl Simon {
     /// Called once that step has been sounded.
     pub fn advance_show(&mut self, now_ms: u32) {
         if let Phase::Showing { at } = self.phase {
-            self.lit = Some((self.steps[at] as usize, now_ms + 90));
+            self.lit = Some((self.steps[at] as usize, now_ms + 120));
+            self.next_at_ms = now_ms + GAP_MS;
             self.phase = if at + 1 < self.len {
                 Phase::Showing { at: at + 1 }
             } else {
@@ -101,6 +118,8 @@ impl Simon {
     pub fn tap(&mut self, pad: usize, now_ms: u32) -> Answer {
         self.lit = Some((pad, now_ms + 140));
         match self.phase {
+            // Nothing to do mid-celebration; `update` moves it along.
+            Phase::Won => Answer::Nothing,
             Phase::Ready | Phase::Lost => {
                 self.restart(now_ms);
                 Answer::Nothing
@@ -116,8 +135,8 @@ impl Simon {
                     Answer::Pad(pad)
                 } else {
                     self.best = self.best.max(self.len);
-                    self.extend();
-                    self.phase = Phase::Showing { at: 0 };
+                    self.phase = Phase::Won;
+                    self.next_at_ms = now_ms + FLASH_MS;
                     Answer::Round
                 }
             }
@@ -132,15 +151,18 @@ impl Simon {
         })
     }
 
+    /// Sized by the room below the caption and centred - sizing from the width put
+    /// the bottom row off the screen entirely.
     pub fn pad_rect(pad: usize) -> (i32, i32, i32, i32) {
-        const GAP: i32 = 10;
+        const GAP: i32 = 12;
         const TOP: i32 = 116;
-        let size = (W as i32 - 3 * GAP) / 2;
+        const SIZE: i32 = 168;
+        let margin = (W as i32 - (2 * SIZE + GAP)) / 2;
         let col = (pad % 2) as i32;
         let row = (pad / 2) as i32;
-        let x0 = GAP + col * (size + GAP);
-        let y0 = TOP + row * (size + GAP);
-        (x0, y0, x0 + size, y0 + size)
+        let x0 = margin + col * (SIZE + GAP);
+        let y0 = TOP + row * (SIZE + GAP);
+        (x0, y0, x0 + SIZE, y0 + SIZE)
     }
 
     pub fn update(&mut self, now_ms: u32) {
@@ -149,12 +171,21 @@ impl Simon {
                 self.lit = None;
             }
         }
+        // The celebration ends by itself, and only then is the pattern extended -
+        // so the new step is not visible behind the flash.
+        if self.phase == Phase::Won && now_ms >= self.next_at_ms {
+            self.extend();
+            self.phase = Phase::Showing { at: 0 };
+            self.next_at_ms = now_ms + LEAD_MS;
+        }
     }
 
     pub fn draw(&self, scene: &mut Scene, alpha: u8) {
         for pad in 0..4 {
             let (x0, y0, x1, y1) = Self::pad_rect(pad);
-            let lit = self.lit.is_some_and(|(which, _)| which == pad);
+            // Every pad lights for the round-complete flash.
+            let lit = self.phase == Phase::Won
+                || self.lit.is_some_and(|(which, _)| which == pad);
             // Dim until lit, so the pattern is the only thing moving.
             let color = if lit {
                 COLORS[pad]
@@ -175,6 +206,9 @@ impl Simon {
             }
             Phase::Input { at } => {
                 let _ = write!(line, "{} OF {}", at + 1, self.len);
+            }
+            Phase::Won => {
+                let _ = write!(line, "{} RIGHT", self.len);
             }
             Phase::Lost => {
                 let _ = write!(line, "MISSED - BEST {}", self.best);

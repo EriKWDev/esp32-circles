@@ -94,10 +94,15 @@ impl<'d> Audio<'d> {
     }
 
     /// Play one note, and return when it has finished.
-    pub fn tone(&mut self, tone: &Tone) {
+    ///
+    /// The output is unmuted only for the duration. Left open it hisses: the DAC is
+    /// powered and amplifying an input that nothing is clocking, and at this
+    /// volume that noise floor is audible across a room.
+    pub fn tone(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, tone: &Tone) {
         if !self.ready {
             return;
         }
+        mute(i2c, false);
         let total = SAMPLE_RATE as usize * tone.ms as usize / 1000;
         let step = ((tone.freq as u32 * WAVE_LEN as u32) << 16) / SAMPLE_RATE;
         let mut done = 0;
@@ -123,21 +128,28 @@ impl<'d> Audio<'d> {
             if let Ok(transfer) = self.tx.write_dma(&slice) {
                 let _ = transfer.wait();
             } else {
-                return;
+                break;
             }
             done += count;
         }
+        mute(i2c, true);
     }
 
-    pub fn play(&mut self, tones: &[Tone]) {
+    pub fn play(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, tones: &[Tone]) {
         for tone in tones {
-            self.tone(tone);
+            self.tone(i2c, tone);
         }
     }
 }
 
 fn write(i2c: &mut I2c<'_, esp_hal::Blocking>, reg: u8, value: u8) -> bool {
     i2c.write(ADDR, &[reg, value]).is_ok()
+}
+
+/// The DAC's own mute bits, which silence the output without disturbing the
+/// clocks or the volume setting.
+fn mute(i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
+    write(i2c, 0x31, if on { 0x60 } else { 0x00 });
 }
 
 /// The vendor's open-then-start sequence, with the clock registers filled in for
@@ -200,6 +212,8 @@ fn init_codec(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
     ] {
         ok &= write(i2c, reg, value);
     }
+    // Silent until something asks for a note.
+    mute(i2c, true);
     ok
 }
 
