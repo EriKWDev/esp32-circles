@@ -168,11 +168,9 @@ fn main() {
     // gear, arrow-up (keyboard shift), angle-left/right, delete-left
     // (backspace). Kept in codepoint order: `Font::glyph` binary-searches this
     // table, so an out-of-order entry would simply not be found.
-    for ch in [
-        '\u{f013}', '\u{f062}', '\u{f104}', '\u{f105}', '\u{f55a}',
-    ]
-    .into_iter()
-    .collect::<std::collections::BTreeSet<_>>()
+    for ch in ['\u{f013}', '\u{f062}', '\u{f104}', '\u{f105}', '\u{f55a}']
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
     {
         let (metrics, coverage) = icon_face.rasterize(ch, 42.0);
         // A codepoint this typeface does not carry rasterizes to nothing, and

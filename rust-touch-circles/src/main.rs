@@ -236,6 +236,11 @@ fn main() -> ! {
     let mut last_input_ms = now_ms();
     let mut dim = false;
     let mut asleep = false;
+    // Set when the moon is pressed, cleared when the finger is off the glass.
+    // Without it the same contact both sleeps and wakes: the press asks for
+    // sleep, and the drag reports that follow it - still the same touch - look
+    // like fresh activity and wake the panel straight back up.
+    let mut sleep_until_release = false;
     let mut brightness = 255u8;
     let mut dirty = true;
 
@@ -268,18 +273,22 @@ fn main() -> ! {
             last_touch_ms = t;
             event = touch.poll(&mut i2c, t);
         }
+        // The contact that asked for sleep stops counting as activity until it
+        // ends. Cleared on a pass with no event at all, so the release itself -
+        // which is still part of that contact - does not wake the panel either.
+        if sleep_until_release && event == touch::Event::None && touch.phase == touch::Phase::Idle {
+            sleep_until_release = false;
+        }
         if event != touch::Event::None {
             dirty = true;
-            last_input_ms = t;
+            if !sleep_until_release {
+                last_input_ms = t;
+            }
         }
         // The touch that wakes the panel is not a button press. Waking on the
         // press and then acting on it would mean a blind tap on a dim screen
         // could start watering.
-        let event = if dim {
-            touch::Event::None
-        } else {
-            event
-        };
+        let event = if dim { touch::Event::None } else { event };
         match ui.input(event, &state, t) {
             Action::Trigger {
                 relay,
@@ -420,6 +429,7 @@ fn main() -> ! {
         // decides the power state.
         if ui.take_sleep_request() {
             last_input_ms = t.wrapping_sub(SLEEP_AFTER_MS);
+            sleep_until_release = true;
         }
         // Watering holds the panel awake. A run is the one thing worth watching
         // without touching anything, and a countdown that dims itself away is

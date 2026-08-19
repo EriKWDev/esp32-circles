@@ -6,7 +6,7 @@
 
 use crate::bubbles::Bubbles;
 use crate::font::FontId;
-use crate::gfx::{Align, H, Scene, W, rgb};
+use crate::gfx::{Align, H, Scene, W, muted, rgb};
 
 const COLS: usize = 8;
 const ROWS: usize = 5;
@@ -114,17 +114,11 @@ const PALETTES: [Palette; 6] = [
 /// A digit picks a brick colour; a dot is a hole. Eight columns by five rows.
 const LAYOUTS: [[&str; ROWS]; 3] = [
     // Solid bands, to learn the angles on.
-    [
-        "00000000", "11111111", "22222222", "33333333", "..2222..",
-    ],
+    ["00000000", "11111111", "22222222", "33333333", "..2222.."],
     // A chevron, which leaves lanes to thread the ball through.
-    [
-        "3......3", "23....32", "12.33.21", "0122210.", "..0110..",
-    ],
+    ["3......3", "23....32", "12.33.21", "0122210.", "..0110.."],
     // Checker and a spine, so the last bricks are awkward.
-    [
-        "0.1.1.0.", ".2.33.2.", "3.0..0.3", ".11..11.", "..3223..",
-    ],
+    ["0.1.1.0.", ".2.33.2.", "3.0..0.3", ".11..11.", "..3223.."],
 ];
 
 pub struct Breakout {
@@ -206,7 +200,11 @@ impl Breakout {
             return;
         }
         if self.vx == 0 && self.vy == 0 {
-            self.vx = if now_ms % 2 == 0 { SPEED / 2 } else { -SPEED / 2 };
+            self.vx = if now_ms % 2 == 0 {
+                SPEED / 2
+            } else {
+                -SPEED / 2
+            };
             self.vy = -SPEED;
         }
 
@@ -219,12 +217,26 @@ impl Breakout {
         if self.x <= left && self.vx < 0 || self.x >= right && self.vx > 0 {
             self.x = self.x.clamp(left, right);
             self.vx = -self.vx;
-            bubbles.spawn(self.x / Q, self.y / Q, now_ms, None, Some(60));
+            bubbles.spawn(
+                self.x / Q,
+                self.y / Q,
+                now_ms,
+                Some(muted(self.palette().ball)),
+                Some(64),
+                true,
+            );
         }
         if self.y <= BALL_R * Q && self.vy < 0 {
             self.y = BALL_R * Q;
             self.vy = -self.vy;
-            bubbles.spawn(self.x / Q, self.y / Q, now_ms, None, Some(60));
+            bubbles.spawn(
+                self.x / Q,
+                self.y / Q,
+                now_ms,
+                Some(muted(self.palette().ball)),
+                Some(64),
+                true,
+            );
         }
 
         self.hit_brick(now_ms, bubbles);
@@ -237,8 +249,9 @@ impl Breakout {
                 self.x.clamp(0, (W as i32) * Q) / Q,
                 H as i32 - 10,
                 now_ms,
-                Some(rgb(220, 60, 60)),
+                Some(muted(rgb(220, 60, 60))),
                 Some(220),
+                true,
             );
             if self.lives == 0 {
                 self.settling = true;
@@ -285,13 +298,20 @@ impl Breakout {
         }
         // A brick's own colour, so the wall dissolves into its own palette.
         let color = self.palette().bricks[(cell - 1) as usize % 4];
-        bubbles.spawn(cell_cx, cell_cy, now_ms, Some(color), Some(120));
+        bubbles.spawn(
+            cell_cx,
+            cell_cy,
+            now_ms,
+            Some(muted(color)),
+            Some(130),
+            true,
+        );
 
         let speed = self.vy.abs() + SPEED_GAIN;
         self.vy = self.vy.signum() * speed.min(SPEED_MAX);
 
         if self.cleared() {
-            bubbles.spawn(cell_cx, cell_cy, now_ms, Some(color), None);
+            bubbles.spawn(cell_cx, cell_cy, now_ms, Some(muted(color)), None, true);
             self.level += 1;
             self.load_level(now_ms);
             self.serve_at_ms = now_ms + SERVE_PAUSE_MS * 2;
@@ -320,8 +340,9 @@ impl Breakout {
             self.x / Q,
             PADDLE_Y,
             now_ms,
-            Some(self.palette().paddle),
-            Some(150),
+            Some(muted(self.palette().paddle)),
+            Some(160),
+            true,
         );
     }
 

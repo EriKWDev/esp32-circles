@@ -40,6 +40,9 @@ struct Circle {
     /// covered the panel.
     full_r: i32,
     color: u16,
+    /// A ring rather than a filled disc. The games use these: a screen-filling
+    /// opaque circle hides the board it is celebrating.
+    outline: bool,
 }
 
 const NOTHING: Circle = Circle {
@@ -48,6 +51,7 @@ const NOTHING: Circle = Circle {
     born_ms: 0,
     full_r: 0,
     color: 0,
+    outline: false,
 };
 
 pub struct Bubbles {
@@ -74,7 +78,7 @@ impl Bubbles {
                 return false;
             }
         }
-        self.spawn(x, y, now_ms, None, None)
+        self.spawn(x, y, now_ms, None, None, false)
     }
 
     /// A circle with a chosen colour and reach, for callers other than touch -
@@ -90,6 +94,7 @@ impl Bubbles {
         now_ms: u32,
         color: Option<u16>,
         reach: Option<i32>,
+        outline: bool,
     ) -> bool {
         if self.len >= MAX_CIRCLES {
             return false;
@@ -105,6 +110,7 @@ impl Bubbles {
             born_ms: now_ms,
             full_r: reach.map_or(to_corner, |r| r.min(to_corner)),
             color: color.unwrap_or(PALETTE[self.next_color % PALETTE.len()]),
+            outline,
         };
         self.len += 1;
         if color.is_none() {
@@ -151,10 +157,24 @@ impl Bubbles {
                 continue;
             }
             let alpha = ((alpha as u32 * screen_alpha as u32) / 255) as u8;
-            // The occluding batch, not an ordinary primitive: overlapping
-            // screen-filling discs are what this page is made of, and painting
-            // those back-to-front costs a full-screen fill each. See `discs_row`.
-            scene.push_disc(circle.x, circle.y, radius, circle.color, alpha);
+            if circle.outline {
+                // An ordinary primitive, pushed before whatever draws next, so a
+                // game's board sits on top of its own decoration.
+                let thickness = (radius / 14).clamp(3, 7);
+                scene.ring(
+                    circle.x,
+                    circle.y,
+                    radius,
+                    (radius - thickness).max(0),
+                    circle.color,
+                    alpha,
+                );
+            } else {
+                // The occluding batch: overlapping screen-filling discs are what
+                // the demo page is made of, and painting those back-to-front costs
+                // a full-screen fill each. See `discs_row`.
+                scene.push_disc(circle.x, circle.y, radius, circle.color, alpha);
+            }
         }
     }
 }

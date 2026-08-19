@@ -494,7 +494,10 @@ pub enum Action {
     /// The network changed: persist, then re-join with the new credentials.
     ApplyWifi,
     /// Run one schedule immediately. `start` is the id on its own controller.
-    RunSchedule { controller: u8, start: u8 },
+    RunSchedule {
+        controller: u8,
+        start: u8,
+    },
     /// Write the edited schedule back. The draft itself is read from the UI.
     SaveSchedule,
 }
@@ -556,10 +559,7 @@ impl KeyMode {
             KeyMode::Upper => (&["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"], l::KEY_W),
             // Restricted to glyphs the baked fonts actually carry - there is no
             // fallback box to draw, a missing glyph is simply invisible.
-            KeyMode::Symbols => (
-                &["1234567890", "-_.,:;/@'\"", "!?#%&*+()="],
-                l::KEY_W,
-            ),
+            KeyMode::Symbols => (&["1234567890", "-_.,:;/@'\"", "!?#%&*+()="], l::KEY_W),
             KeyMode::Numeric => (&["123", "456", "789"], l::KEY_W_PAD),
         }
     }
@@ -1252,8 +1252,7 @@ impl Ui {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.game.press(x, y, now_ms);
                     }
-                } else if self.dragging_list
-                    || (!self.dragging_slider && self.hit(x, y).is_none())
+                } else if self.dragging_list || (!self.dragging_slider && self.hit(x, y).is_none())
                 {
                     self.bubble(x, y, now_ms);
                 }
@@ -1988,11 +1987,7 @@ impl Ui {
         // The ambient decoration is skipped on the demo page: its own circles are
         // the content there, and a second, different kind of circle drifting
         // behind them would not read as the same animation.
-        if !matches!(
-            screen,
-            Screen::Bubbles | Screen::Pong | Screen::Breakout
-        ) && !self.idle
-        {
+        if !matches!(screen, Screen::Bubbles | Screen::Pong | Screen::Breakout) && !self.idle {
             self.draw_bubbles(scene, screen, now_ms, alpha);
         }
         match screen {
@@ -3386,7 +3381,11 @@ impl Ui {
         // the only feedback DONE can give when it refuses.
         let (fx0, fy0, fx1, fy1) = l::FIELD;
         scene.pill(fx0, fy0, fx1, fy1, 20, rgb(5, 14, 20), alpha);
-        let frame = if self.edit_invalid { C_CANCEL } else { C_CONFIG };
+        let frame = if self.edit_invalid {
+            C_CANCEL
+        } else {
+            C_CONFIG
+        };
         scene.pill(fx0, fy1 - 4, fx1, fy1, 2, frame, alpha);
 
         let text = self.edit_buf.as_str();
@@ -3813,13 +3812,7 @@ impl Ui {
 
     /// Edit mode: the armed toggle, the clock adjusters, and the selected entry's
     /// controls down the right-hand column.
-    fn draw_edit_controls(
-        &self,
-        scene: &mut Scene,
-        state: &State,
-        draft: &StartTime,
-        alpha: u8,
-    ) {
+    fn draw_edit_controls(&self, scene: &mut Scene, state: &State, draft: &StartTime, alpha: u8) {
         // Armed, as a toggle rather than a label: this is the one field of a
         // schedule that changes what the controller does without changing what it
         // waters.
@@ -3830,7 +3823,11 @@ impl Ui {
             ax1,
             ay1,
             (ay1 - ay0) / 2,
-            if draft.enabled { C_RUN } else { rgb(58, 22, 22) },
+            if draft.enabled {
+                C_RUN
+            } else {
+                rgb(58, 22, 22)
+            },
             alpha,
         );
         scene.label(
@@ -4075,8 +4072,8 @@ impl Ui {
                     (0, 1)
                 };
                 if amount > 0 {
-                    let fill = l::DETAIL_X0
-                        + ((l::DETAIL_X1 - l::DETAIL_X0) as u32 * amount / of) as i32;
+                    let fill =
+                        l::DETAIL_X0 + ((l::DETAIL_X1 - l::DETAIL_X0) as u32 * amount / of) as i32;
                     scene.pill(l::DETAIL_X0, cy + 15, fill, cy + 21, 3, C_RUN, alpha);
                 }
             }
@@ -4319,10 +4316,16 @@ impl Ui {
             }
             None => {
                 let total = self.observed_run_total_s.max(state.left_s).max(1);
-                (total * 1000, (total * 1000).saturating_sub(left_ms.min(total * 1000)))
+                (
+                    total * 1000,
+                    (total * 1000).saturating_sub(left_ms.min(total * 1000)),
+                )
             }
         };
-        let span = progress_span_q12(outer_total_ms, outer_total_ms - outer_done_ms.min(outer_total_ms));
+        let span = progress_span_q12(
+            outer_total_ms,
+            outer_total_ms - outer_done_ms.min(outer_total_ms),
+        );
         if span > 0 {
             scene.arc(CX, CY, l::RING_OUTER, l::RING_INNER, 0, span, C_RUN, alpha);
         }

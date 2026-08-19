@@ -40,7 +40,10 @@ pub struct FixedStr<const N: usize> {
 }
 
 impl<const N: usize> FixedStr<N> {
-    pub const EMPTY: Self = Self { bytes: [0; N], len: 0 };
+    pub const EMPTY: Self = Self {
+        bytes: [0; N],
+        len: 0,
+    };
 
     pub fn new(s: &str) -> Self {
         let mut out = Self::EMPTY;
@@ -292,18 +295,30 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     settings.ssid.len = take(1, &mut at)[0].min(MAX_SSID as u8);
     settings.ssid.bytes.copy_from_slice(take(MAX_SSID, &mut at));
     settings.psk.len = take(1, &mut at)[0].min(MAX_SECRET as u8);
-    settings.psk.bytes.copy_from_slice(take(MAX_SECRET, &mut at));
+    settings
+        .psk
+        .bytes
+        .copy_from_slice(take(MAX_SECRET, &mut at));
     let count = take(1, &mut at)[0] as usize;
     for index in 0..MAX_CONTROLLERS {
         let mut controller = Controller::EMPTY;
         controller.ip.copy_from_slice(take(4, &mut at));
         controller.user.len = take(1, &mut at)[0].min(MAX_USER as u8);
-        controller.user.bytes.copy_from_slice(take(MAX_USER, &mut at));
+        controller
+            .user
+            .bytes
+            .copy_from_slice(take(MAX_USER, &mut at));
         controller.pass.len = take(1, &mut at)[0].min(MAX_SECRET as u8);
-        controller.pass.bytes.copy_from_slice(take(MAX_SECRET, &mut at));
+        controller
+            .pass
+            .bytes
+            .copy_from_slice(take(MAX_SECRET, &mut at));
         if has_names {
             controller.name.len = take(1, &mut at)[0].min(MAX_NAME as u8);
-            controller.name.bytes.copy_from_slice(take(MAX_NAME, &mut at));
+            controller
+                .name
+                .bytes
+                .copy_from_slice(take(MAX_NAME, &mut at));
         }
         settings.controllers[index] = controller;
     }
@@ -318,7 +333,9 @@ pub struct Store<'d> {
 impl<'d> Store<'d> {
     pub fn new(flash: esp_hal::peripherals::FLASH<'d>) -> Self {
         // esp-storage's `Flash` is an alias for the HAL's FLASH peripheral.
-        Self { flash: FlashStorage::new(flash) }
+        Self {
+            flash: FlashStorage::new(flash),
+        }
     }
 
     /// Saved settings, or the build-time defaults when nothing valid is stored.

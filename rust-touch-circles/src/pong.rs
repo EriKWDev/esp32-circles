@@ -12,8 +12,8 @@
 //! threatens one end at a time.
 
 use crate::bubbles::Bubbles;
-use crate::gfx::{Align, H, Scene, W, rgb};
 use crate::font::FontId;
+use crate::gfx::{Align, H, Scene, W, muted, rgb};
 
 pub const LEFT_COLOR: u16 = rgb(70, 150, 255);
 pub const RIGHT_COLOR: u16 = rgb(255, 150, 40);
@@ -106,7 +106,14 @@ impl Pong {
         if self.y <= top && self.vy < 0 || self.y >= bottom && self.vy > 0 {
             self.y = self.y.clamp(top, bottom);
             self.vy = -self.vy;
-            bubbles.spawn(self.x / Q, self.y / Q, now_ms, None, Some(70));
+            bubbles.spawn(
+                self.x / Q,
+                self.y / Q,
+                now_ms,
+                Some(muted(BALL_COLOR)),
+                Some(70),
+                true,
+            );
         }
 
         // Bats. Tested as the ball crossing the bat's face while overlapping it
@@ -151,11 +158,25 @@ impl Pong {
         let speed = self.vx.abs() + SPEED_GAIN;
         self.vx = self.vx.signum() * speed.min(SPEED_MAX);
         self.vy = self.vy.clamp(-SPEED_MAX, SPEED_MAX);
-        bubbles.spawn(self.x / Q, self.y / Q, now_ms, Some(color), Some(150));
+        bubbles.spawn(
+            self.x / Q,
+            self.y / Q,
+            now_ms,
+            Some(muted(color)),
+            Some(160),
+            true,
+        );
     }
 
     fn point(&mut self, now_ms: u32, color: u16, bubbles: &mut Bubbles) {
-        bubbles.spawn(W as i32 / 2, H as i32 / 2, now_ms, Some(color), None);
+        bubbles.spawn(
+            W as i32 / 2,
+            H as i32 / 2,
+            now_ms,
+            Some(muted(color)),
+            None,
+            true,
+        );
         self.x = (W as i32 / 2) * Q;
         self.y = (H as i32 / 2) * Q;
         self.vx = 0;

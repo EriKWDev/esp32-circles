@@ -38,6 +38,15 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u16 {
     ((r as u16 & 0xf8) << 8) | ((g as u16 & 0xfc) << 3) | (b as u16 >> 3)
 }
 
+/// The same hue at roughly half strength, for decoration that must not compete
+/// with what it sits behind.
+pub const fn muted(color: u16) -> u16 {
+    let r = ((color >> 11) & 0x1f) * 9 / 16;
+    let g = ((color >> 5) & 0x3f) * 9 / 16;
+    let b = (color & 0x1f) * 9 / 16;
+    (r << 11) | (g << 5) | b
+}
+
 /// Blend `src` over `dst` by `cov` (0..=255), in RGB565.
 ///
 /// Kept branch-light and integer-only: RV32IMAC has no FPU, and this runs on

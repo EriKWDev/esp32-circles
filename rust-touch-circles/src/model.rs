@@ -326,11 +326,7 @@ impl State {
     /// rather than derived here: the UI holds a smooth, locally anchored value
     /// (see `Ui::run_left_ms`), and recomputing it from the last poll would
     /// reintroduce the very jitter that value exists to remove.
-    pub fn schedule_progress_ms(
-        &self,
-        index: usize,
-        left_ms: u32,
-    ) -> Option<(usize, u32, u32)> {
+    pub fn schedule_progress_ms(&self, index: usize, left_ms: u32) -> Option<(usize, u32, u32)> {
         let schedule = self.starts.get(index)?;
         if !schedule.running || schedule.n_entries == 0 {
             return None;

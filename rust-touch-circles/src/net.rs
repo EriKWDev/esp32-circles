@@ -440,7 +440,6 @@ impl Net {
         join(&mut self.controller, settings)
     }
 
-
     /// Scan for access points, blocking until the radio reports the scan done.
     ///
     /// This is the one deliberately blocking network call in the firmware. A scan
@@ -533,7 +532,7 @@ impl Net {
         // A lost AP must never strand the panel or require a reboot. Retrying is
         // also one-shot/non-blocking for the same reason as initial association.
         //
-// Must outlast a whole association attempt: an overlapping connect returns
+        // Must outlast a whole association attempt: an overlapping connect returns
         // ESP_ERR_WIFI_CONN, which esp-radio panics on. A wrong password takes
         // about ten seconds to be rejected.
         const RECONNECT_MS: u32 = 15_000;
@@ -753,12 +752,7 @@ impl Net {
         if !self.hosts[host].realm.is_empty() || attempt > 0 {
             self.hosts[host].nc = self.hosts[host].nc.wrapping_add(1);
             let mut auth = Buf::<320>::new();
-            build_digest(
-                &mut auth,
-                method,
-                path.as_str(),
-                &self.hosts[host],
-            );
+            build_digest(&mut auth, method, path.as_str(), &self.hosts[host]);
             let _ = write!(head, "Authorization: {}\r\n", auth.as_str());
         }
         let _ = write!(head, "\r\n");
@@ -953,7 +947,12 @@ impl Net {
     /// count in the reply matches what was intended.
     ///
     /// Only this schedule is named, so the controller leaves its neighbours alone.
-    pub fn post_schedule(&mut self, schedule: &crate::model::StartTime, state: &State, now_ms: u32) {
+    pub fn post_schedule(
+        &mut self,
+        schedule: &crate::model::StartTime,
+        state: &State,
+        now_ms: u32,
+    ) {
         let controller = schedule.controller;
         if controller as usize >= self.n_hosts {
             return;
@@ -962,10 +961,7 @@ impl Net {
         let _ = write!(
             self.post_body,
             "s:{}:{}:{:02}:{:02}\n",
-            schedule.remote_id,
-            schedule.enabled as u8,
-            schedule.hh,
-            schedule.mm
+            schedule.remote_id, schedule.enabled as u8, schedule.hh, schedule.mm
         );
         for entry in schedule.entries[..schedule.n_entries.min(MAX_ENTRIES)].iter() {
             let Some(relay) = state
