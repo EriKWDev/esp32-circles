@@ -17,6 +17,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 mod asteroids;
 mod audio;
 mod breakout;
+mod calc;
 mod cat;
 mod bubbles;
 mod display;
@@ -663,6 +664,7 @@ fn main() -> ! {
                     ui::Screen::Pomodoro => "pomodoro",
                     ui::Screen::Simon => "simon",
                     ui::Screen::Cat => "cat",
+                    ui::Screen::Calc => "calc",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

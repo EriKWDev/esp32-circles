@@ -230,6 +230,14 @@ impl TextBuf {
         }
     }
 
+    pub fn from_str(s: &str) -> Self {
+        let mut out = Self::new();
+        let take = s.len().min(MAX_TEXT);
+        out.bytes[..take].copy_from_slice(&s.as_bytes()[..take]);
+        out.len = take;
+        out
+    }
+
     pub fn as_str(&self) -> &str {
         core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
     }

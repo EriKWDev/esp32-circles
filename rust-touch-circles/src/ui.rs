@@ -54,6 +54,7 @@ const C_MATCH3: u16 = rgb(255, 110, 140);
 const C_POMODORO: u16 = rgb(255, 120, 90);
 const C_SIMON: u16 = rgb(120, 210, 255);
 const C_CAT: u16 = rgb(255, 190, 120);
+const C_CALC: u16 = rgb(232, 140, 60);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -357,6 +358,7 @@ pub enum Screen {
     Pomodoro,
     Simon,
     Cat,
+    Calc,
 }
 
 impl Screen {
@@ -389,7 +391,8 @@ impl Screen {
             | Screen::Match3
             | Screen::Pomodoro
             | Screen::Simon
-            | Screen::Cat => rgb(0, 0, 0),
+            | Screen::Cat
+            | Screen::Calc => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -418,6 +421,7 @@ impl Screen {
             Screen::Pomodoro => C_POMODORO,
             Screen::Simon => C_SIMON,
             Screen::Cat => C_CAT,
+            Screen::Calc => C_CALC,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -762,6 +766,7 @@ pub struct Ui {
     pomodoro: crate::pomodoro::Pomodoro,
     simon: crate::simon::Simon,
     cat: crate::cat::Cat,
+    calc: crate::calc::Calc,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
     pong_last_ms: u32,
@@ -883,6 +888,7 @@ impl Ui {
             pomodoro: crate::pomodoro::Pomodoro::new(),
             simon: crate::simon::Simon::new(),
             cat: crate::cat::Cat::new(),
+            calc: crate::calc::Calc::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
@@ -1171,6 +1177,10 @@ impl Ui {
                                     crate::simon::Answer::Lost => Some(Sound::Lose),
                                     crate::simon::Answer::Nothing => None,
                                 };
+                            }
+                        } else if self.interactive_screen() == Screen::Calc {
+                            if let Some(key) = crate::calc::Calc::key_at(x, y) {
+                                self.calc.press(key);
                             }
                         } else if self.interactive_screen() == Screen::Cat {
                             self.want_sound = if self.cat.tap(x, y) {
@@ -1730,6 +1740,7 @@ impl Ui {
                     | Screen::Pomodoro
                     | Screen::Simon
                     | Screen::Cat
+                    | Screen::Calc
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1964,6 +1975,7 @@ impl Ui {
             | Screen::Pomodoro
             | Screen::Simon
             | Screen::Cat
+            | Screen::Calc
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2191,6 +2203,7 @@ impl Ui {
                 | Screen::Pomodoro
                 | Screen::Simon
                 | Screen::Cat
+                | Screen::Calc
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2255,6 +2268,10 @@ impl Ui {
             Screen::Cat => {
                 self.game.draw(scene, now_ms, alpha);
                 self.cat.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Calc => {
+                self.calc.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2558,6 +2575,7 @@ impl Ui {
         ("POMODORO", C_POMODORO, Screen::Pomodoro),
         ("SIMON", C_SIMON, Screen::Simon),
         ("CAT", C_CAT, Screen::Cat),
+        ("CALCULATOR", C_CALC, Screen::Calc),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2745,6 +2763,9 @@ impl Ui {
                     }
                     if *screen == Screen::Cat {
                         self.cat.restart();
+                    }
+                    if *screen == Screen::Calc {
+                        self.calc.restart();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
