@@ -56,6 +56,7 @@ const C_SIMON: u16 = rgb(120, 210, 255);
 const C_CAT: u16 = rgb(255, 190, 120);
 const C_CALC: u16 = rgb(232, 140, 60);
 const C_WEATHER: u16 = rgb(96, 176, 255);
+const C_CURRENCY: u16 = rgb(120, 220, 170);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -361,6 +362,7 @@ pub enum Screen {
     Cat,
     Calc,
     Weather,
+    Currency,
 }
 
 impl Screen {
@@ -395,7 +397,8 @@ impl Screen {
             | Screen::Simon
             | Screen::Cat
             | Screen::Calc
-            | Screen::Weather => rgb(0, 0, 0),
+            | Screen::Weather
+            | Screen::Currency => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -426,6 +429,7 @@ impl Screen {
             Screen::Cat => C_CAT,
             Screen::Calc => C_CALC,
             Screen::Weather => C_WEATHER,
+            Screen::Currency => C_CURRENCY,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -558,6 +562,9 @@ enum Edit {
     ControllerUser(usize),
     ControllerPass(usize),
     ControllerName(usize),
+    /// A currency code for the rates app. Not persisted: it is a look, not a
+    /// setting.
+    Symbol,
 }
 
 impl Edit {
@@ -572,6 +579,7 @@ impl Edit {
             Edit::ControllerUser(_) => "USERNAME",
             Edit::ControllerPass(_) => "PASSWORD",
             Edit::ControllerName(_) => "NAME",
+            Edit::Symbol => "CURRENCY",
         }
     }
 
@@ -579,6 +587,7 @@ impl Edit {
     fn mode(self) -> KeyMode {
         match self {
             Edit::NewControllerIp | Edit::ControllerIp(_) => KeyMode::Numeric,
+            Edit::Symbol => KeyMode::Upper,
             _ => KeyMode::Lower,
         }
     }
@@ -772,6 +781,7 @@ pub struct Ui {
     cat: crate::cat::Cat,
     calc: crate::calc::Calc,
     weather: crate::weather::Weather,
+    currency: crate::currency::Currency,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
     pong_last_ms: u32,
@@ -895,6 +905,7 @@ impl Ui {
             cat: crate::cat::Cat::new(),
             calc: crate::calc::Calc::new(),
             weather: crate::weather::Weather::new(),
+            currency: crate::currency::Currency::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
@@ -1047,6 +1058,11 @@ impl Ui {
                 self.weather.step(net, now_ms);
                 self.weather.fingerprint() != before
             }
+            Screen::Currency => {
+                let before = self.currency.fingerprint();
+                self.currency.step(net, now_ms);
+                self.currency.fingerprint() != before
+            }
             _ => false,
         }
     }
@@ -1197,6 +1213,13 @@ impl Ui {
                                     crate::simon::Answer::Lost => Some(Sound::Lose),
                                     crate::simon::Answer::Nothing => None,
                                 };
+                            }
+                        } else if self.interactive_screen() == Screen::Currency {
+                            let (sx0, sy0, sx1, sy1) = crate::currency::SYMBOL;
+                            if x >= sx0 && x <= sx1 && y >= sy0 && y <= sy1 {
+                                let code =
+                                    crate::store::FixedStr::<8>::new(self.currency.custom_code());
+                                self.open_keyboard(Edit::Symbol, code.as_str(), x, y, now_ms);
                             }
                         } else if self.interactive_screen() == Screen::Weather {
                             for (rect, forward) in [
@@ -1776,6 +1799,7 @@ impl Ui {
                     | Screen::Cat
                     | Screen::Calc
                     | Screen::Weather
+                    | Screen::Currency
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2012,6 +2036,7 @@ impl Ui {
             | Screen::Cat
             | Screen::Calc
             | Screen::Weather
+            | Screen::Currency
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2241,6 +2266,7 @@ impl Ui {
                 | Screen::Cat
                 | Screen::Calc
                 | Screen::Weather
+                | Screen::Currency
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2313,6 +2339,10 @@ impl Ui {
             }
             Screen::Weather => {
                 self.weather.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Currency => {
+                self.currency.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2618,6 +2648,7 @@ impl Ui {
         ("CAT", C_CAT, Screen::Cat),
         ("CALCULATOR", C_CALC, Screen::Calc),
         ("WEATHER", C_WEATHER, Screen::Weather),
+        ("CURRENCY", C_CURRENCY, Screen::Currency),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2811,6 +2842,9 @@ impl Ui {
                     }
                     if *screen == Screen::Weather {
                         self.weather.wake();
+                    }
+                    if *screen == Screen::Currency {
+                        self.currency.wake();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
@@ -3294,6 +3328,11 @@ impl Ui {
                 self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
+            Edit::Symbol => {
+                self.currency.set_custom(value.as_str());
+                self.unwind_to(Screen::Currency, x, y, now_ms);
+                Action::None
+            }
         }
     }
 
@@ -3740,6 +3779,9 @@ impl Ui {
             }
             Edit::NewControllerIp => {
                 let _ = write!(context, "NEW CONTROLLER");
+            }
+            Edit::Symbol => {
+                let _ = write!(context, "THREE-LETTER CODE");
             }
             Edit::ControllerIp(i)
             | Edit::ControllerUser(i)

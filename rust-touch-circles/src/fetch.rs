@@ -175,6 +175,7 @@ impl Fetch {
                 Err(dns::GetQueryResultError::Pending) => {}
                 Err(_) => {
                     self.query = None;
+                    esp_println::println!("fetch: name lookup failed");
                     self.phase = Phase::Failed;
                 }
             }
@@ -207,11 +208,9 @@ impl Fetch {
         // content length worth trusting and the request asked for close.
         if self.sent && !socket.is_active() {
             socket.abort();
-            self.phase = if self.got > 0 && status_ok(&self.body[..self.got]) {
-                Phase::Ready
-            } else {
-                Phase::Failed
-            };
+            let ok = self.got > 0 && status_ok(&self.body[..self.got]);
+            esp_println::println!("fetch: {} bytes, ok={}", self.got, ok);
+            self.phase = if ok { Phase::Ready } else { Phase::Failed };
         }
     }
 
@@ -302,6 +301,32 @@ fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let _ = write!(needle, "\"{key}\":");
     let at = text.find(needle.as_str())? + needle.len();
     Some(text[at..].trim_start())
+}
+
+/// A number written with a decimal point, as millionths.
+///
+/// Exchange rates need the places: a yen is 0.0645 kronor, and at tenths that
+/// is nothing at all.
+pub fn micros(text: &str) -> Option<i64> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let (whole, frac) = match digits.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (digits, ""),
+    };
+    let mut value: i64 = whole.parse().ok()?;
+    value *= 1_000_000;
+    let mut scale = 100_000i64;
+    for byte in frac.bytes().take(6) {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value += (byte - b'0') as i64 * scale;
+        scale /= 10;
+    }
+    Some(if negative { -value } else { value })
 }
 
 /// A number written with a decimal point, as tenths. The forecast and the rates

@@ -20,6 +20,7 @@ mod breakout;
 mod calc;
 mod cat;
 mod bubbles;
+mod currency;
 mod display;
 mod fetch;
 mod font;
@@ -684,6 +685,7 @@ fn main() -> ! {
                     ui::Screen::Cat => "cat",
                     ui::Screen::Calc => "calc",
                     ui::Screen::Weather => "weather",
+                    ui::Screen::Currency => "currency",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",
