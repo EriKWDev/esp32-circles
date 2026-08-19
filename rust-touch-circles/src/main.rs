@@ -414,9 +414,19 @@ fn main() -> ! {
         // Two stages, because they cost different things. Dimming is free to
         // reverse and keeps the panel truthful; going quiet saves the radio but
         // means the display is stale until touched. Any touch returns to awake.
+        // The moon button asks for sleep now rather than in three minutes, by
+        // backdating the last touch - so there is still exactly one thing that
+        // decides the power state.
+        if ui.take_sleep_request() {
+            last_input_ms = t.wrapping_sub(SLEEP_AFTER_MS);
+        }
+        // Watering holds the panel awake. A run is the one thing worth watching
+        // without touching anything, and a countdown that dims itself away is
+        // worse than the battery it saves. The moon is the way out of that.
+        let watching = state.running || state.queued > 0 || state.queue_gap;
         let untouched = t.wrapping_sub(last_input_ms);
-        let want_dim = untouched >= DIM_AFTER_MS;
-        let want_sleep = untouched >= SLEEP_AFTER_MS;
+        let want_dim = untouched >= DIM_AFTER_MS && !watching;
+        let want_sleep = untouched >= SLEEP_AFTER_MS && !watching;
         if want_dim != dim || want_sleep != asleep {
             dim = want_dim;
             asleep = want_sleep;

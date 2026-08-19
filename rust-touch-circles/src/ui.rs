@@ -75,6 +75,9 @@ mod l {
     /// corner, so the two never have to negotiate over it.
     pub const INFO: (i32, i32, i32) = (58, 58, 40);
     pub const RUN_BADGE: (i32, i32, i32) = (422, 58, 32);
+    /// Sleep now, bottom left on Home - diagonally opposite the cog and clear of
+    /// both buttons.
+    pub const MOON: (i32, i32, i32) = (58, 422, 34);
     /// Clear of the relay list, vertically centred on the panel.
     pub const GO: (i32, i32, i32) = (406, 240, 50);
     /// (x0, y0, x1, y1) - centred under the countdown digits and comfortably
@@ -419,6 +422,8 @@ enum Target {
     Bubble,
     /// Run this schedule now, or stop it if it is already running.
     RunNow,
+    /// Sleep immediately, without waiting out the idle timer.
+    SleepNow,
     /// Enter edit mode, or save and leave it.
     EditSave,
     /// Edit mode: one entry of the schedule being edited, or the row past the
@@ -667,6 +672,8 @@ pub struct Ui {
     /// `Action`, because a scan blocks for a few hundred milliseconds and must
     /// wait for the transition that requested it to finish animating.
     want_scan: bool,
+    /// Sleep asked for from the moon button; main owns the backlight and clock.
+    want_sleep: bool,
     /// Keyboard: what is being edited, the text so far, and the layout.
     edit: Edit,
     edit_buf: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
@@ -784,6 +791,7 @@ impl Ui {
             networks: crate::net::Networks::EMPTY,
             scan_busy: false,
             want_scan: false,
+            want_sleep: false,
             edit: Edit::WifiPsk,
             edit_buf: crate::store::FixedStr::EMPTY,
             edit_invalid: false,
@@ -1097,6 +1105,10 @@ impl Ui {
                         self.edit_control(which, state);
                         Action::None
                     }
+                    Target::SleepNow => {
+                        self.want_sleep = true;
+                        Action::None
+                    }
                     Target::Confirm => self.confirm_action(x, y, now_ms),
                     Target::Retry => {
                         self.connect_started_ms = now_ms;
@@ -1188,11 +1200,13 @@ impl Ui {
                         ),
                         Screen::Info => (l::ANALOG_PITCH, l::ANALOG_MAX_ROWS, state.n_analogs),
                         Screen::Force => (l::RELAY_PITCH, l::RELAY_MAX_ROWS, state.n_usable()),
-                        screen if screen.is_menu() => (
-                            l::MENU_PITCH,
-                            l::MENU_MAX_ROWS,
-                            self.menu_total(screen),
-                        ),
+                        // From `geom`, not the MENU_* constants: Extras uses
+                        // taller rows and fits fewer per page, and hardcoding the
+                        // settings numbers here gave it a scroll range of zero.
+                        screen if screen.is_menu() => {
+                            let g = geom(screen);
+                            (g.pitch, g.max_rows, self.menu_total(screen))
+                        }
                         _ => (1, 1, 0),
                     };
                     let max_offset = total.saturating_sub(visible) as i32 * pitch;
@@ -1571,6 +1585,15 @@ impl Ui {
                 self.zone(Target::Inspect, Zone::Rect { x0, y0, x1, y1 });
                 let (x0, y0, x1, y1) = l::HOME_FORCE;
                 self.zone(Target::Force, Zone::Rect { x0, y0, x1, y1 });
+                let (mx, my, mr) = l::MOON;
+                self.zone(
+                    Target::SleepNow,
+                    Zone::Disc {
+                        cx: mx,
+                        cy: my,
+                        r: mr,
+                    },
+                );
             }
             Screen::Inspect => {
                 self.zone(
@@ -2147,6 +2170,10 @@ impl Ui {
         self.draw_link(scene, state, alpha);
         self.draw_power(scene, Screen::Home, state, alpha);
         self.draw_cog(scene, alpha);
+        // A crescent, cut from one disc by another - no new shape needed.
+        let (mx, my, mr) = l::MOON;
+        scene.disc(mx, my, mr - 6, rgb(120, 132, 150), alpha);
+        scene.disc(mx + 11, my - 7, mr - 7, rgb(0, 0, 0), alpha);
 
         let mut clock = Buf::<8>::new();
         if state.clock_valid {
@@ -2686,6 +2713,10 @@ impl Ui {
         {
             self.connect_failed = true;
         }
+    }
+
+    pub fn take_sleep_request(&mut self) -> bool {
+        core::mem::take(&mut self.want_sleep)
     }
 
     /// A scan the UI has asked for, handed to main - which owns the radio.
