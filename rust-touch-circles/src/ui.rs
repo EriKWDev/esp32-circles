@@ -1133,7 +1133,7 @@ impl Ui {
                             // records where it began.
                             self.swipe_from = (x, y);
                         } else if self.interactive_screen() == Screen::Match3 {
-                            self.match3.touch(x, y, now_ms);
+                            self.match3.press(x, y);
                         } else if self.interactive_screen() == Screen::Pomodoro {
                             let (rx0, ry0, rx1, ry1) = crate::pomodoro::RESET;
                             if x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1 {
@@ -1318,6 +1318,8 @@ impl Ui {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.asteroids.touch(x, y);
                     }
+                } else if self.interactive_screen() == Screen::Match3 {
+                    self.match3.drag(x, y, now_ms);
                 } else if self.interactive_screen() == Screen::Bubbles {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.game.press(x, y, now_ms);
@@ -1333,6 +1335,9 @@ impl Ui {
                 // Lifting off stops the thrust, so the ship coasts.
                 if self.interactive_screen() == Screen::Asteroids {
                     self.asteroids.release();
+                }
+                if self.interactive_screen() == Screen::Match3 {
+                    self.match3.release();
                 }
                 // 2048: the direction of the whole gesture, decided on release, so
                 // a wandering finger still produces one clean move.

@@ -1,4 +1,5 @@
-//! Match three. Tap a gem, then tap a neighbour to swap them.
+//! Match three. Press a gem and drag it toward the neighbour you want it to
+//! trade places with.
 //!
 //! A small state machine, because every step of a cascade has to be *seen*: the
 //! swap slides, matches pop as rings, survivors fall into the gaps, and only then
@@ -16,14 +17,17 @@ use crate::gfx::{Align, Scene, TextBuf, W, muted, rgb};
 const N: usize = 7;
 const KINDS: usize = 5;
 
-const MARGIN: i32 = 20;
-const CELL: i32 = (W as i32 - 2 * MARGIN) / N as i32;
-const BOARD_TOP: i32 = 108;
+/// Sized by the space below the header and centred, so the last row is on screen.
+const BOARD_TOP: i32 = 106;
+const CELL: i32 = 50;
+const MARGIN: i32 = (W as i32 - N as i32 * CELL) / 2;
 const GEM_R: i32 = CELL / 2 - 5;
 
 const SWAP_MS: u32 = 130;
 const POP_MS: u32 = 170;
 const FALL_MS: u32 = 170;
+/// How far the finger must travel before a drag counts as a direction.
+const DRAG_MIN: i32 = 18;
 
 const COLORS: [u16; KINDS] = [
     rgb(255, 96, 120),
@@ -54,7 +58,10 @@ pub struct Match3 {
     doomed: [[bool; N]; N],
     step: Step,
     step_started_ms: u32,
+    /// The gem under the finger, and where the finger went down. A gesture is
+    /// consumed as soon as it commits to a direction, so one drag is one swap.
     selected: Option<(usize, usize)>,
+    drag_origin: (i32, i32),
     score: u32,
     chain: u32,
     /// Next kind to hand out, so refills rotate rather than clump.
@@ -70,6 +77,7 @@ impl Match3 {
             step: Step::Idle,
             step_started_ms: 0,
             selected: None,
+            drag_origin: (0, 0),
             score: 0,
             chain: 0,
             next_kind: 0,
@@ -79,11 +87,76 @@ impl Match3 {
     pub fn restart(&mut self, now_ms: u32) {
         *self = Self::new();
         self.next_kind = (now_ms as usize / 13) % KINDS;
+        self.deal();
+    }
+
+    /// Fill the board, and keep filling until it actually has a move in it.
+    ///
+    /// "No three in a row" is not the same as "there is something to do": a board
+    /// can be free of matches and also completely stuck, which is the worst thing
+    /// this game can hand you. Each attempt starts from a different point in the
+    /// kind rotation, so it cannot deal the same dead board twice.
+    fn deal(&mut self) {
+        for _ in 0..12 {
+            for r in 0..N {
+                for c in 0..N {
+                    self.cells[r][c] = self.fill_for(r, c);
+                }
+            }
+            if self.has_move() {
+                return;
+            }
+            self.next_kind = (self.next_kind + 3) % KINDS;
+        }
+    }
+
+    /// Whether any single swap of neighbours would make a match. Tries each of
+    /// them and puts the board back, which is exact - the alternative is a
+    /// pattern-matching approximation that eventually disagrees with the rules the
+    /// clearing code actually uses.
+    fn has_move(&mut self) -> bool {
         for r in 0..N {
             for c in 0..N {
-                self.cells[r][c] = self.fill_for(r, c);
+                for (dr, dc) in [(0usize, 1usize), (1, 0)] {
+                    let (r2, c2) = (r + dr, c + dc);
+                    if r2 >= N || c2 >= N {
+                        continue;
+                    }
+                    let keep = self.cells[r][c];
+                    self.cells[r][c] = self.cells[r2][c2];
+                    self.cells[r2][c2] = keep;
+                    let found = self.any_match();
+                    let keep = self.cells[r][c];
+                    self.cells[r][c] = self.cells[r2][c2];
+                    self.cells[r2][c2] = keep;
+                    if found {
+                        return true;
+                    }
+                }
             }
         }
+        false
+    }
+
+    /// Read-only twin of `mark_matches`, for asking without changing anything.
+    fn any_match(&self) -> bool {
+        for r in 0..N {
+            for c in 2..N {
+                let kind = self.cells[r][c];
+                if kind != 0 && self.cells[r][c - 1] == kind && self.cells[r][c - 2] == kind {
+                    return true;
+                }
+            }
+        }
+        for c in 0..N {
+            for r in 2..N {
+                let kind = self.cells[r][c];
+                if kind != 0 && self.cells[r - 1][c] == kind && self.cells[r - 2][c] == kind {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// A kind that does not already complete a line at (r, c) - which is how the
@@ -101,7 +174,7 @@ impl Match3 {
         self.next_kind as u8 + 1
     }
 
-    pub fn touch(&mut self, x: i32, y: i32, now_ms: u32) {
+    pub fn press(&mut self, x: i32, y: i32) {
         if self.step != Step::Idle {
             return;
         }
@@ -110,22 +183,38 @@ impl Match3 {
         if col < 0 || row < 0 || col >= N as i32 || row >= N as i32 {
             return;
         }
-        let cell = (row as usize, col as usize);
-        match self.selected {
-            None => self.selected = Some(cell),
-            Some(first) if first == cell => self.selected = None,
-            Some(first) => {
-                let adjacent = (first.0 as i32 - cell.0 as i32).abs()
-                    + (first.1 as i32 - cell.1 as i32).abs()
-                    == 1;
-                if adjacent {
-                    self.begin_swap(first, cell, now_ms);
-                } else {
-                    // Tapping a distant gem picks that one instead of failing.
-                    self.selected = Some(cell);
-                }
-            }
+        self.selected = Some((row as usize, col as usize));
+        self.drag_origin = (x, y);
+    }
+
+    /// Commit the moment the drag has a direction, rather than waiting for the
+    /// finger to lift: a swap should happen while you are still pushing.
+    pub fn drag(&mut self, x: i32, y: i32, now_ms: u32) {
+        let Some(from) = self.selected else {
+            return;
+        };
+        if self.step != Step::Idle {
+            return;
         }
+        let (dx, dy) = (x - self.drag_origin.0, y - self.drag_origin.1);
+        if dx.abs().max(dy.abs()) < DRAG_MIN {
+            return;
+        }
+        let (dr, dc) = if dx.abs() > dy.abs() {
+            (0, dx.signum())
+        } else {
+            (dy.signum(), 0)
+        };
+        let (r, c) = (from.0 as i32 + dr, from.1 as i32 + dc);
+        if r < 0 || c < 0 || r >= N as i32 || c >= N as i32 {
+            self.selected = None;
+            return;
+        }
+        self.begin_swap(from, (r as usize, c as usize), now_ms);
+    }
+
+    pub fn release(&mut self) {
+        self.selected = None;
     }
 
     fn begin_swap(&mut self, a: (usize, usize), b: (usize, usize), now_ms: u32) {
@@ -222,6 +311,11 @@ impl Match3 {
                     self.step_started_ms = now_ms;
                 } else {
                     self.doomed = [[false; N]; N];
+                    // A refill can settle into a board with nothing to do; deal
+                    // again rather than leave it stuck.
+                    if !self.has_move() {
+                        self.deal();
+                    }
                     self.step = Step::Idle;
                 }
             }

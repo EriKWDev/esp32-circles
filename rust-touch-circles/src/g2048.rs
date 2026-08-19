@@ -11,9 +11,11 @@ use crate::font::FontId;
 use crate::gfx::{Align, Scene, TextBuf, W, muted, rgb};
 
 const N: usize = 4;
-const MARGIN: i32 = 22;
-const BOARD_TOP: i32 = 104;
-const CELL: i32 = (W as i32 - 2 * MARGIN) / N as i32;
+/// The board is square and sized by the space *below the header*, not by the
+/// panel width - sizing it from the width put its bottom rows off the screen.
+const BOARD_TOP: i32 = 106;
+const CELL: i32 = 88;
+const MARGIN: i32 = (W as i32 - N as i32 * CELL) / 2;
 const PAD: i32 = 5;
 
 const SLIDE_MS: u32 = 130;

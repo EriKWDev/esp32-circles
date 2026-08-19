@@ -43,6 +43,8 @@ const BUNKER_W: usize = 4;
 const BUNKER_H: usize = 2;
 const BLOCK: i32 = 22;
 const BUNKER_TOP: i32 = SHIP_Y - 78;
+/// Hits a block takes before it is gone, shown as it wears down.
+const BLOCK_HEALTH: u8 = 3;
 
 /// Row colours, per wave. Six sets, so the wave keeps changing appearance long
 /// after the fleet itself repeats.
@@ -100,10 +102,10 @@ const NO_SHOT: Shot = Shot {
 
 pub struct Invaders {
     alive: [[bool; COLS]; ROWS],
-    /// Bunker blocks, eroded from either side: bombs chew down through them and
-    /// the gun shoots up through them, which is what makes hiding a decision
-    /// rather than a free shelter.
-    bunkers: [[[bool; BUNKER_W]; BUNKER_H]; BUNKERS],
+    /// Hits left in each bunker block, BLOCK_HEALTH down to gone. Bombs chew
+    /// them away, and standing under one stops the gun - so shelter costs you
+    /// your own line of fire, which is the whole point of it.
+    bunkers: [[[u8; BUNKER_W]; BUNKER_H]; BUNKERS],
     /// Fleet origin: the top-left invader's centre.
     fleet_x: i32,
     /// Q, and eased toward `fleet_drop_to`: the step down is a glide, not a jump.
@@ -125,7 +127,7 @@ impl Invaders {
     pub const fn new() -> Self {
         Self {
             alive: [[true; COLS]; ROWS],
-            bunkers: [[[true; BUNKER_W]; BUNKER_H]; BUNKERS],
+            bunkers: [[[BLOCK_HEALTH; BUNKER_W]; BUNKER_H]; BUNKERS],
             fleet_x: (W as i32 - (COLS as i32 - 1) * CELL_W) / 2,
             fleet_y: FLEET_TOP * Q,
             fleet_drop_to: FLEET_TOP * Q,
@@ -199,7 +201,8 @@ impl Invaders {
         }
 
         // Firing.
-        if now_ms >= self.next_fire_ms {
+        // Under a bunker the gun holds fire: step out to shoot, hide to be safe.
+        if now_ms >= self.next_fire_ms && !self.sheltered(self.ship_x) {
             self.next_fire_ms = now_ms + FIRE_EVERY_MS;
             if let Some(slot) = self.shots.iter_mut().find(|s| !s.live) {
                 *slot = Shot {
@@ -309,7 +312,29 @@ impl Invaders {
         let gap = (W as i32 - BUNKERS as i32 * span) / (BUNKERS as i32 + 1);
         let x0 = gap + index as i32 * (span + gap) + col as i32 * BLOCK;
         let y0 = BUNKER_TOP + row as i32 * BLOCK;
-        (x0, y0, x0 + BLOCK - 2, y0 + BLOCK - 2)
+        // The whole cell, with no gap. Insetting this by a couple of pixels for the
+        // sake of the drawing left channels between the columns that bombs slipped
+        // straight through; the inset belongs in `draw` alone.
+        (x0, y0, x0 + BLOCK, y0 + BLOCK)
+    }
+
+    /// Whether a bunker block still stands above `x`, which is what silences the
+    /// gun: you cannot shoot through your own shelter.
+    fn sheltered(&self, x: i32) -> bool {
+        for index in 0..BUNKERS {
+            for row in 0..BUNKER_H {
+                for col in 0..BUNKER_W {
+                    if self.bunkers[index][row][col] == 0 {
+                        continue;
+                    }
+                    let (x0, _, x1, _) = Self::block_rect(index, col, row);
+                    if x >= x0 && x <= x1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Anything in flight that is inside a block takes it away and stops there.
@@ -317,7 +342,7 @@ impl Invaders {
         for index in 0..BUNKERS {
             for row in 0..BUNKER_H {
                 for col in 0..BUNKER_W {
-                    if !self.bunkers[index][row][col] {
+                    if self.bunkers[index][row][col] == 0 {
                         continue;
                     }
                     let (x0, y0, x1, y1) = Self::block_rect(index, col, row);
@@ -337,7 +362,7 @@ impl Invaders {
                         }
                     }
                     if struck {
-                        self.bunkers[index][row][col] = false;
+                        self.bunkers[index][row][col] -= 1;
                         bubbles.spawn(
                             (x0 + x1) / 2,
                             (y0 + y1) / 2,
@@ -456,11 +481,20 @@ impl Invaders {
         for index in 0..BUNKERS {
             for row in 0..BUNKER_H {
                 for col in 0..BUNKER_W {
-                    if !self.bunkers[index][row][col] {
+                    let health = self.bunkers[index][row][col];
+                    if health == 0 {
                         continue;
                     }
                     let (x0, y0, x1, y1) = Self::block_rect(index, col, row);
-                    scene.pill(x0, y0, x1, y1, 4, rgb(70, 150, 100), alpha);
+                    // Worn blocks shrink and dull, so damage is legible before the
+                    // block disappears.
+                    let wear = (BLOCK_HEALTH - health) as i32 * 4 + 1;
+                    let shade = match health {
+                        3 => rgb(70, 150, 100),
+                        2 => rgb(58, 124, 84),
+                        _ => rgb(46, 98, 68),
+                    };
+                    scene.pill(x0 + wear, y0 + wear, x1 - wear, y1 - wear, 4, shade, alpha);
                 }
             }
         }
