@@ -1160,7 +1160,11 @@ impl Ui {
                             // records where it began.
                             self.swipe_from = (x, y);
                         } else if self.interactive_screen() == Screen::Simon {
-                            if let Some(pad) = crate::simon::Simon::pad_at(x, y) {
+                            // Anywhere starts or retries; only a pad counts as an
+                            // answer.
+                            if self.simon.awaiting_start() {
+                                self.simon.restart(now_ms);
+                            } else if let Some(pad) = crate::simon::Simon::pad_at(x, y) {
                                 self.want_sound = match self.simon.tap(pad, now_ms) {
                                     crate::simon::Answer::Pad(pad) => Some(Sound::Pad(pad)),
                                     crate::simon::Answer::Round => Some(Sound::Win),
@@ -2737,7 +2741,7 @@ impl Ui {
                         self.match3.restart(now_ms);
                     }
                     if *screen == Screen::Simon {
-                        self.simon.restart(now_ms);
+                        self.simon.arm();
                     }
                     if *screen == Screen::Cat {
                         self.cat.restart();

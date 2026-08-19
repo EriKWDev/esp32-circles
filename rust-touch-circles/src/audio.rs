@@ -5,36 +5,34 @@
 //! mclk 19, bclk 20, ws 22, dout 23, codec at I2C 0x18, no amplifier-enable pin,
 //! and MCLK at 256x the sample rate - the simplest row in their table.
 //!
-//! Tones are played by blocking. A note is a few hundred milliseconds and the
-//! alternative is circular DMA whose transfer object borrows the peripheral for
-//! its whole life, which does not survive being held across frames. Blocking
-//! costs a hitch in the animation while a note sounds, which on the two screens
-//! that use it - a memory game and a cat - is not a screen anybody is watching
-//! for smoothness. Nothing else on the panel plays sound, so nothing else pays.
+//! Playing does not block the UI. A circular DMA transfer borrows the peripheral
+//! for its whole life, so it cannot be stored between frames - which is why the
+//! first version simply blocked, and why the panel stalled on every note. Control
+//! is inverted instead: `play_while` keeps the transfer alive for the length of a
+//! melody and calls back whenever the DMA is full, so the caller renders its
+//! frames from inside the playback loop. Sound is continuous, screen keeps moving.
 
-use esp_hal::i2s::master::{Channels, Config, DataFormat, I2s};
 use esp_hal::i2c::master::I2c;
+use esp_hal::i2s::master::{Channels, Config, DataFormat, I2s};
 use esp_hal::time::Rate;
 
 const ADDR: u8 = 0x18;
 pub const SAMPLE_RATE: u32 = 16_000;
-/// Samples per DMA write. Small enough that a tone can be stopped promptly,
-/// large enough that back-to-back writes leave no gap.
-const CHUNK: usize = 512;
+/// Bytes per stereo frame: two 16-bit samples.
+const FRAME: usize = 4;
+/// Samples of fade at each end of a note, so it neither clicks on nor off.
+const RAMP: usize = 160;
 
-/// A note, as a quarter-wave step through the table below.
 pub struct Tone {
     pub freq: u16,
     pub ms: u16,
 }
 
-/// One period of a soft waveform - a sine with a little second harmonic, which
-/// sounds rounder than a square and much cuter than a raw sine.
+/// One period of a soft waveform. Rounder than a square, and cuter than a raw
+/// sine because of a little second harmonic in the shoulders.
 const WAVE_LEN: usize = 64;
 static WAVE: [i16; WAVE_LEN] = {
     let mut table = [0i16; WAVE_LEN];
-    // Built by hand rather than at runtime: a const fn cannot call sin, and a
-    // table this short is easier to read as numbers anyway.
     let quarter: [i16; 16] = [
         0, 1205, 2404, 3593, 4767, 5921, 7052, 8154, 9224, 10258, 11252, 12202, 13105, 13958,
         14757, 15500,
@@ -53,12 +51,11 @@ static WAVE: [i16; WAVE_LEN] = {
 pub struct Audio<'d> {
     tx: esp_hal::i2s::master::I2sTx<'d, esp_hal::Blocking>,
     buffer: &'static mut [u8],
-    /// Phase accumulator, 16.16, so a frequency need not divide the rate.
-    phase: u32,
     ready: bool,
 }
 
 impl<'d> Audio<'d> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         i2s: esp_hal::peripherals::I2S0<'d>,
         channel: esp_hal::peripherals::DMA_CH1<'d>,
@@ -85,60 +82,92 @@ impl<'d> Audio<'d> {
             .build(descriptors);
 
         let ready = init_codec(i2c);
-        Some(Self {
-            tx,
-            buffer,
-            phase: 0,
-            ready,
-        })
+        Some(Self { tx, buffer, ready })
     }
 
-    /// Play one note, and return when it has finished.
+    /// The output is unmuted only while something plays. Left open it hisses: the
+    /// DAC is powered and amplifying an input nothing is clocking, and at this
+    /// volume that noise floor carries across a room.
+    pub fn set_mute(&self, i2c: &mut I2c<'_, esp_hal::Blocking>, on: bool) {
+        if self.ready {
+            mute(i2c, on);
+        }
+    }
+
+    /// Play a melody, calling `pump` whenever the DMA has no room.
     ///
-    /// The output is unmuted only for the duration. Left open it hisses: the DAC is
-    /// powered and amplifying an input that nothing is clocking, and at this
-    /// volume that noise floor is audible across a room.
-    pub fn tone(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, tone: &Tone) {
+    /// `pump` is where the caller renders. It must not touch this struct or the
+    /// I2C bus the mute rides on - which is why `set_mute` is separate and called
+    /// either side of this.
+    pub fn play_while(&mut self, tones: &[Tone], mut pump: impl FnMut()) {
         if !self.ready {
             return;
         }
-        mute(i2c, false);
-        let total = SAMPLE_RATE as usize * tone.ms as usize / 1000;
-        let step = ((tone.freq as u32 * WAVE_LEN as u32) << 16) / SAMPLE_RATE;
-        let mut done = 0;
-        self.phase = 0;
-        while done < total {
-            let count = CHUNK.min(total - done);
-            for index in 0..count {
-                let slot = (self.phase >> 16) as usize % WAVE_LEN;
-                // A short attack and release, so a note starts and stops without
-                // the click a hard edge would make.
-                let from_edge = index + done;
-                let ramp = from_edge.min(total - from_edge).min(160) as i32;
-                let sample = (WAVE[slot] as i32 * ramp / 160) as i16;
-                let bytes = sample.to_le_bytes();
-                let at = index * 4;
-                self.buffer[at] = bytes[0];
-                self.buffer[at + 1] = bytes[1];
-                self.buffer[at + 2] = bytes[0];
-                self.buffer[at + 3] = bytes[1];
-                self.phase = self.phase.wrapping_add(step);
-            }
-            let slice = &self.buffer[..count * 4];
-            if let Ok(transfer) = self.tx.write_dma(&slice) {
-                let _ = transfer.wait();
-            } else {
-                break;
-            }
-            done += count;
+        // The buffer moves out for the duration: the transfer needs it, and it and
+        // `tx` cannot both be borrowed out of `self` at once.
+        let buffer = core::mem::replace(&mut self.buffer, &mut []);
+        for byte in buffer.iter_mut() {
+            *byte = 0;
         }
-        mute(i2c, true);
-    }
+        let Ok(mut transfer) = self.tx.write_dma_circular(&buffer) else {
+            self.buffer = buffer;
+            return;
+        };
 
-    pub fn play(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, tones: &[Tone]) {
+        // Phase is a local, not a field: `self` is borrowed by the transfer for as
+        // long as this runs.
+        let mut phase: u32 = 0;
         for tone in tones {
-            self.tone(i2c, tone);
+            let total = SAMPLE_RATE as usize * tone.ms as usize / 1000;
+            let step = ((tone.freq as u32 * WAVE_LEN as u32) << 16) / SAMPLE_RATE;
+            let mut done = 0usize;
+            while done < total {
+                let remaining = (total - done) * FRAME;
+                let from = done;
+                let pushed = transfer
+                    .push_with(|slot| {
+                        let bytes = slot.len().min(remaining) / FRAME * FRAME;
+                        for frame in 0..bytes / FRAME {
+                            let index = from + frame;
+                            let ramp = index.min(total - index).min(RAMP) as i32;
+                            let wave = WAVE[(phase >> 16) as usize % WAVE_LEN] as i32;
+                            let sample = (wave * ramp / RAMP as i32) as i16;
+                            let pair = sample.to_le_bytes();
+                            let at = frame * FRAME;
+                            slot[at] = pair[0];
+                            slot[at + 1] = pair[1];
+                            slot[at + 2] = pair[0];
+                            slot[at + 3] = pair[1];
+                            phase = phase.wrapping_add(step);
+                        }
+                        bytes
+                    })
+                    .unwrap_or(0);
+                done += pushed / FRAME;
+                // Room or not, the caller gets its frame.
+                pump();
+            }
         }
+
+        // Silence for one buffer's worth before stopping, or the DMA keeps
+        // replaying whatever of the last note is still queued.
+        let mut flushed = 0;
+        while flushed < buffer.len() {
+            let pushed = transfer
+                .push_with(|slot| {
+                    for byte in slot.iter_mut() {
+                        *byte = 0;
+                    }
+                    slot.len()
+                })
+                .unwrap_or(0);
+            if pushed == 0 {
+                pump();
+            }
+            flushed += pushed;
+        }
+        let _ = transfer.stop();
+        self.buffer = buffer;
     }
 }
 
@@ -206,8 +235,8 @@ fn init_codec(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
         (0x37, 0x08),
         (0x45, 0x00),
         (0x01, 0x3F),
-        // Volume. Loud enough to hear across a room, short of the point where a
-        // small speaker starts to rattle.
+        // Loud enough to hear across a room, short of where a small speaker starts
+        // to rattle.
         (0x32, 0xB4),
     ] {
         ok &= write(i2c, reg, value);
@@ -217,8 +246,8 @@ fn init_codec(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
     ok
 }
 
-/// A pentatonic set, so any order of them sounds deliberate. C5 D5 E5 G5, then A5
-/// and C6 for the flourishes.
+/// A pentatonic set, so any order of them sounds deliberate rather than random:
+/// C5 D5 E5 G5, plus A5 and top C for the flourishes.
 pub const NOTES: [u16; 6] = [523, 587, 659, 784, 880, 1047];
 
 pub fn win() -> [Tone; 4] {

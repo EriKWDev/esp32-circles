@@ -81,6 +81,27 @@ const BRIGHTNESS_STEP: u8 = 6;
 /// latency on the first touch, which at this length is not perceptible.
 const SLEEP_NAP_MS: u32 = 25;
 
+/// Melodies are a handful of notes of differing counts, and there is no allocator
+/// to hold them behind one type - so the sizes are spelled out and `as_ref` hands
+/// out the slice.
+enum Melody {
+    One([audio::Tone; 1]),
+    Two([audio::Tone; 2]),
+    Three([audio::Tone; 3]),
+    Four([audio::Tone; 4]),
+}
+
+impl AsRef<[audio::Tone]> for Melody {
+    fn as_ref(&self) -> &[audio::Tone] {
+        match self {
+            Melody::One(tones) => tones,
+            Melody::Two(tones) => tones,
+            Melody::Three(tones) => tones,
+            Melody::Four(tones) => tones,
+        }
+    }
+}
+
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
 // handed out exactly once during startup.
@@ -500,21 +521,30 @@ fn main() -> ! {
         if let Some(sound) = ui.take_sound(t)
             && let Some(audio) = audio.as_mut()
         {
-            match sound {
-                ui::Sound::Pad(pad) => audio.tone(
-                    &mut i2c,
-                    &audio::Tone {
-                        freq: audio::NOTES[pad.min(3)],
-                        ms: 190,
-                    },
-                ),
-                ui::Sound::Win => audio.play(&mut i2c, &audio::win()),
-                ui::Sound::Lose => audio.play(&mut i2c, &audio::lose()),
-                ui::Sound::Purr => audio.play(&mut i2c, &audio::purr()),
-                ui::Sound::Meow => audio.play(&mut i2c, &audio::meow()),
-            }
-            // The tone ate real time; do not let the frame clock blame the UI.
+            let melody = match sound {
+                ui::Sound::Pad(pad) => Melody::One([audio::Tone {
+                    freq: audio::NOTES[pad.min(3)],
+                    ms: 190,
+                }]),
+                ui::Sound::Win => Melody::Four(audio::win()),
+                ui::Sound::Lose => Melody::Three(audio::lose()),
+                ui::Sound::Purr => Melody::Two(audio::purr()),
+                ui::Sound::Meow => Melody::Two(audio::meow()),
+            };
+
+            // Unmuted only for the melody, and rendering carries on *inside* the
+            // playback loop - the panel used to stall for the length of every note.
+            audio.set_mute(&mut i2c, false);
+            audio.play_while(melody.as_ref(), || {
+                let now = now_ms();
+                ui.update(&state, now);
+                ui.build(&mut scene, &state, now);
+                lcd.present(&scene);
+            });
+            audio.set_mute(&mut i2c, true);
+            // The melody ate real time; do not let the frame clock blame the UI.
             last_ms = now_ms();
+            dirty = true;
         }
 
         ui.update(&state, t);

@@ -67,6 +67,20 @@ impl Simon {
         }
     }
 
+    /// Opened, but not begun. The first pattern waits for a tap: a game that
+    /// starts the instant the page appears has already played its first note
+    /// before anyone is looking at it.
+    pub fn arm(&mut self) {
+        let best = self.best;
+        *self = Self::new();
+        self.best = best;
+    }
+
+    /// Whether a tap anywhere should begin a game rather than count as an answer.
+    pub fn awaiting_start(&self) -> bool {
+        matches!(self.phase, Phase::Ready | Phase::Lost)
+    }
+
     pub fn restart(&mut self, now_ms: u32) {
         let best = self.best;
         *self = Self::new();
@@ -211,7 +225,7 @@ impl Simon {
                 let _ = write!(line, "{} RIGHT", self.len);
             }
             Phase::Lost => {
-                let _ = write!(line, "MISSED - BEST {}", self.best);
+                let _ = write!(line, "MISSED {} - TAP TO RETRY", self.best);
             }
         }
         scene.label(
