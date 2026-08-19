@@ -13,7 +13,7 @@ esp-println = { version = "0.16", features = ["esp32c6", "log-04"] }
 esp-bootloader-esp-idf = { version = "0.5", features = ["esp32c6"] }
 esp-radio = { version = "1.0.0-beta.0", features = ["esp32c6", "wifi", "unstable"] }
 esp-alloc = "0.10"
-smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-dhcpv4"] }
+smoltcp = { version = "0.12", default-features = false, features = ["medium-ethernet", "proto-ipv4", "proto-dhcpv4", "socket-tcp", "socket-dhcpv4", "socket-dns"] }
 md-5 = { version = "0.10", default-features = false }
 esp-rtos = { version = "0.3.0", features = ["esp32c6", "esp-radio", "esp-alloc"] }
 embassy-futures = "0.1.2"

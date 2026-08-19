@@ -55,6 +55,7 @@ const C_POMODORO: u16 = rgb(255, 120, 90);
 const C_SIMON: u16 = rgb(120, 210, 255);
 const C_CAT: u16 = rgb(255, 190, 120);
 const C_CALC: u16 = rgb(232, 140, 60);
+const C_WEATHER: u16 = rgb(96, 176, 255);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -359,6 +360,7 @@ pub enum Screen {
     Simon,
     Cat,
     Calc,
+    Weather,
 }
 
 impl Screen {
@@ -392,7 +394,8 @@ impl Screen {
             | Screen::Pomodoro
             | Screen::Simon
             | Screen::Cat
-            | Screen::Calc => rgb(0, 0, 0),
+            | Screen::Calc
+            | Screen::Weather => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -422,6 +425,7 @@ impl Screen {
             Screen::Simon => C_SIMON,
             Screen::Cat => C_CAT,
             Screen::Calc => C_CALC,
+            Screen::Weather => C_WEATHER,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -767,6 +771,7 @@ pub struct Ui {
     simon: crate::simon::Simon,
     cat: crate::cat::Cat,
     calc: crate::calc::Calc,
+    weather: crate::weather::Weather,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
     pong_last_ms: u32,
@@ -889,6 +894,7 @@ impl Ui {
             simon: crate::simon::Simon::new(),
             cat: crate::cat::Cat::new(),
             calc: crate::calc::Calc::new(),
+            weather: crate::weather::Weather::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
@@ -1031,6 +1037,20 @@ impl Ui {
 
     /// Which screen a touch belongs to: once a wipe starts, the destination
     /// already owns input, even while it is still being covered.
+    /// Let the network-backed apps advance their fetches, and say whether the
+    /// screen changed as a result. Only the page on screen gets to ask: nothing
+    /// here should be talking to the internet in the background.
+    pub fn step_apps(&mut self, net: &mut crate::net::Net, now_ms: u32) -> bool {
+        match self.interactive_screen() {
+            Screen::Weather => {
+                let before = self.weather.fingerprint();
+                self.weather.step(net, now_ms);
+                self.weather.fingerprint() != before
+            }
+            _ => false,
+        }
+    }
+
     fn interactive_screen(&self) -> Screen {
         self.wipe.map_or(self.screen, |w| w.to)
     }
@@ -1177,6 +1197,20 @@ impl Ui {
                                     crate::simon::Answer::Lost => Some(Sound::Lose),
                                     crate::simon::Answer::Nothing => None,
                                 };
+                            }
+                        } else if self.interactive_screen() == Screen::Weather {
+                            for (rect, forward) in [
+                                (crate::weather::PREV, false),
+                                (crate::weather::NEXT, true),
+                            ] {
+                                let (x0, y0, x1, y1) = rect;
+                                if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+                                    if forward {
+                                        self.weather.next_day();
+                                    } else {
+                                        self.weather.prev_day();
+                                    }
+                                }
                             }
                         } else if self.interactive_screen() == Screen::Calc {
                             if let Some(key) = crate::calc::Calc::key_at(x, y) {
@@ -1741,6 +1775,7 @@ impl Ui {
                     | Screen::Simon
                     | Screen::Cat
                     | Screen::Calc
+                    | Screen::Weather
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1976,6 +2011,7 @@ impl Ui {
             | Screen::Simon
             | Screen::Cat
             | Screen::Calc
+            | Screen::Weather
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2204,6 +2240,7 @@ impl Ui {
                 | Screen::Simon
                 | Screen::Cat
                 | Screen::Calc
+                | Screen::Weather
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2272,6 +2309,10 @@ impl Ui {
             }
             Screen::Calc => {
                 self.calc.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Weather => {
+                self.weather.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2576,6 +2617,7 @@ impl Ui {
         ("SIMON", C_SIMON, Screen::Simon),
         ("CAT", C_CAT, Screen::Cat),
         ("CALCULATOR", C_CALC, Screen::Calc),
+        ("WEATHER", C_WEATHER, Screen::Weather),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2766,6 +2808,9 @@ impl Ui {
                     }
                     if *screen == Screen::Calc {
                         self.calc.restart();
+                    }
+                    if *screen == Screen::Weather {
+                        self.weather.wake();
                     }
                     self.open(*screen, x, y, now_ms);
                 }

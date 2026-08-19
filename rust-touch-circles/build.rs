@@ -59,7 +59,7 @@ const FONTS: &[FontSpec] = &[
         px: 76.0,
         // The calculator readout needs a point and a minus; without them a decimal
         // result simply lost its point on screen.
-        charset: "0123456789:!.,-+ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ ",
+        charset: "0123456789:!.,-+°ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ ",
     },
     // Menu labels and relay names.
     FontSpec {

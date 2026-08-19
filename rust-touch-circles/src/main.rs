@@ -21,6 +21,7 @@ mod calc;
 mod cat;
 mod bubbles;
 mod display;
+mod fetch;
 mod font;
 mod g2048;
 mod gfx;
@@ -34,6 +35,7 @@ mod simon;
 mod store;
 mod touch;
 mod ui;
+mod weather;
 
 use esp_hal::{
     delay::Delay,
@@ -106,8 +108,13 @@ impl AsRef<[audio::Tone]> for Melody {
 // smoltcp needs its storage to outlive the interface. There is no allocator
 // budget to spare for this and no StaticCell dependency, so it is plain statics
 // handed out exactly once during startup.
-static mut SOCKETS: [smoltcp::iface::SocketStorage<'static>; 4] =
-    [smoltcp::iface::SocketStorage::EMPTY; 4];
+static mut SOCKETS: [smoltcp::iface::SocketStorage<'static>; 6] =
+    [smoltcp::iface::SocketStorage::EMPTY; 6];
+/// Second socket pair, for the apps' fetches: sharing the controller client's
+/// would make a weather lookup and a poll wait on each other.
+static mut FETCH_RX: [u8; 4096] = [0; 4096];
+static mut FETCH_TX: [u8; 512] = [0; 512];
+static mut DNS_QUERIES: [Option<smoltcp::socket::dns::DnsQuery>; 2] = [None, None];
 static mut NET_RX: [u8; 5120] = [0; 5120];
 static mut NET_TX: [u8; 2048] = [0; 2048];
 // I2S needs its descriptors and its sample buffer to outlive the driver, same as
@@ -214,6 +221,9 @@ fn main() -> ! {
         unsafe { &mut *core::ptr::addr_of_mut!(SOCKETS) },
         unsafe { &mut *core::ptr::addr_of_mut!(NET_RX) },
         unsafe { &mut *core::ptr::addr_of_mut!(NET_TX) },
+        unsafe { &mut *core::ptr::addr_of_mut!(FETCH_RX) },
+        unsafe { &mut *core::ptr::addr_of_mut!(FETCH_TX) },
+        unsafe { &mut *core::ptr::addr_of_mut!(DNS_QUERIES) },
         &settings,
         now_ms(),
     ) {
@@ -550,6 +560,14 @@ fn main() -> ! {
 
         ui.update(&state, t);
 
+        // The network-backed apps fetch for themselves, and only while their page
+        // is up.
+        if let Some(n) = net.as_mut() {
+            if ui.step_apps(n, t) {
+                dirty = true;
+            }
+        }
+
         // A scan blocks for a few hundred milliseconds, so it happens between
         // frames and only once the transition that asked for it has finished -
         // see Ui::take_scan_request. The "scanning" frame is painted first, so
@@ -665,6 +683,7 @@ fn main() -> ! {
                     ui::Screen::Simon => "simon",
                     ui::Screen::Cat => "cat",
                     ui::Screen::Calc => "calc",
+                    ui::Screen::Weather => "weather",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

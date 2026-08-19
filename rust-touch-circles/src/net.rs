@@ -28,6 +28,7 @@ use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 
+use crate::fetch::Fetch;
 use crate::model::{MAX_CONTROLLERS, MAX_ENTRIES, State, parse_dump};
 
 include!(concat!(env!("OUT_DIR"), "/secrets.rs"));
@@ -222,6 +223,9 @@ pub struct Net {
     snapshots: [State; MAX_CONTROLLERS],
     snapshot_valid: [bool; MAX_CONTROLLERS],
     http: Option<Http>,
+    /// Named-host fetches for the apps, on their own socket - see the fetch
+    /// module for why it is not this client.
+    pub fetch: Fetch,
     /// Body for the request in flight. Kept here rather than inside `Http`
     /// because that struct is copied on every `service` pass, and only one
     /// request exists at a time anyway.
@@ -327,6 +331,9 @@ impl Net {
         sockets_storage: &'static mut [SocketStorage<'static>],
         rx_buf: &'static mut [u8],
         tx_buf: &'static mut [u8],
+        fetch_rx: &'static mut [u8],
+        fetch_tx: &'static mut [u8],
+        dns_queries: &'static mut [Option<smoltcp::socket::dns::DnsQuery>],
         settings: &crate::store::Settings,
         now_ms: u32,
     ) -> Result<Self, &'static str> {
@@ -353,6 +360,7 @@ impl Net {
             tcp::SocketBuffer::new(tx_buf),
         );
         let tcp = sockets.add(tcp_socket);
+        let fetch = Fetch::new(&mut sockets, fetch_rx, fetch_tx, dns_queries);
 
         let mut net = Self {
             controller,
@@ -369,6 +377,7 @@ impl Net {
             snapshots: [const { State::new() }; MAX_CONTROLLERS],
             snapshot_valid: [false; MAX_CONTROLLERS],
             http: None,
+            fetch,
             post_body: Buf::new(),
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
@@ -570,6 +579,13 @@ impl Net {
             }
             None => {}
         }
+        self.fetch.step(&mut self.sockets, &mut self.iface, now_ms);
+    }
+
+    /// Start a plain GET to a named host, for the apps.
+    pub fn fetch_get(&mut self, host: &str, path: &str, now_ms: u32) {
+        self.fetch
+            .get(&mut self.sockets, &mut self.iface, host, path, now_ms);
     }
 
     /// Advance at most one small piece of HTTP work. This function never waits:
