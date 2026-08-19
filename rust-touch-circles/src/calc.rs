@@ -203,15 +203,21 @@ impl Calc {
         let mut status = TextBuf::new();
         use core::fmt::Write as _;
         if let Some(op) = self.op {
-            let _ = write!(status, "{} {}", self.left as i64, op);
+            let symbol = match op {
+                '*' => "\u{d7}",
+                '/' => "\u{f7}",
+                '+' => "+",
+                _ => "-",
+            };
+            let _ = write!(status, "{} {}", self.left as i64, symbol);
         }
         if self.memory != 0.0 {
             let _ = write!(status, "  M");
         }
         scene.label(
             PAD + 16,
-            120,
-            FontId::Micro,
+            126,
+            FontId::Caption,
             rgb(140, 150, 165),
             alpha,
             Align::Left,
@@ -231,13 +237,8 @@ impl Calc {
                 _ => DIGIT,
             };
             scene.pill(x0, y0, x1, y1, 12, plate, alpha);
-            // Long labels drop to the smaller face rather than overflowing.
-            let font = if key.len() > 2 {
-                FontId::Micro
-            } else {
-                FontId::Body
-            };
-            let f = font.get();
+            // The symbols are real glyphs now - the font was baked without them, so
+            // every one of these keys was previously blank.
             let caption = match key {
                 "sqrt" => "\u{221a}",
                 "pi" => "\u{3c0}",
@@ -245,11 +246,14 @@ impl Calc {
                 "/" => "\u{f7}",
                 other => other,
             };
-            let font = if caption.chars().count() > 2 {
-                FontId::Micro
+            // Anything longer than a single character goes down a size to fit, and
+            // to a face that has letters: Micro carries digits only.
+            let font = if caption.chars().count() > 1 {
+                FontId::Caption
             } else {
-                font
+                FontId::Body
             };
+            let f = font.get();
             scene.label(
                 (x0 + x1) / 2,
                 (y0 + y1) / 2 + f.ascent / 2 - f.ascent / 8,

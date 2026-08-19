@@ -17,14 +17,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DIGITS: &str = "0123456789:";
-const MICRO_CHARS: &str = "0123456789:%";
 // Relay names come from the irrigation controller's config and are arbitrary
 // Swedish free text, so the body sizes need the full latin set plus åäö.
 const BODY: &str = "\
  !\"#%&'()*+,-./0123456789:;<=>?@\
 ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_\
 abcdefghijklmnopqrstuvwxyz{|}~\
-ÅÄÖåäöéÉ·°";
+ÅÄÖåäöéÉ·°×÷√π";
 
 struct FontSpec {
     ident: &'static str,
@@ -42,7 +41,7 @@ const FONTS: &[FontSpec] = &[
         ident: "MICRO",
         ttf: "Barlow-SemiBold.ttf",
         px: 20.0,
-        charset: MICRO_CHARS,
+        charset: BODY,
     },
     // Hero countdown digits.
     // Sized so "12:34" fits inside the countdown ring's inner radius with room
@@ -58,7 +57,9 @@ const FONTS: &[FontSpec] = &[
         ident: "DISPLAY",
         ttf: "Barlow-Bold.ttf",
         px: 76.0,
-        charset: "0123456789:!ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ ",
+        // The calculator readout needs a point and a minus; without them a decimal
+        // result simply lost its point on screen.
+        charset: "0123456789:!.,-+ABCDEFGHIJKLMNOPQRSTUVWXYZÅÄÖ ",
     },
     // Menu labels and relay names.
     FontSpec {
