@@ -15,7 +15,9 @@ use esp_backtrace as _;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 mod asteroids;
+mod audio;
 mod breakout;
+mod cat;
 mod bubbles;
 mod display;
 mod font;
@@ -27,6 +29,7 @@ mod model;
 mod net;
 mod pomodoro;
 mod pong;
+mod simon;
 mod store;
 mod touch;
 mod ui;
@@ -85,6 +88,11 @@ static mut SOCKETS: [smoltcp::iface::SocketStorage<'static>; 4] =
     [smoltcp::iface::SocketStorage::EMPTY; 4];
 static mut NET_RX: [u8; 5120] = [0; 5120];
 static mut NET_TX: [u8; 2048] = [0; 2048];
+// I2S needs its descriptors and its sample buffer to outlive the driver, same as
+// smoltcp's storage above.
+static mut I2S_DESC: [esp_hal::dma::DmaDescriptor; 4] =
+    [esp_hal::dma::DmaDescriptor::EMPTY; 4];
+static mut I2S_BUF: [u8; 2048] = [0; 2048];
 
 /// SYSTIMER runs at 16 MHz on the ESP32-C6.
 #[inline]
@@ -197,6 +205,21 @@ fn main() -> ! {
             None
         }
     };
+
+    // Sound. A failure here is not fatal: the panel is an irrigation controller
+    // first, and a mute cat is better than no panel.
+    let mut audio = audio::Audio::new(
+        p.I2S0,
+        p.DMA_CH1,
+        p.GPIO19.into(),
+        p.GPIO20.into(),
+        p.GPIO22.into(),
+        p.GPIO23.into(),
+        unsafe { &mut *core::ptr::addr_of_mut!(I2S_DESC) },
+        unsafe { &mut *core::ptr::addr_of_mut!(I2S_BUF) },
+        &mut i2c,
+    );
+    esp_println::println!("audio: {}", if audio.is_some() { "ready" } else { "unavailable" });
 
     let mut ui = Ui::new();
     // The UI reads persisted settings directly, so give it the loaded copy.
@@ -472,6 +495,25 @@ fn main() -> ! {
             lcd.set_brightness(brightness);
         }
 
+        // Sounds are played here rather than where they are decided: a note blocks
+        // for its own length, which has no business inside input handling.
+        if let Some(sound) = ui.take_sound(t)
+            && let Some(audio) = audio.as_mut()
+        {
+            match sound {
+                ui::Sound::Pad(pad) => audio.tone(&audio::Tone {
+                    freq: audio::NOTES[pad.min(3)],
+                    ms: 190,
+                }),
+                ui::Sound::Win => audio.play(&audio::win()),
+                ui::Sound::Lose => audio.play(&audio::lose()),
+                ui::Sound::Purr => audio.play(&audio::purr()),
+                ui::Sound::Meow => audio.play(&audio::meow()),
+            }
+            // The tone ate real time; do not let the frame clock blame the UI.
+            last_ms = now_ms();
+        }
+
         ui.update(&state, t);
 
         // A scan blocks for a few hundred milliseconds, so it happens between
@@ -586,6 +628,8 @@ fn main() -> ! {
                     ui::Screen::G2048 => "2048",
                     ui::Screen::Match3 => "match3",
                     ui::Screen::Pomodoro => "pomodoro",
+                    ui::Screen::Simon => "simon",
+                    ui::Screen::Cat => "cat",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

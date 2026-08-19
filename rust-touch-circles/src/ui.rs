@@ -52,6 +52,8 @@ const C_APPS: u16 = rgb(255, 150, 90);
 const C_2048: u16 = rgb(242, 177, 121);
 const C_MATCH3: u16 = rgb(255, 110, 140);
 const C_POMODORO: u16 = rgb(255, 120, 90);
+const C_SIMON: u16 = rgb(120, 210, 255);
+const C_CAT: u16 = rgb(255, 190, 120);
 
 /// Controllers can report `run=1` for one final poll after the countdown and
 /// queue have both drained. Treat that as completed activity everywhere; the
@@ -353,6 +355,8 @@ pub enum Screen {
     G2048,
     Match3,
     Pomodoro,
+    Simon,
+    Cat,
 }
 
 impl Screen {
@@ -383,7 +387,9 @@ impl Screen {
             | Screen::Asteroids
             | Screen::G2048
             | Screen::Match3
-            | Screen::Pomodoro => rgb(0, 0, 0),
+            | Screen::Pomodoro
+            | Screen::Simon
+            | Screen::Cat => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -410,6 +416,8 @@ impl Screen {
             Screen::G2048 => C_2048,
             Screen::Match3 => C_MATCH3,
             Screen::Pomodoro => C_POMODORO,
+            Screen::Simon => C_SIMON,
+            Screen::Cat => C_CAT,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -609,6 +617,17 @@ const SWIPE_MIN: i32 = 26;
 /// List pages that remember a scroll offset - see `scroll_slot`.
 const MENU_PAGES: usize = 5;
 
+/// What the games ask to be played. Kept as an intent rather than a call so the
+/// blocking part stays in main.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sound {
+    Pad(usize),
+    Win,
+    Lose,
+    Purr,
+    Meow,
+}
+
 /// How long to wait for a network to let us in before offering a retry.
 ///
 /// There is no failure event to observe here - a rejected password looks exactly
@@ -715,6 +734,9 @@ pub struct Ui {
     want_scan: bool,
     /// Sleep asked for from the moon button; main owns the backlight and clock.
     want_sleep: bool,
+    /// Sound to play, left for main - which owns the codec, and whose call to it
+    /// blocks for the length of the note.
+    pub want_sound: Option<Sound>,
     /// Keyboard: what is being edited, the text so far, and the layout.
     edit: Edit,
     edit_buf: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
@@ -738,6 +760,8 @@ pub struct Ui {
     g2048: crate::g2048::G2048,
     match3: crate::match3::Match3,
     pomodoro: crate::pomodoro::Pomodoro,
+    simon: crate::simon::Simon,
+    cat: crate::cat::Cat,
     /// Where the current drag began, for 2048's swipes.
     swipe_from: (i32, i32),
     pong_last_ms: u32,
@@ -841,6 +865,7 @@ impl Ui {
             scan_busy: false,
             want_scan: false,
             want_sleep: false,
+            want_sound: None,
             edit: Edit::WifiPsk,
             edit_buf: crate::store::FixedStr::EMPTY,
             edit_invalid: false,
@@ -856,6 +881,8 @@ impl Ui {
             g2048: crate::g2048::G2048::new(),
             match3: crate::match3::Match3::new(),
             pomodoro: crate::pomodoro::Pomodoro::new(),
+            simon: crate::simon::Simon::new(),
+            cat: crate::cat::Cat::new(),
             swipe_from: (0, 0),
             pong_last_ms: 0,
             connect_started_ms: 0,
@@ -1132,6 +1159,21 @@ impl Ui {
                             // The swipe is measured on release; the press only
                             // records where it began.
                             self.swipe_from = (x, y);
+                        } else if self.interactive_screen() == Screen::Simon {
+                            if let Some(pad) = crate::simon::Simon::pad_at(x, y) {
+                                self.want_sound = match self.simon.tap(pad, now_ms) {
+                                    crate::simon::Answer::Pad(pad) => Some(Sound::Pad(pad)),
+                                    crate::simon::Answer::Round => Some(Sound::Win),
+                                    crate::simon::Answer::Lost => Some(Sound::Lose),
+                                    crate::simon::Answer::Nothing => None,
+                                };
+                            }
+                        } else if self.interactive_screen() == Screen::Cat {
+                            self.want_sound = if self.cat.tap(x, y) {
+                                Some(Sound::Purr)
+                            } else {
+                                None
+                            };
                         } else if self.interactive_screen() == Screen::Match3 {
                             self.match3.press(x, y);
                         } else if self.interactive_screen() == Screen::Pomodoro {
@@ -1478,6 +1520,21 @@ impl Ui {
             Screen::G2048 => self.g2048.update(now_ms, &mut self.game),
             Screen::Match3 => self.match3.update(now_ms, &mut self.game),
             Screen::Pomodoro => self.pomodoro.update(dt, now_ms, &mut self.game),
+            Screen::Simon => {
+                self.simon.update(now_ms);
+                // Sounding a step is main's job; the pattern only advances once it
+                // reports back through `advance_show`.
+                if let Some(pad) = self.simon.pending_show()
+                    && self.want_sound.is_none()
+                {
+                    self.want_sound = Some(Sound::Pad(pad));
+                }
+            }
+            Screen::Cat => {
+                if self.cat.update(dt) {
+                    self.want_sound = Some(Sound::Meow);
+                }
+            }
             _ => {}
         }
         for bubble in self.bubbles.iter_mut() {
@@ -1581,6 +1638,8 @@ impl Ui {
             || self.screen == Screen::G2048
             || self.screen == Screen::Match3
             || self.screen == Screen::Pomodoro
+            || self.screen == Screen::Simon
+            || self.screen == Screen::Cat
             || (self.screen == Screen::Force && self.knob_q4 != y_from_minutes(self.minutes) << 4)
     }
 
@@ -1665,6 +1724,8 @@ impl Ui {
                     | Screen::G2048
                     | Screen::Match3
                     | Screen::Pomodoro
+                    | Screen::Simon
+                    | Screen::Cat
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -1897,6 +1958,8 @@ impl Ui {
             | Screen::G2048
             | Screen::Match3
             | Screen::Pomodoro
+            | Screen::Simon
+            | Screen::Cat
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2122,6 +2185,8 @@ impl Ui {
                 | Screen::G2048
                 | Screen::Match3
                 | Screen::Pomodoro
+                | Screen::Simon
+                | Screen::Cat
         ) && !self.idle
         {
             self.draw_bubbles(scene, screen, now_ms, alpha);
@@ -2176,6 +2241,16 @@ impl Ui {
             Screen::Pomodoro => {
                 self.game.draw(scene, now_ms, alpha);
                 self.pomodoro.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Simon => {
+                self.game.draw(scene, now_ms, alpha);
+                self.simon.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Cat => {
+                self.game.draw(scene, now_ms, alpha);
+                self.cat.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
         }
@@ -2477,6 +2552,8 @@ impl Ui {
         ("2048", C_2048, Screen::G2048),
         ("MATCH 3", C_MATCH3, Screen::Match3),
         ("POMODORO", C_POMODORO, Screen::Pomodoro),
+        ("SIMON", C_SIMON, Screen::Simon),
+        ("CAT", C_CAT, Screen::Cat),
     ];
 
     /// Extras is a menu of destinations, exactly like Home, so its buttons are
@@ -2658,6 +2735,12 @@ impl Ui {
                     }
                     if *screen == Screen::Match3 {
                         self.match3.restart(now_ms);
+                    }
+                    if *screen == Screen::Simon {
+                        self.simon.restart(now_ms);
+                    }
+                    if *screen == Screen::Cat {
+                        self.cat.restart();
                     }
                     self.open(*screen, x, y, now_ms);
                 }
@@ -2957,6 +3040,16 @@ impl Ui {
         {
             self.connect_failed = true;
         }
+    }
+
+    /// The sound main should play, if any. Taking it also advances a pattern that
+    /// was waiting to be heard.
+    pub fn take_sound(&mut self, now_ms: u32) -> Option<Sound> {
+        let sound = self.want_sound.take()?;
+        if self.screen == Screen::Simon && self.simon.pending_show().is_some() {
+            self.simon.advance_show(now_ms);
+        }
+        Some(sound)
     }
 
     pub fn take_sleep_request(&mut self) -> bool {
