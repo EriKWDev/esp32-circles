@@ -6,9 +6,18 @@
 //! does the board look for matches again. Resolving it all in one frame would be
 //! correct and unreadable.
 //!
-//! New gems are drawn from a rotation rather than at random, and refills are
-//! rejected while they would complete a line, so the board never hands you a
-//! cascade you did not earn.
+//! Generating a board that is actually playable took three parts, and the first
+//! version had only one of them:
+//!
+//! - Gems come from a small xorshift, not a rotation. A rotation was the original
+//!   bug: cycling five kinds across a seven-wide board means no two neighbours are
+//!   ever equal, and a board with no adjacent pair has no possible move at all.
+//! - The initial fill rejects a kind that would *complete* a run, so the board
+//!   does not open on a free cascade. Refills do not reject: a cascade you set up
+//!   by clearing beneath is earned, and it is most of the fun.
+//! - Then it checks that some single swap would match, and if none would, plants
+//!   one. Planting three cells is gentler and more certain than reshuffling and
+//!   hoping.
 
 use crate::bubbles::Bubbles;
 use crate::font::FontId;
@@ -64,8 +73,7 @@ pub struct Match3 {
     drag_origin: (i32, i32),
     score: u32,
     chain: u32,
-    /// Next kind to hand out, so refills rotate rather than clump.
-    next_kind: usize,
+    rng: u32,
 }
 
 impl Match3 {
@@ -80,34 +88,73 @@ impl Match3 {
             drag_origin: (0, 0),
             score: 0,
             chain: 0,
-            next_kind: 0,
+            rng: 0x2545_f491,
         }
     }
 
     pub fn restart(&mut self, now_ms: u32) {
         *self = Self::new();
-        self.next_kind = (now_ms as usize / 13) % KINDS;
+        self.rng = now_ms | 1;
         self.deal();
     }
 
-    /// Fill the board, and keep filling until it actually has a move in it.
-    ///
-    /// "No three in a row" is not the same as "there is something to do": a board
-    /// can be free of matches and also completely stuck, which is the worst thing
-    /// this game can hand you. Each attempt starts from a different point in the
-    /// kind rotation, so it cannot deal the same dead board twice.
+    fn next_rand(&mut self) -> u32 {
+        // xorshift32: three shifts, no state beyond the word itself.
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        self.rng
+    }
+
+    fn random_kind(&mut self) -> u8 {
+        (self.next_rand() % KINDS as u32) as u8 + 1
+    }
+
+    /// Fill, then make sure there is something to do.
     fn deal(&mut self) {
-        for _ in 0..12 {
-            for r in 0..N {
-                for c in 0..N {
-                    self.cells[r][c] = self.fill_for(r, c);
-                }
+        for r in 0..N {
+            for c in 0..N {
+                self.cells[r][c] = self.fill_for(r, c);
             }
-            if self.has_move() {
-                return;
-            }
-            self.next_kind = (self.next_kind + 3) % KINDS;
         }
+        if !self.has_move() {
+            self.plant_move();
+        }
+    }
+
+    /// Put a guaranteed move on the board: a pair, and a third gem one square off
+    /// the end of it, so sliding that third into line completes a row.
+    ///
+    /// Three cells change, wherever it lands - far less disruptive than dealing the
+    /// whole board again, and unlike a reshuffle it cannot fail to help.
+    fn plant_move(&mut self) -> bool {
+        for _ in 0..48 {
+            let r = (self.next_rand() as usize) % (N - 1);
+            let c = (self.next_rand() as usize) % (N - 2);
+            let kind = self.random_kind();
+            let keep = [
+                self.cells[r][c],
+                self.cells[r][c + 1],
+                self.cells[r][c + 2],
+                self.cells[r + 1][c + 2],
+            ];
+            self.cells[r][c] = kind;
+            self.cells[r][c + 1] = kind;
+            self.cells[r + 1][c + 2] = kind;
+            // The gap must not already hold this kind, or the row is a match on
+            // sight instead of a move.
+            if self.cells[r][c + 2] == kind {
+                self.cells[r][c + 2] = kind % KINDS as u8 + 1;
+            }
+            if !self.any_match() && self.has_move() {
+                return true;
+            }
+            self.cells[r][c] = keep[0];
+            self.cells[r][c + 1] = keep[1];
+            self.cells[r][c + 2] = keep[2];
+            self.cells[r + 1][c + 2] = keep[3];
+        }
+        false
     }
 
     /// Whether any single swap of neighbours would make a match. Tries each of
@@ -159,19 +206,18 @@ impl Match3 {
         false
     }
 
-    /// A kind that does not already complete a line at (r, c) - which is how the
-    /// board starts and refills without free matches.
+    /// A random kind that does not complete a run at (r, c) - for the opening
+    /// board, which should not begin by clearing itself.
     fn fill_for(&mut self, r: usize, c: usize) -> u8 {
-        for _ in 0..KINDS {
-            let kind = self.next_kind as u8 + 1;
-            self.next_kind = (self.next_kind + 1) % KINDS;
+        for _ in 0..8 {
+            let kind = self.random_kind();
             let two_left = c >= 2 && self.cells[r][c - 1] == kind && self.cells[r][c - 2] == kind;
             let two_up = r >= 2 && self.cells[r - 1][c] == kind && self.cells[r - 2][c] == kind;
             if !two_left && !two_up {
                 return kind;
             }
         }
-        self.next_kind as u8 + 1
+        self.random_kind()
     }
 
     pub fn press(&mut self, x: i32, y: i32) {
@@ -314,7 +360,7 @@ impl Match3 {
                     // A refill can settle into a board with nothing to do; deal
                     // again rather than leave it stuck.
                     if !self.has_move() {
-                        self.deal();
+                        self.plant_move();
                     }
                     self.step = Step::Idle;
                 }
@@ -376,7 +422,7 @@ impl Match3 {
             }
             let mut above = write;
             while above >= 0 {
-                let kind = self.fill_for(above as usize, c);
+                let kind = self.random_kind();
                 self.cells[above as usize][c] = kind;
                 self.drop_from[above as usize][c] = (above + 2) as i8;
                 above -= 1;
