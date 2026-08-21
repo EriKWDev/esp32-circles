@@ -283,12 +283,19 @@ impl Pacman {
                 return;
             }
             // Never step past the next centre.
+            // Distance to the next centre *along the direction of travel*. Taking
+            // it as one whole cell beyond the current centre was wrong after a
+            // reversal, which happens mid-cell: the step then jumped a full cell,
+            // passed the centre without its wall check, and could land inside a
+            // wall - or off the board, where the truncating divide in `cell` keeps
+            // it lost. Hence walking through walls and out of the maze.
             let (cx, cy) = mover.centre();
-            let next = if mover.dx != 0 {
-                (cx + mover.dx as i32 * CELL * Q - mover.x).abs()
+            let along = if mover.dx != 0 {
+                mover.dx as i32 * (cx - mover.x)
             } else {
-                (cy + mover.dy as i32 * CELL * Q - mover.y).abs()
+                mover.dy as i32 * (cy - mover.y)
             };
+            let next = if along > 0 { along } else { along + CELL * Q };
             let take = left.min(next).max(1);
             mover.x += mover.dx as i32 * take;
             mover.y += mover.dy as i32 * take;
