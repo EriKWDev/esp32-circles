@@ -745,6 +745,7 @@ fn main() -> ! {
                     ui::Screen::Invaders => "invaders",
                     ui::Screen::Asteroids => "asteroids",
                     ui::Screen::Apps => "apps",
+                    ui::Screen::Games => "games",
                     ui::Screen::G2048 => "2048",
                     ui::Screen::Match3 => "match3",
                     ui::Screen::Pomodoro => "pomodoro",

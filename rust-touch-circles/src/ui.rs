@@ -48,6 +48,7 @@ const C_BUBBLES: u16 = rgb(255, 55, 125);
 const C_BREAKOUT: u16 = rgb(88, 190, 255);
 const C_INVADERS: u16 = rgb(120, 230, 170);
 const C_ASTEROIDS: u16 = rgb(190, 200, 230);
+const C_GAMES: u16 = rgb(255, 150, 210);
 const C_APPS: u16 = rgb(255, 150, 90);
 const C_2048: u16 = rgb(242, 177, 121);
 const C_MATCH3: u16 = rgb(255, 110, 140);
@@ -383,6 +384,8 @@ pub enum Screen {
     /// Share prices, three watchlists.
     Stocks,
     Pacman,
+    /// The games menu. Apps' twin, and drawn by the same page.
+    Games,
 }
 
 impl Screen {
@@ -427,8 +430,8 @@ impl Screen {
             | Screen::Tetris
             | Screen::Stocks
             | Screen::Pacman => rgb(0, 0, 0),
-            // Apps is Extras' twin, so it shares the palette.
-            Screen::Apps => BG_INFO,
+            // Both menus are Extras' twins, so they share its palette.
+            Screen::Apps | Screen::Games => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
             // the fallback keeps the transition disc a sensible colour.
             Screen::Breakout => rgb(6, 10, 20),
@@ -450,6 +453,7 @@ impl Screen {
             Screen::Invaders => C_INVADERS,
             Screen::Asteroids => C_ASTEROIDS,
             Screen::Apps => C_APPS,
+            Screen::Games => C_GAMES,
             Screen::G2048 => C_2048,
             Screen::Match3 => C_MATCH3,
             Screen::Pomodoro => C_POMODORO,
@@ -480,7 +484,12 @@ impl Screen {
     fn is_menu(self) -> bool {
         matches!(
             self,
-            Screen::Extras | Screen::Apps | Screen::Config | Screen::Wifi | Screen::Controller
+            Screen::Extras
+                | Screen::Apps
+                | Screen::Games
+                | Screen::Config
+                | Screen::Wifi
+                | Screen::Controller
         )
     }
 }
@@ -685,7 +694,7 @@ const KEY_FLASH_MS: u32 = 130;
 /// Shortest gesture 2048 accepts as a swipe, so a tap does not move the board.
 const SWIPE_MIN: i32 = 26;
 /// List pages that remember a scroll offset - see `scroll_slot`.
-const MENU_PAGES: usize = 5;
+const MENU_PAGES: usize = 6;
 
 /// What the games ask to be played. Kept as an intent rather than a call so the
 /// blocking part stays in main.
@@ -2287,6 +2296,7 @@ impl Ui {
             // drag - scrolled nothing at all.
             Screen::Extras
             | Screen::Apps
+            | Screen::Games
             | Screen::Config
             | Screen::Wifi
             | Screen::Controller => {
@@ -2648,6 +2658,7 @@ impl Ui {
             Screen::Info => self.draw_info(scene, state, alpha),
             Screen::Extras => self.draw_extras(scene, alpha, Screen::Extras),
             Screen::Apps => self.draw_extras(scene, alpha, Screen::Apps),
+            Screen::Games => self.draw_extras(scene, alpha, Screen::Games),
             Screen::Config => {
                 self.draw_config(scene, state, alpha);
                 self.draw_wifi_badge(scene, state, alpha);
@@ -3103,6 +3114,11 @@ impl Ui {
                     );
                 }
             }
+            None if !state.any_controller_online() => {
+                // "No schedule armed" is a claim about the controller, and with
+                // nothing answering there is nothing to claim.
+                let _ = write!(next, "NO CONNECTION TO CONTROLLER");
+                }
             None => {
                 let _ = write!(next, "NO SCHEDULE ARMED");
                 }
@@ -3168,30 +3184,38 @@ impl Ui {
     const EXTRAS: &'static [(&'static str, u16, Screen)] = &[
         ("SETTINGS", C_CONFIG, Screen::Config),
         ("SENSORS", C_INFO, Screen::Info),
+        ("GAMES", C_GAMES, Screen::Games),
         ("APPS", C_APPS, Screen::Apps),
     ];
 
-    /// The games and toys. Same table shape as EXTRAS, so one page draws both.
-    const APPS: &'static [(&'static str, u16, Screen)] = &[
-        ("BUBBLES", C_BUBBLES, Screen::Bubbles),
+    /// Things to play with. Same table shape as EXTRAS, so one page draws all
+    /// three - which is also why splitting these in two cost nothing but the list
+    /// itself.
+    const GAMES: &'static [(&'static str, u16, Screen)] = &[
+        ("PACMAN", crate::pacman::ACCENT, Screen::Pacman),
+        ("TETRIS", crate::tetris::ACCENT, Screen::Tetris),
+        ("MASKEN", C_SNAKE, Screen::Snake),
+        ("CHESS", crate::chess::ACCENT, Screen::Chess),
         ("PONG", crate::pong::RIGHT_COLOR, Screen::Pong),
         ("BREAKOUT", C_BREAKOUT, Screen::Breakout),
         ("INVADERS", C_INVADERS, Screen::Invaders),
         ("ASTEROIDS", C_ASTEROIDS, Screen::Asteroids),
+        ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
         ("2048", C_2048, Screen::G2048),
         ("MATCH 3", C_MATCH3, Screen::Match3),
-        ("POMODORO", C_POMODORO, Screen::Pomodoro),
         ("SIMON", C_SIMON, Screen::Simon),
+        ("BUBBLES", C_BUBBLES, Screen::Bubbles),
         ("CAT", C_CAT, Screen::Cat),
-        ("CALCULATOR", C_CALC, Screen::Calc),
+    ];
+
+    /// Things with a use. Pomodoro sits here rather than with the games: it is a
+    /// kitchen timer, whatever it is made of.
+    const APPS: &'static [(&'static str, u16, Screen)] = &[
         ("WEATHER", C_WEATHER, Screen::Weather),
-        ("CURRENCY", C_CURRENCY, Screen::Currency),
-        ("MASKEN", C_SNAKE, Screen::Snake),
-        ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
-        ("CHESS", crate::chess::ACCENT, Screen::Chess),
-        ("TETRIS", crate::tetris::ACCENT, Screen::Tetris),
         ("STOCKS", crate::stocks::ACCENT, Screen::Stocks),
-        ("PACMAN", crate::pacman::ACCENT, Screen::Pacman),
+        ("CURRENCY", C_CURRENCY, Screen::Currency),
+        ("CALCULATOR", C_CALC, Screen::Calc),
+        ("POMODORO", C_POMODORO, Screen::Pomodoro),
         ("ABOUT", crate::about::ACCENT, Screen::About),
     ];
 
@@ -3200,10 +3224,10 @@ impl Ui {
     /// centred in each. It scrolls, because this is where games and other toys
     /// will land.
     fn table_for(screen: Screen) -> &'static [(&'static str, u16, Screen)] {
-        if screen == Screen::Apps {
-            Self::APPS
-        } else {
-            Self::EXTRAS
+        match screen {
+            Screen::Apps => Self::APPS,
+            Screen::Games => Self::GAMES,
+            _ => Self::EXTRAS,
         }
     }
 
@@ -3216,7 +3240,11 @@ impl Ui {
             INK,
             alpha,
             Align::Center,
-            if page == Screen::Apps { "APPS" } else { "EXTRAS" },
+            match page {
+                Screen::Apps => "APPS",
+                Screen::Games => "GAMES",
+                _ => "EXTRAS",
+            },
         );
 
         scene.clip(l::EXTRA_VIEW_TOP, l::EXTRA_VIEW_BOTTOM);
@@ -3318,6 +3346,7 @@ impl Ui {
         match screen {
             Screen::Extras => 0,
             Screen::Apps => 1,
+            Screen::Games => 5,
             Screen::Config => 2,
             Screen::Wifi => 3,
             _ => 4,
