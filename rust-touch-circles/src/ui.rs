@@ -377,6 +377,7 @@ pub enum Screen {
     /// What to do about tomorrow's forecast.
     Rain,
     Chess,
+    Tetris,
 }
 
 impl Screen {
@@ -417,7 +418,8 @@ impl Screen {
             | Screen::Spacewar
             | Screen::About
             | Screen::Rain
-            | Screen::Chess => rgb(0, 0, 0),
+            | Screen::Chess
+            | Screen::Tetris => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -454,6 +456,7 @@ impl Screen {
             Screen::About => crate::about::ACCENT,
             Screen::Rain => C_SKY,
             Screen::Chess => crate::chess::ACCENT,
+            Screen::Tetris => crate::tetris::ACCENT,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -818,6 +821,7 @@ pub struct Ui {
     pub sys: crate::about::Sys,
     pub rain: crate::rain::Rain,
     chess: crate::chess::Chess,
+    tetris: crate::tetris::Tetris,
     chess_bubble_ms: u32,
     /// Set when the rain page is opened, so main asks for a fresh forecast.
     pub want_forecast: bool,
@@ -954,6 +958,7 @@ impl Ui {
             sys: crate::about::Sys::EMPTY,
             rain: crate::rain::Rain::new(),
             chess: crate::chess::Chess::new(),
+            tetris: crate::tetris::Tetris::new(),
             chess_bubble_ms: 0,
             want_forecast: false,
             about_page: 0,
@@ -1247,7 +1252,9 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        if self.interactive_screen() == Screen::Chess {
+                        if self.interactive_screen() == Screen::Tetris {
+                            self.tetris.press(x, y, now_ms);
+                        } else if self.interactive_screen() == Screen::Chess {
                             self.chess_tap(x, y, now_ms);
                         } else if self.interactive_screen() == Screen::About {
                             self.about_page = (self.about_page + 1) % crate::about::PAGES;
@@ -1498,7 +1505,11 @@ impl Ui {
                 // contacts near a live circle's origin, so a moving finger starts
                 // a new one roughly every fingertip's width. That is the original's
                 // behaviour, not an addition.
-                if self.interactive_screen() == Screen::Snake {
+                if self.interactive_screen() == Screen::Tetris {
+                    if self.hit(x, y) == Some(Target::Bubble) {
+                        self.tetris.drag(x, y, now_ms);
+                    }
+                } else if self.interactive_screen() == Screen::Snake {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.snake.steer(x, y);
                     }
@@ -1547,6 +1558,9 @@ impl Ui {
                 }
                 if self.interactive_screen() == Screen::Pomodoro {
                     self.pomodoro.release();
+                }
+                if self.interactive_screen() == Screen::Tetris {
+                    self.tetris.release();
                 }
                 // Lifting off stops a turn; thrust stays latched.
                 if self.interactive_screen() == Screen::Spacewar {
@@ -1702,6 +1716,7 @@ impl Ui {
         match self.interactive_screen() {
             Screen::Pong => self.pong.update(dt, now_ms, &mut self.game),
             Screen::Snake => self.snake.update(now_ms, &mut self.game),
+            Screen::Tetris => self.tetris.update(now_ms, &mut self.game),
             // The search runs in slices from here, so twenty seconds of thinking
             // costs the loop a few milliseconds per frame instead of stalling it.
             Screen::Chess => {
@@ -1862,6 +1877,7 @@ impl Ui {
             || self.screen == Screen::Pong
             || self.screen == Screen::Snake
             || self.screen == Screen::Chess
+            || self.screen == Screen::Tetris
             || self.screen == Screen::Spacewar
             || self.screen == Screen::Breakout
             || self.screen == Screen::Invaders
@@ -1964,6 +1980,7 @@ impl Ui {
                     | Screen::Spacewar
                     | Screen::About
                     | Screen::Chess
+                    | Screen::Tetris
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2228,6 +2245,7 @@ impl Ui {
             | Screen::Spacewar
             | Screen::About
             | Screen::Chess
+            | Screen::Tetris
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2481,6 +2499,11 @@ impl Ui {
             Screen::Chess => {
                 self.game.draw(scene, now_ms, alpha);
                 self.chess.draw(scene, now_ms, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Tetris => {
+                self.game.draw(scene, now_ms, alpha);
+                self.tetris.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
@@ -2901,6 +2924,7 @@ impl Ui {
         ("MASKEN", C_SNAKE, Screen::Snake),
         ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
         ("CHESS", crate::chess::ACCENT, Screen::Chess),
+        ("TETRIS", crate::tetris::ACCENT, Screen::Tetris),
         ("ABOUT", crate::about::ACCENT, Screen::About),
     ];
 
@@ -3110,6 +3134,9 @@ impl Ui {
                     }
                     if *screen == Screen::Chess {
                         self.chess.setup();
+                    }
+                    if *screen == Screen::Tetris {
+                        self.tetris.restart(now_ms);
                     }
                     self.open(*screen, x, y, now_ms);
                 }
