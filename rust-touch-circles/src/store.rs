@@ -24,13 +24,19 @@ const MAGIC: u32 = 0x5242_4E31; // "RBN1"
 /// Bumped to 2 when controllers gained a name. Version 1 records are still read
 /// (see `decode`), because falling back to defaults would silently discard
 /// controllers someone had already added by hand.
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 pub const MAX_CONTROLLERS: usize = 6;
 pub const MAX_SSID: usize = 32;
 pub const MAX_SECRET: usize = 64;
 pub const MAX_USER: usize = 32;
 pub const MAX_NAME: usize = 20;
+/// Watchlists: three of them, because the stocks app shows three tabs and a
+/// fourth would not fit across the top of a 480-pixel panel.
+pub const MAX_LISTS: usize = 3;
+pub const MAX_SYMBOLS: usize = 10;
+pub const MAX_TICKER: usize = 12;
+pub const MAX_LIST_NAME: usize = 14;
 
 /// Inline capacity, so the record stays Copy and its on-flash layout is fixed
 /// without a serialization framework.
@@ -101,6 +107,52 @@ impl Controller {
     }
 }
 
+/// One watchlist: a name and its tickers.
+#[derive(Clone, Copy)]
+pub struct StockList {
+    pub name: FixedStr<MAX_LIST_NAME>,
+    pub symbols: [FixedStr<MAX_TICKER>; MAX_SYMBOLS],
+    pub n_symbols: usize,
+}
+
+impl StockList {
+    pub const EMPTY: Self = Self {
+        name: FixedStr::EMPTY,
+        symbols: [FixedStr::EMPTY; MAX_SYMBOLS],
+        n_symbols: 0,
+    };
+
+    fn from(name: &str, symbols: &[&str]) -> Self {
+        let mut out = Self::EMPTY;
+        out.name = FixedStr::new(name);
+        for symbol in symbols.iter().take(MAX_SYMBOLS) {
+            out.symbols[out.n_symbols] = FixedStr::new(symbol);
+            out.n_symbols += 1;
+        }
+        out
+    }
+
+    pub fn add(&mut self, symbol: &str) -> bool {
+        if self.n_symbols >= MAX_SYMBOLS || symbol.is_empty() {
+            return false;
+        }
+        self.symbols[self.n_symbols] = FixedStr::new(symbol);
+        self.n_symbols += 1;
+        true
+    }
+
+    pub fn remove(&mut self, index: usize) {
+        if index >= self.n_symbols {
+            return;
+        }
+        for slot in index..self.n_symbols - 1 {
+            self.symbols[slot] = self.symbols[slot + 1];
+        }
+        self.n_symbols -= 1;
+        self.symbols[self.n_symbols] = FixedStr::EMPTY;
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Settings {
     pub ssid: FixedStr<MAX_SSID>,
@@ -113,6 +165,7 @@ pub struct Settings {
     pub rain_active: bool,
     pub rain_armed_mask: u16,
     pub rain_manual: u8,
+    pub lists: [StockList; MAX_LISTS],
 }
 
 impl Settings {
@@ -125,6 +178,7 @@ impl Settings {
         rain_active: false,
         rain_armed_mask: 0,
         rain_manual: 0,
+        lists: [StockList::EMPTY; MAX_LISTS],
     };
 
     /// The compiled-in configuration from `wifi.txt`. Used on first boot, and
@@ -138,6 +192,7 @@ impl Settings {
             rain_active: false,
             rain_armed_mask: 0,
             rain_manual: 0,
+            lists: default_lists(),
         };
         if let Some(ip) = parse_ip(RB_HOST) {
             out.controllers[0] = Controller {
@@ -182,6 +237,35 @@ impl Settings {
 
 /// Parses a dotted quad. Returns None on anything malformed, so a typo cannot
 /// silently become 0.0.0.0.
+/// The lists a panel starts with. Yahoo tickers, since that is what the
+/// controller asks upstream: Swedish listings take .ST, and TSMC is TSM there.
+fn default_lists() -> [StockList; MAX_LISTS] {
+    [
+        StockList::from(
+            "SWEDEN",
+            &[
+                "ANOD-B.ST",
+                "BURE.ST",
+                "CEVI.ST",
+                "GENI.ST",
+                "HMS.ST",
+                "PACT.ST",
+                "TRIAN-B.ST",
+            ],
+        ),
+        StockList::from(
+            "US TECH",
+            &[
+                "MU", "WDC", "SNDK", "COHR", "AMAT", "ASML", "TSM", "CBRS", "KLAC", "UI",
+            ],
+        ),
+        StockList::from(
+            "US FASTFOOD",
+            &["BLMN", "BAC", "MTN", "PLAY", "QSR", "ULTA"],
+        ),
+    ]
+}
+
 pub fn parse_ip(s: &str) -> Option<[u8; 4]> {
     let mut octets = [0u8; 4];
     let mut index = 0;
@@ -260,6 +344,17 @@ fn encode(settings: &Settings, out: &mut [u8; SECTOR]) -> usize {
         put(&controller.name.bytes, &mut at);
     }
 
+    // Watchlists, appended after the version 3 fields.
+    for list in &settings.lists {
+        put(&[list.name.len], &mut at);
+        put(&list.name.bytes, &mut at);
+        put(&[list.n_symbols as u8], &mut at);
+        for symbol in &list.symbols {
+            put(&[symbol.len], &mut at);
+            put(&symbol.bytes, &mut at);
+        }
+    }
+
     // Appended again, after the version 2 fields, on the same principle.
     put(&[settings.rain_active as u8], &mut at);
     put(&settings.rain_armed_mask.to_le_bytes(), &mut at);
@@ -285,10 +380,11 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     let version = u16::from_le_bytes(raw[4..6].try_into().ok()?);
     // Each version only appends, so an older record is this layout minus its
     // tail and reads back with the new fields left at their defaults.
-    let (has_names, has_rain) = match version {
-        1 => (false, false),
-        2 => (true, false),
-        v if v == VERSION => (true, true),
+    let (has_names, has_rain, has_lists) = match version {
+        1 => (false, false, false),
+        2 => (true, false, false),
+        3 => (true, true, false),
+        v if v == VERSION => (true, true, true),
         _ => return None,
     };
     let payload_len = u16::from_le_bytes(raw[6..8].try_into().ok()?) as usize;
@@ -315,6 +411,9 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         rain_active: false,
         rain_armed_mask: 0,
         rain_manual: 0,
+        // A record older than the lists gets the built-in ones rather than three
+        // empty tabs.
+        lists: default_lists(),
     };
     settings.ssid.len = take(1, &mut at)[0].min(MAX_SSID as u8);
     settings.ssid.bytes.copy_from_slice(take(MAX_SSID, &mut at));
@@ -347,6 +446,22 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         settings.controllers[index] = controller;
     }
     settings.n_controllers = count.min(MAX_CONTROLLERS);
+    if has_lists {
+        for index in 0..MAX_LISTS {
+            let mut list = StockList::EMPTY;
+            list.name.len = take(1, &mut at)[0].min(MAX_LIST_NAME as u8);
+            list.name.bytes.copy_from_slice(take(MAX_LIST_NAME, &mut at));
+            let count = take(1, &mut at)[0] as usize;
+            for slot in 0..MAX_SYMBOLS {
+                let mut symbol = FixedStr::<MAX_TICKER>::EMPTY;
+                symbol.len = take(1, &mut at)[0].min(MAX_TICKER as u8);
+                symbol.bytes.copy_from_slice(take(MAX_TICKER, &mut at));
+                list.symbols[slot] = symbol;
+            }
+            list.n_symbols = count.min(MAX_SYMBOLS);
+            settings.lists[index] = list;
+        }
+    }
     if has_rain {
         settings.rain_active = take(1, &mut at)[0] != 0;
         settings.rain_armed_mask = u16::from_le_bytes(take(2, &mut at).try_into().ok()?);

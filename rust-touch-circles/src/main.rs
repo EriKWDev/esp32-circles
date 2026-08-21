@@ -39,6 +39,7 @@ mod simon;
 mod snake;
 mod spacewar;
 mod store;
+mod stocks;
 mod tetris;
 mod touch;
 mod ui;
@@ -757,6 +758,7 @@ fn main() -> ! {
                     ui::Screen::Rain => "rain",
                     ui::Screen::Chess => "chess",
                     ui::Screen::Tetris => "tetris",
+                    ui::Screen::Stocks => "stocks",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

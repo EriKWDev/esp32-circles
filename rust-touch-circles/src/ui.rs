@@ -95,6 +95,8 @@ mod l {
     /// The forecast symbol, right of the clock, with a target far larger than the
     /// drawing - it is a small thing to hit and the page behind it is harmless.
     pub const SKY: (i32, i32, i32) = (376, 140, 46);
+    /// The pencil on the stocks page, in the corner opposite Back.
+    pub const STOCK_EDIT: (i32, i32, i32, i32) = (400, 14, 466, 50);
     /// The three choices on the rain page.
     pub const RAIN_CHOICE: [(i32, i32, i32, i32); 3] =
         [(56, 250, 424, 314), (56, 326, 424, 390), (56, 402, 424, 452)];
@@ -378,6 +380,8 @@ pub enum Screen {
     Rain,
     Chess,
     Tetris,
+    /// Share prices, three watchlists.
+    Stocks,
 }
 
 impl Screen {
@@ -419,7 +423,8 @@ impl Screen {
             | Screen::About
             | Screen::Rain
             | Screen::Chess
-            | Screen::Tetris => rgb(0, 0, 0),
+            | Screen::Tetris
+            | Screen::Stocks => rgb(0, 0, 0),
             // Apps is Extras' twin, so it shares the palette.
             Screen::Apps => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -457,6 +462,7 @@ impl Screen {
             Screen::Rain => C_SKY,
             Screen::Chess => crate::chess::ACCENT,
             Screen::Tetris => crate::tetris::ACCENT,
+            Screen::Stocks => crate::stocks::ACCENT,
             Screen::Config
             | Screen::Wifi
             | Screen::Controller
@@ -507,6 +513,12 @@ enum Target {
     SleepNow,
     /// The forecast symbol on the home screen.
     Sky,
+    /// One of the three watchlist tabs.
+    StockTab(usize),
+    /// The scrolling band of quotes.
+    StockList,
+    /// Enter or leave the watchlist editor.
+    StockEdit,
     /// Water anyway, skip tomorrow, or follow the forecast.
     RainChoice(usize),
     /// Enter edit mode, or save and leave it.
@@ -596,6 +608,9 @@ enum Edit {
     /// A currency code for the rates app. Not persisted: it is a look, not a
     /// setting.
     Symbol,
+    /// A watchlist's name, and a ticker to add to it.
+    ListName(usize),
+    AddSymbol(usize),
 }
 
 impl Edit {
@@ -611,6 +626,8 @@ impl Edit {
             Edit::ControllerPass(_) => "PASSWORD",
             Edit::ControllerName(_) => "NAME",
             Edit::Symbol => "CURRENCY",
+            Edit::ListName(_) => "LIST NAME",
+            Edit::AddSymbol(_) => "ADD SYMBOL",
         }
     }
 
@@ -618,7 +635,9 @@ impl Edit {
     fn mode(self) -> KeyMode {
         match self {
             Edit::NewControllerIp | Edit::ControllerIp(_) => KeyMode::Numeric,
-            Edit::Symbol => KeyMode::Upper,
+            // Tickers and list names are both shouted, and a ticker has dots and
+            // dashes in it that the letter layout carries.
+            Edit::Symbol | Edit::ListName(_) | Edit::AddSymbol(_) => KeyMode::Upper,
             _ => KeyMode::Lower,
         }
     }
@@ -822,7 +841,10 @@ pub struct Ui {
     pub rain: crate::rain::Rain,
     chess: crate::chess::Chess,
     tetris: crate::tetris::Tetris,
+    pub stocks: crate::stocks::Stocks,
     chess_bubble_ms: u32,
+    /// Whether the stocks page is in editing mode.
+    stock_edit: bool,
     /// Set when the rain page is opened, so main asks for a fresh forecast.
     pub want_forecast: bool,
     about_page: usize,
@@ -959,7 +981,9 @@ impl Ui {
             rain: crate::rain::Rain::new(),
             chess: crate::chess::Chess::new(),
             tetris: crate::tetris::Tetris::new(),
+            stocks: crate::stocks::Stocks::new(),
             chess_bubble_ms: 0,
+            stock_edit: false,
             want_forecast: false,
             about_page: 0,
             spacewar: crate::spacewar::Spacewar::new(),
@@ -1120,6 +1144,25 @@ impl Ui {
                 let before = self.weather.fingerprint();
                 self.weather.step(net, now_ms);
                 self.weather.fingerprint() != before
+            }
+            Screen::Stocks => {
+                if let Some(text) = net.take_quotes() {
+                    self.stocks.absorb(text, &self.settings, now_ms);
+                    return true;
+                }
+                if net.take_quote_failure() {
+                    self.stocks.failed();
+                    return true;
+                }
+                // One page at a time, and only when the controller client is
+                // otherwise idle: a quote is never worth delaying a poll for.
+                if self.stocks.due(&self.settings, now_ms) && !net.busy() {
+                    if let Some(page) = self.stocks.next_page(&self.settings) {
+                        net.request_quotes(0, page.as_str(), now_ms);
+                        self.stocks.page_sent(&self.settings, now_ms);
+                    }
+                }
+                false
             }
             Screen::Currency => {
                 let before = self.currency.fingerprint();
@@ -1365,6 +1408,33 @@ impl Ui {
                         self.edit_control(which, state);
                         Action::None
                     }
+                    Target::StockTab(index) => {
+                        if self.stock_edit {
+                            // In edit mode a tab is how its name is changed; the
+                            // current one, so renaming is never a surprise.
+                            if index == self.stocks.list {
+                                let name = self.settings.lists[index].name;
+                                self.open_keyboard(
+                                    Edit::ListName(index),
+                                    name.as_str(),
+                                    x,
+                                    y,
+                                    now_ms,
+                                );
+                                return Action::None;
+                            }
+                        }
+                        self.stocks.open(index, now_ms);
+                        Action::None
+                    }
+                    Target::StockEdit => {
+                        self.stock_edit = !self.stock_edit;
+                        Action::None
+                    }
+                    Target::StockList => {
+                        self.stocks.press(x, y);
+                        Action::None
+                    }
                     Target::Sky => {
                         // Asked for afresh on the way in, so a symbol that has
                         // been on screen since 11:00 is not what you decide on.
@@ -1505,7 +1575,9 @@ impl Ui {
                 // contacts near a live circle's origin, so a moving finger starts
                 // a new one roughly every fingertip's width. That is the original's
                 // behaviour, not an addition.
-                if self.interactive_screen() == Screen::Tetris {
+                if self.interactive_screen() == Screen::Stocks {
+                    self.stocks.drag(y, &self.settings);
+                } else if self.interactive_screen() == Screen::Tetris {
                     if self.hit(x, y) == Some(Target::Bubble) {
                         self.tetris.drag(x, y, now_ms);
                     }
@@ -1561,6 +1633,27 @@ impl Ui {
                 }
                 if self.interactive_screen() == Screen::Tetris {
                     self.tetris.release();
+                }
+                if self.interactive_screen() == Screen::Stocks {
+                    // Acted on release, once it is known the touch was a tap and
+                    // not the beginning of a scroll - the same rule the schedule
+                    // rows follow.
+                    if tap && self.stock_edit && self.hit(x, y) == Some(Target::StockList) {
+                        let list = self.stocks.list;
+                        match self.stocks.row_at(y, &self.settings) {
+                            Some(row) => {
+                                self.settings.lists[list].remove(row);
+                                self.stocks.open(list, now_ms);
+                                self.stocks.release();
+                                return Action::SaveSettings;
+                            }
+                            None => {
+                                // Past the last row: room to add one.
+                                self.open_keyboard(Edit::AddSymbol(list), "", x, y, now_ms);
+                            }
+                        }
+                    }
+                    self.stocks.release();
                 }
                 // Lifting off stops a turn; thrust stays latched.
                 if self.interactive_screen() == Screen::Spacewar {
@@ -1981,6 +2074,7 @@ impl Ui {
                     | Screen::About
                     | Screen::Chess
                     | Screen::Tetris
+                    | Screen::Stocks
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2202,6 +2296,42 @@ impl Ui {
                         y1: g.bottom,
                     },
                 );
+            }
+            Screen::Stocks => {
+                self.zone(
+                    Target::Back,
+                    Zone::Disc {
+                        cx: bx,
+                        cy: by,
+                        r: br,
+                    },
+                );
+                let width = (W as i32 - 32) / crate::store::MAX_LISTS as i32;
+                for index in 0..crate::store::MAX_LISTS {
+                    let x0 = 16 + index as i32 * width;
+                    self.zone(
+                        Target::StockTab(index),
+                        Zone::Rect {
+                            x0,
+                            y0: crate::stocks::TAB_Y.0,
+                            x1: x0 + width,
+                            y1: crate::stocks::TAB_Y.1,
+                        },
+                    );
+                }
+                // One band for the whole list, like the schedules page: per-row
+                // zones would mean a drag starting on a row scrolls nothing.
+                self.zone(
+                    Target::StockList,
+                    Zone::Rect {
+                        x0: 0,
+                        y0: crate::stocks::LIST_TOP,
+                        x1: W as i32,
+                        y1: H as i32,
+                    },
+                );
+                let (x0, y0, x1, y1) = l::STOCK_EDIT;
+                self.zone(Target::StockEdit, Zone::Rect { x0, y0, x1, y1 });
             }
             Screen::Rain => {
                 self.zone(
@@ -2504,6 +2634,62 @@ impl Ui {
             Screen::Tetris => {
                 self.game.draw(scene, now_ms, alpha);
                 self.tetris.draw(scene, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Stocks => {
+                Self::draw_ring_theme(scene, crate::stocks::ACCENT, alpha);
+                self.stocks.draw(scene, &self.settings, alpha);
+                if self.stocks.waiting {
+                    scene.label(
+                        CX,
+                        250,
+                        FontId::Caption,
+                        MUTED,
+                        alpha,
+                        Align::Center,
+                        "ASKING THE CONTROLLER\u{2026}",
+                    );
+                }
+                // The editor is the same page with the rows acting differently, so
+                // the pencil is a state rather than a screen.
+                let (ex0, ey0, ex1, ey1) = l::STOCK_EDIT;
+                scene.pill(
+                    ex0,
+                    ey0,
+                    ex1,
+                    ey1,
+                    (ey1 - ey0) / 2,
+                    if self.stock_edit {
+                        crate::stocks::ACCENT
+                    } else {
+                        rgb(24, 28, 36)
+                    },
+                    alpha,
+                );
+                scene.label(
+                    (ex0 + ex1) / 2,
+                    (ey0 + ey1) / 2 + 8,
+                    FontId::Micro,
+                    if self.stock_edit {
+                        rgb(10, 12, 16)
+                    } else {
+                        crate::stocks::ACCENT
+                    },
+                    alpha,
+                    Align::Center,
+                    if self.stock_edit { "DONE" } else { "EDIT" },
+                );
+                if self.stock_edit {
+                    scene.label(
+                        CX,
+                        H as i32 - 16,
+                        FontId::Micro,
+                        MUTED,
+                        alpha,
+                        Align::Center,
+                        "TAP A ROW TO REMOVE  TAB TO RENAME",
+                    );
+                }
                 self.draw_back(scene, alpha);
             }
             Screen::Bubbles => self.draw_bubbles_game(scene, now_ms, alpha),
@@ -2925,6 +3111,7 @@ impl Ui {
         ("SPACE WAR", crate::spacewar::P1, Screen::Spacewar),
         ("CHESS", crate::chess::ACCENT, Screen::Chess),
         ("TETRIS", crate::tetris::ACCENT, Screen::Tetris),
+        ("STOCKS", crate::stocks::ACCENT, Screen::Stocks),
         ("ABOUT", crate::about::ACCENT, Screen::About),
     ];
 
@@ -3137,6 +3324,10 @@ impl Ui {
                     }
                     if *screen == Screen::Tetris {
                         self.tetris.restart(now_ms);
+                    }
+                    if *screen == Screen::Stocks {
+                        let list = self.stocks.list;
+                        self.stocks.open(list, now_ms);
                     }
                     self.open(*screen, x, y, now_ms);
                 }
@@ -3624,6 +3815,28 @@ impl Ui {
                 self.currency.set_custom(value.as_str());
                 self.unwind_to(Screen::Currency, x, y, now_ms);
                 Action::None
+            }
+            Edit::ListName(index) => {
+                if value.is_empty() || index >= crate::store::MAX_LISTS {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.settings.lists[index].name.set(value.as_str());
+                self.unwind_to(Screen::Stocks, x, y, now_ms);
+                Action::SaveSettings
+            }
+            Edit::AddSymbol(index) => {
+                if index >= crate::store::MAX_LISTS
+                    || !self.settings.lists[index].add(value.as_str())
+                {
+                    // Refused: empty, or the list is full. Saying so beats a DONE
+                    // key that appears to do nothing.
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.stocks.open(index, now_ms);
+                self.unwind_to(Screen::Stocks, x, y, now_ms);
+                Action::SaveSettings
             }
         }
     }
@@ -4172,6 +4385,12 @@ impl Ui {
             }
             Edit::Symbol => {
                 let _ = write!(context, "THREE-LETTER CODE");
+            }
+            Edit::ListName(_) => {
+                let _ = write!(context, "WHAT TO CALL THIS TAB");
+            }
+            Edit::AddSymbol(_) => {
+                let _ = write!(context, "AS YAHOO SPELLS IT, E.G. HMS.ST");
             }
             Edit::ControllerIp(i)
             | Edit::ControllerUser(i)

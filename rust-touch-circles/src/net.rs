@@ -226,6 +226,12 @@ pub struct Net {
     /// Named-host fetches for the apps, on their own socket - see the fetch
     /// module for why it is not this client.
     pub fetch: Fetch,
+    /// The last quote reply, and whether anything has read it yet. Kept whole
+    /// rather than parsed here: the stocks page owns that format, and the network
+    /// layer has no opinion about share prices.
+    quote_body: Buf<900>,
+    quote_fresh: bool,
+    quote_failed: bool,
     /// Body for the request in flight. Kept here rather than inside `Http`
     /// because that struct is copied on every `service` pass, and only one
     /// request exists at a time anyway.
@@ -255,6 +261,9 @@ enum HttpKind {
     /// model needs: the next poll is authoritative either way, and treating the
     /// reply as authoritative would mean two sources of truth for the schedule.
     Schedule,
+    /// Share prices, which the controller fetches upstream because this panel has
+    /// no TLS and every quote feed is HTTPS-only.
+    Quote,
 }
 
 #[derive(Clone, Copy)]
@@ -379,6 +388,9 @@ impl Net {
             http: None,
             fetch,
             post_body: Buf::new(),
+            quote_body: Buf::new(),
+            quote_fresh: false,
+            quote_failed: false,
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
             manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
@@ -829,6 +841,16 @@ impl Net {
                 }
                 self.job = Job::Poll { next: index + 1 };
             }
+            HttpKind::Quote => {
+                let split = find_body(&self.body[..http.got]);
+                self.quote_body.clear();
+                if let Ok(text) = core::str::from_utf8(&self.body[split..http.got]) {
+                    let _ = write!(self.quote_body, "{text}");
+                    self.quote_fresh = true;
+                } else {
+                    self.quote_failed = true;
+                }
+            }
             HttpKind::Stop => {
                 if let Job::StopAll { next } = self.job {
                     self.job = Job::StopAll { next: next + 1 };
@@ -842,6 +864,9 @@ impl Net {
 
     fn finish_error(&mut self, http: Http, state: &mut State, error: &'static str) {
         self.last_error = Some(error);
+        if matches!(http.kind, HttpKind::Quote) {
+            self.quote_failed = true;
+        }
         match http.kind {
             HttpKind::Dump(index) => {
                 state.controller_online[index] = false;
@@ -854,7 +879,7 @@ impl Net {
             }
             // Nothing to unwind for either: the request carried no model state,
             // and the failure is already recorded for the status line.
-            HttpKind::Trigger | HttpKind::Schedule => {}
+            HttpKind::Trigger | HttpKind::Schedule | HttpKind::Quote => {}
         }
     }
 
@@ -965,6 +990,44 @@ impl Net {
         ) {
             self.last_error = Some(e);
         }
+    }
+
+    /// Ask the controller for a handful of quotes. Six at most per call, which is
+    /// what the endpoint accepts - one upstream request each, against this client's
+    /// own short timeout.
+    pub fn request_quotes(&mut self, controller: u8, symbols: &str, now_ms: u32) {
+        if controller as usize >= self.n_hosts || symbols.is_empty() {
+            return;
+        }
+        // The path buffer is the one the client uses throughout; six tickers and
+        // the prefix fit inside it with room to spare.
+        let mut path = Buf::<96>::new();
+        let _ = write!(path, "/local/rainbird/app/api/quote?symbols={symbols}");
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        self.quote_fresh = false;
+        self.quote_failed = false;
+        if let Err(e) = self.start_http(HttpKind::Quote, controller as usize, false, path, 0, now_ms)
+        {
+            self.last_error = Some(e);
+            self.quote_failed = true;
+        }
+    }
+
+    /// The quote reply, once. None until one arrives.
+    pub fn take_quotes(&mut self) -> Option<&str> {
+        if !self.quote_fresh {
+            return None;
+        }
+        self.quote_fresh = false;
+        Some(self.quote_body.as_str())
+    }
+
+    pub fn take_quote_failure(&mut self) -> bool {
+        let failed = self.quote_failed;
+        self.quote_failed = false;
+        failed
     }
 
     /// Write one schedule back, as the s:/e: records the dump emits.
