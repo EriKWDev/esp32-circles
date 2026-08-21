@@ -18,8 +18,19 @@ use crate::net::{Buf, Net};
 
 pub const MAX_DAYS: usize = 6;
 
-pub const HOST_GEO: &str = "ip-api.com";
-const PATH_GEO: &str = "/json/?fields=lat,lon,city";
+/// Where the panel thinks it is. Both of these answer over plain HTTP and neither
+/// wants a key.
+///
+/// ipwho.is is asked first because it is the one that gets this ISP right. Address
+/// blocks are geolocated to wherever they are registered, not to where the cable
+/// ends: Bredband2's block reads as Bankeryd near Jonkoping in ip-api's database
+/// whether the panel is in Gothenburg or Malmo, while ipwho.is places the same
+/// address correctly. They agree on other ISPs, so this is a fallback order rather
+/// than a replacement - and no IP database is ever better than a guess.
+pub const HOST_GEO: &str = "ipwho.is";
+const PATH_GEO: &str = "/?fields=city,latitude,longitude";
+pub const HOST_GEO_ALT: &str = "ip-api.com";
+const PATH_GEO_ALT: &str = "/json/?fields=lat,lon,city";
 pub const HOST_MET: &str = "api.open-meteo.com";
 
 const INK: u16 = rgb(238, 245, 250);
@@ -66,6 +77,15 @@ const NO_DAY: Day = Day {
     rain: 0,
 };
 
+/// City, latitude and longitude from either provider - they use different key
+/// names for the same three things.
+pub fn parse_location(text: &str) -> Option<(&str, &str, &str)> {
+    let city = json_str(text, "city").unwrap_or("");
+    let lat = json_num(text, "latitude").or_else(|| json_num(text, "lat"))?;
+    let lon = json_num(text, "longitude").or_else(|| json_num(text, "lon"))?;
+    Some((city, lat, lon))
+}
+
 pub struct Weather {
     stage: Stage,
     city: Buf<28>,
@@ -75,6 +95,8 @@ pub struct Weather {
     n: usize,
     /// Which day is on screen. Starts on tomorrow.
     day: usize,
+    /// Set once the first provider has been tried and had nothing useful to say.
+    geo_fell_back: bool,
     /// What each host resolved to last, for the About page.
     geo_ip: Option<[u8; 4]>,
     met_ip: Option<[u8; 4]>,
@@ -90,6 +112,7 @@ impl Weather {
             days: [NO_DAY; MAX_DAYS],
             n: 0,
             day: 1,
+            geo_fell_back: false,
             geo_ip: None,
             met_ip: None,
         }
@@ -144,7 +167,12 @@ impl Weather {
                 if net.fetch.busy() {
                     return;
                 }
-                net.fetch_get(HOST_GEO, PATH_GEO, now_ms);
+                let (host, path) = if self.geo_fell_back {
+                    (HOST_GEO_ALT, PATH_GEO_ALT)
+                } else {
+                    (HOST_GEO, PATH_GEO)
+                };
+                net.fetch_get(host, path, now_ms);
                 self.stage = Stage::Locating;
             }
             Stage::Locating => {
@@ -152,21 +180,26 @@ impl Weather {
                 let resolved = net.fetch.resolved().map(|ip| ip.octets());
                 if let Some(text) = net.fetch.take() {
                     self.geo_ip = resolved;
-                    self.city = Buf::new();
-                    self.lat = Buf::new();
-                    self.lon = Buf::new();
-                    if let Some(city) = json_str(text, "city") {
-                        let _ = write!(self.city, "{city}");
-                    }
                     // Kept as text: they only ever go back out in a URL, and
                     // parsing them would mean formatting a float to rebuild it.
-                    if let (Some(lat), Some(lon)) = (json_num(text, "lat"), json_num(text, "lon")) {
+                    if let Some((city, lat, lon)) = parse_location(text) {
+                        self.city = Buf::new();
+                        self.lat = Buf::new();
+                        self.lon = Buf::new();
+                        let _ = write!(self.city, "{city}");
                         let _ = write!(self.lat, "{lat}");
                         let _ = write!(self.lon, "{lon}");
                         located = true;
                     }
-                } else if net.fetch.take_failure() {
-                    self.stage = Stage::Failed;
+                }
+                if !located && (net.fetch.take_failure() || !net.fetch.busy()) {
+                    // The other provider gets one turn before this is a failure.
+                    if self.geo_fell_back {
+                        self.stage = Stage::Failed;
+                    } else {
+                        self.geo_fell_back = true;
+                        self.stage = Stage::Cold;
+                    }
                     return;
                 }
                 if located {
@@ -179,8 +212,6 @@ impl Weather {
                     );
                     net.fetch_get(HOST_MET, path.as_str(), now_ms);
                     self.stage = Stage::Forecasting;
-                } else if self.stage == Stage::Locating && !net.fetch.busy() {
-                    self.stage = Stage::Failed;
                 }
             }
             Stage::Forecasting => {

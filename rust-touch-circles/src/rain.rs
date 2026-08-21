@@ -20,7 +20,8 @@
 
 use core::fmt::Write as _;
 
-use crate::fetch::{json_array, json_num, json_str, scope, tenths};
+use crate::fetch::{json_array, scope, tenths};
+use crate::weather::parse_location;
 use crate::gfx::{Scene, muted, rgb};
 use crate::model::State;
 use crate::net::{Buf, Net};
@@ -207,14 +208,13 @@ impl Rain {
             Stage::Locating => {
                 let mut located = false;
                 if let Some(text) = net.fetch.take() {
-                    if let (Some(lat), Some(lon)) = (json_num(text, "lat"), json_num(text, "lon")) {
+                    if let Some((_, lat, lon)) = parse_location(text) {
                         self.lat = Buf::new();
                         self.lon = Buf::new();
                         let _ = write!(self.lat, "{lat}");
                         let _ = write!(self.lon, "{lon}");
                         located = true;
                     }
-                    let _ = json_str(text, "city");
                 } else if net.fetch.take_failure() {
                     self.stage = Stage::Idle;
                 }
@@ -251,7 +251,7 @@ impl Rain {
         if self.lat.is_empty() {
             net.fetch_get(
                 crate::weather::HOST_GEO,
-                "/json/?fields=lat,lon,city",
+                "/?fields=city,latitude,longitude",
                 now_ms,
             );
             self.stage = Stage::Locating;
