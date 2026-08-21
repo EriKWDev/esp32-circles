@@ -169,14 +169,22 @@ fn join(
     controller: &mut WifiController<'static>,
     settings: &crate::store::Settings,
 ) -> Result<(), &'static str> {
-    if settings.ssid.is_empty() {
+    join_named(controller, settings.ssid.as_str(), settings.psk.as_str())
+}
+
+fn join_named(
+    controller: &mut WifiController<'static>,
+    ssid: &str,
+    password: &str,
+) -> Result<(), &'static str> {
+    if ssid.is_empty() {
         return Err("no wi-fi network configured");
     }
     // The password setter wants an owned String; the heap exists for the radio's
     // benefit anyway, and this runs only when the network changes.
     let station_config = esp_radio::wifi::sta::StationConfig::default()
-        .with_ssid(settings.ssid.as_str())
-        .with_password(alloc::string::String::from(settings.psk.as_str()));
+        .with_ssid(ssid)
+        .with_password(alloc::string::String::from(password));
     let config = esp_radio::wifi::Config::Station(station_config);
     controller
         .set_config(&config)
@@ -205,6 +213,12 @@ fn block_on_deadline<F: core::future::Future>(future: F, timeout_ms: u32) -> Opt
         if esp_hal::time::Instant::now() > deadline {
             return None;
         }
+        // The yield is the point. The future can only complete when the driver's
+        // own tasks run, so polling flat out starved the radio this is waiting for -
+        // for up to four seconds, which is both a way to make a scan fail and a way
+        // to trip the watchdog. Same mistake that made modem sleep impossible: a
+        // busy loop looks like work to the scheduler.
+        esp_rtos::CurrentThreadHandle::get().delay(esp_hal::time::Duration::from_millis(4));
     }
 }
 
@@ -241,7 +255,20 @@ pub struct Net {
     /// When the UI last took charge of connecting. While that is recent, `step`
     /// keeps its hands off - see MANUAL_HOLD_MS.
     manual_from_ms: u32,
+    /// Association attempts since the last success, and which network is being
+    /// tried.
+    tries: u8,
+    pub on_fallback: bool,
+    /// The configured network, kept so `step` can alternate it with the fallback
+    /// without being handed the settings again.
+    cfg_ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
+    cfg_psk: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
 }
+
+/// Attempts on one network before the other is tried. Alternating rather than
+/// sticking: a hotspot that is only sometimes there, and a home network that comes
+/// back, are the same problem from opposite ends.
+const TRIES_BEFORE_FALLBACK: u8 = 2;
 
 /// How long a user-driven join keeps the automatic reconnect out of the way.
 ///
@@ -394,6 +421,10 @@ impl Net {
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
             manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
+            tries: 0,
+            on_fallback: false,
+            cfg_ssid: settings.ssid,
+            cfg_psk: settings.psk,
         };
         net.apply_hosts(settings);
         Ok(net)
@@ -458,6 +489,10 @@ impl Net {
         // the one below. Not doing this was exactly the panic described above.
         self.last_connect_attempt_ms = now_ms;
         self.manual_from_ms = now_ms;
+        self.cfg_ssid = settings.ssid;
+        self.cfg_psk = settings.psk;
+        self.tries = 0;
+        self.on_fallback = false;
         join(&mut self.controller, settings)
     }
 
@@ -471,6 +506,15 @@ impl Net {
     /// state first, and the deadline guarantees the loop resumes regardless.
     pub fn scan(&mut self, out: &mut Networks) {
         use esp_radio::wifi::scan::ScanConfig;
+
+        // Not on top of an association attempt. The driver rejects that, and the
+        // rejection is a code esp-radio does not map - which it panics on rather
+        // than reports. Two connects at once fell into the same trap, and the
+        // settings page scans at exactly the moment the automatic reconnect is
+        // most likely to be trying.
+        if !self.controller.is_connected() {
+            let _ = block_on_deadline(self.controller.disconnect_async(), 600);
+        }
 
         let config = ScanConfig::default().with_max(MAX_NETWORKS);
         let found = match block_on_deadline(self.controller.scan_async(&config), 4_000) {
@@ -562,6 +606,20 @@ impl Net {
             && now_ms.wrapping_sub(self.manual_from_ms) >= MANUAL_HOLD_MS
         {
             self.last_connect_attempt_ms = now_ms;
+            self.tries = self.tries.wrapping_add(1);
+            if self.tries >= TRIES_BEFORE_FALLBACK && !WIFI_SSID2.is_empty() {
+                self.tries = 0;
+                self.on_fallback = !self.on_fallback;
+                let (ssid, password) = if self.on_fallback {
+                    (WIFI_SSID2, WIFI_PASS2)
+                } else {
+                    (self.cfg_ssid.as_str(), self.cfg_psk.as_str())
+                };
+                esp_println::println!("wifi: trying \"{ssid}\"");
+                if let Err(e) = join_named(&mut self.controller, ssid, password) {
+                    self.last_error = Some(e);
+                }
+            }
             if let Poll::Ready(Err(_)) = embassy_futures::poll_once(self.controller.connect_async())
             {
                 self.last_error = Some("wifi association failed");
@@ -579,6 +637,7 @@ impl Net {
         let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp).poll();
         match event {
             Some(dhcpv4::Event::Configured(cfg)) => {
+                self.tries = 0;
                 self.ip = Some(cfg.address.address());
                 self.iface.update_ip_addrs(|addrs| {
                     addrs.clear();

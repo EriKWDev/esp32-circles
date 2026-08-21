@@ -235,6 +235,17 @@ impl State {
         }
     }
 
+    /// Whether any configured controller answered its last poll.
+    ///
+    /// Nothing that opens a valve is worth offering without this: the request would
+    /// be accepted, sent nowhere, and the panel would show a countdown for water
+    /// that is not running.
+    pub fn any_controller_online(&self) -> bool {
+        self.controller_online[..self.n_controllers.min(MAX_CONTROLLERS)]
+            .iter()
+            .any(|online| *online)
+    }
+
     /// The next start time due after the current clock, and how many minutes
     /// away it is. Wraps to tomorrow when everything today has passed.
     pub fn next_start(&self) -> Option<(&StartTime, u32)> {

@@ -1384,6 +1384,7 @@ impl Ui {
                         }
                         Action::None
                     }
+                    Target::RunNow if !state.any_controller_online() => Action::None,
                     Target::RunNow => {
                         let Some(schedule) = state.starts.get(self.detail).copied() else {
                             return Action::None;
@@ -1494,6 +1495,12 @@ impl Ui {
                         Action::None
                     }
                     Target::Go => {
+                        // Refused rather than sent nowhere. The button is drawn
+                        // inert in the same case, so this is the second line of
+                        // defence, not the message.
+                        if !state.any_controller_online() {
+                            return Action::None;
+                        }
                         let Some(relay) = state.usable().nth(self.selected) else {
                             return Action::None;
                         };
@@ -2628,14 +2635,23 @@ impl Ui {
         }
         match screen {
             Screen::Home => self.draw_home(scene, state, alpha),
-            Screen::Inspect => self.draw_inspect(scene, state, alpha),
-            Screen::Force => self.draw_force(scene, state, alpha),
+            Screen::Inspect => {
+                self.draw_inspect(scene, state, alpha);
+                self.draw_wifi_badge(scene, state, alpha);
+            }
+            Screen::Force => {
+                self.draw_force(scene, state, alpha);
+                self.draw_wifi_badge(scene, state, alpha);
+            }
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
             Screen::Extras => self.draw_extras(scene, alpha, Screen::Extras),
             Screen::Apps => self.draw_extras(scene, alpha, Screen::Apps),
-            Screen::Config => self.draw_config(scene, state, alpha),
+            Screen::Config => {
+                self.draw_config(scene, state, alpha);
+                self.draw_wifi_badge(scene, state, alpha);
+            }
             Screen::Wifi => self.draw_wifi(scene, alpha),
             Screen::Controller => self.draw_controller(scene, state, alpha),
             Screen::Keyboard => self.draw_keyboard(scene, now_ms, alpha),
@@ -2863,6 +2879,47 @@ impl Ui {
         scene.disc(x, 42, 7, color, alpha);
     }
 
+    /// Wi-Fi, top right: three arcs of a fan, lit as far as the signal goes, and
+    /// struck through when there is no address at all.
+    ///
+    /// Drawn from the same two facts the link dot uses, so the two can never
+    /// disagree - an association without a lease is not a connection worth
+    /// claiming, which is why it takes an address rather than `is_connected`.
+    fn draw_wifi_badge(&self, scene: &mut Scene, state: &State, alpha: u8) {
+        const X: i32 = 440;
+        const Y: i32 = 52;
+        let online = state.link == Link::Online;
+        let joining = state.link == Link::Connecting;
+        let lit = if online {
+            C_RUN
+        } else if joining {
+            C_FORCE
+        } else {
+            rgb(60, 66, 76)
+        };
+        // Rings from the bottom up, biggest last, each clipped to its top half by
+        // drawing the background over the lower half afterwards.
+        for (index, radius) in [8, 15, 22].into_iter().enumerate() {
+            let reached = online || (joining && index == 0);
+            scene.ring(
+                X,
+                Y,
+                radius,
+                radius - 3,
+                if reached { lit } else { rgb(44, 50, 60) },
+                alpha,
+            );
+        }
+        // The lower half of the fan is not part of the symbol.
+        scene.pill(X - 26, Y + 1, X + 26, Y + 26, 0, self.screen.background(), alpha);
+        scene.disc(X, Y, 4, lit, alpha);
+        if !online && !joining {
+            // Struck through rather than absent: a missing symbol reads as a
+            // missing feature, a crossed one as a missing network.
+            scene.pill(X - 20, Y - 3, X + 20, Y + 3, 3, rgb(210, 90, 80), alpha);
+        }
+    }
+
     fn draw_power(&self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
         let Some(percent) = state.battery_percent.filter(|_| !state.external_power) else {
             return;
@@ -2991,6 +3048,7 @@ impl Ui {
         self.draw_link(scene, state, alpha);
         self.draw_power(scene, Screen::Home, state, alpha);
         self.draw_cog(scene, alpha);
+        self.draw_wifi_badge(scene, state, alpha);
         // A crescent, cut from one disc by another - no new shape needed.
         let (mx, my, mr) = l::MOON;
         scene.disc(mx, my, mr - 6, rgb(120, 132, 150), alpha);
@@ -5309,16 +5367,24 @@ impl Ui {
             alpha,
         );
 
+        // Offline: the button is a ring with its reason in it rather than a
+        // filled invitation. Sending the request anyway would show a countdown for
+        // water that is not running.
         let (gx, gy, gr) = l::GO;
-        scene.disc(gx, gy, gr, C_RUN, alpha);
+        let reachable = state.any_controller_online();
+        if reachable {
+            scene.disc(gx, gy, gr, C_RUN, alpha);
+        } else {
+            scene.ring(gx, gy, gr, gr - 4, rgb(70, 78, 90), alpha);
+        }
         scene.label(
             gx,
             gy + 16,
             FontId::Body,
-            rgb(2, 22, 12),
+            if reachable { rgb(2, 22, 12) } else { rgb(150, 160, 172) },
             alpha,
             Align::Center,
-            "GO!",
+            if reachable { "GO!" } else { "OFFLINE" },
         );
     }
 
