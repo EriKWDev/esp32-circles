@@ -1302,7 +1302,7 @@ impl Ui {
                     Target::Bubble => {
                         if self.interactive_screen() == Screen::Pacman {
                             self.pacman.tap(now_ms);
-                            self.pacman.steer(x, y);
+                            self.pacman.steer_at(x, y, now_ms);
                         } else if self.interactive_screen() == Screen::Tetris {
                             self.tetris.press(x, y, now_ms);
                         } else if self.interactive_screen() == Screen::Chess {
@@ -1585,7 +1585,7 @@ impl Ui {
                 // behaviour, not an addition.
                 if self.interactive_screen() == Screen::Pacman {
                     if self.hit(x, y) == Some(Target::Bubble) {
-                        self.pacman.steer(x, y);
+                        self.pacman.steer_at(x, y, now_ms);
                     }
                 } else if self.interactive_screen() == Screen::Stocks {
                     self.stocks.drag(y, &self.settings);

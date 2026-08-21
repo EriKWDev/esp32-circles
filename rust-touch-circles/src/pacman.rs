@@ -52,6 +52,8 @@ const FRIGHT_MS: u32 = 6_500;
 const LIVES: u8 = 3;
 /// How long the board is held still after a death, and after clearing it.
 const PAUSE_MS: u32 = 1_100;
+/// How long a turn that is not yet possible keeps waiting for its junction.
+const WANT_MS: u32 = 700;
 
 const WALL: u16 = rgb(48, 72, 200);
 const PELLET: u16 = rgb(240, 226, 180);
@@ -97,19 +99,17 @@ impl Mover {
         (self.x / Q / CELL, self.y / Q / CELL)
     }
 
-    /// How far past the middle of its cell, so a turn only happens where the
-    /// corridors actually meet.
-    fn centred(&self) -> bool {
+    /// The exact middle of the cell it is in.
+    fn centre(&self) -> (i32, i32) {
         let (col, row) = self.cell();
-        let cx = (col * CELL + CELL / 2) * Q;
-        let cy = (row * CELL + CELL / 2) * Q;
-        (self.x - cx).abs() < PAC_SPEED / 40 + Q && (self.y - cy).abs() < PAC_SPEED / 40 + Q
+        (
+            (col * CELL + CELL / 2) * Q,
+            (row * CELL + CELL / 2) * Q,
+        )
     }
 
-    fn snap(&mut self) {
-        let (col, row) = self.cell();
-        self.x = (col * CELL + CELL / 2) * Q;
-        self.y = (row * CELL + CELL / 2) * Q;
+    fn at_centre(&self) -> bool {
+        self.centre() == (self.x, self.y)
     }
 }
 
@@ -127,6 +127,8 @@ pub struct Pacman {
     pub best: u32,
     /// Bumped per level, which is all "faster" means here.
     level: u32,
+    /// When a queued turn stops being wanted.
+    want_until_ms: u32,
     seed: u32,
 }
 
@@ -144,6 +146,7 @@ impl Pacman {
             score: 0,
             best: 0,
             level: 0,
+            want_until_ms: 0,
             seed: 0x51ed_2c9b,
         }
     }
@@ -204,14 +207,24 @@ impl Pacman {
 
     /// Steer by wedge from the middle of the maze: the larger offset wins, so the
     /// four regions are triangles covering the whole panel.
+    pub fn steer_at(&mut self, x: i32, y: i32, now_ms: u32) {
+        self.steer(x, y);
+        self.want_until_ms = now_ms + WANT_MS;
+    }
+
     pub fn steer(&mut self, x: i32, y: i32) {
         let dx = x - (BOARD_X + CELL * COLS as i32 / 2);
         let dy = y - (BOARD_Y + CELL * ROWS as i32 / 2);
-        self.pac.want = if dx.abs() > dy.abs() {
+        let want = if dx.abs() > dy.abs() {
             (dx.signum() as i8, 0)
         } else {
             (0, dy.signum() as i8)
         };
+        // Taken at once where it is legal - including a reversal, which always is.
+        // Otherwise it waits for the next centre, and only briefly: a turn that
+        // fired several cells later was the old behaviour and read as the panel
+        // choosing its own direction.
+        self.pac.want = want;
     }
 
     fn wall(col: i32, row: i32) -> bool {
@@ -230,30 +243,64 @@ impl Pacman {
         !Self::wall(col + dx as i32, row + dy as i32)
     }
 
+    /// Move up to one frame's worth, stopping at each cell centre on the way to
+    /// decide there.
+    ///
+    /// The first version tested "near enough to a centre" against a tolerance, and
+    /// at these speeds a frame's step is wider than the window - so turns were
+    /// missed, and the queued one then fired at some later junction instead. That
+    /// is what made the controls feel like they went the wrong way. Landing exactly
+    /// on the centre removes the guesswork: the step is clamped so it can never
+    /// pass one unnoticed.
     fn advance(mover: &mut Mover, speed: i32, dt: i32) {
-        // Turns happen at cell centres only, which is what keeps a mover in its
-        // corridor rather than cutting a corner into a wall.
-        if mover.centred() {
-            let (wx, wy) = mover.want;
-            if (wx, wy) != (0, 0) && Self::open(mover, wx, wy) {
-                mover.snap();
-                mover.dx = wx;
-                mover.dy = wy;
-            } else if !Self::open(mover, mover.dx, mover.dy) {
-                mover.snap();
-                mover.dx = 0;
-                mover.dy = 0;
-            }
+        // Reversing needs no junction. It is the one turn always available, and
+        // allowing it mid-corridor is what makes a press feel immediate.
+        let (wx, wy) = mover.want;
+        if (wx, wy) != (0, 0) && (wx, wy) == (-mover.dx, -mover.dy) {
+            mover.dx = wx;
+            mover.dy = wy;
+            mover.want = (0, 0);
         }
-        mover.x += mover.dx as i32 * speed * dt / 1000;
-        mover.y += mover.dy as i32 * speed * dt / 1000;
+
+        let mut left = (speed * dt / 1000).max(0);
+        while left > 0 {
+            if mover.at_centre() {
+                let (wx, wy) = mover.want;
+                if (wx, wy) != (0, 0) && Self::open(mover, wx, wy) {
+                    mover.dx = wx;
+                    mover.dy = wy;
+                    mover.want = (0, 0);
+                }
+                if !Self::open(mover, mover.dx, mover.dy) {
+                    // Nose against a wall: stop, and keep whatever was asked for
+                    // in case the corridor opens behind it.
+                    mover.dx = 0;
+                    mover.dy = 0;
+                    return;
+                }
+            }
+            if mover.dx == 0 && mover.dy == 0 {
+                return;
+            }
+            // Never step past the next centre.
+            let (cx, cy) = mover.centre();
+            let next = if mover.dx != 0 {
+                (cx + mover.dx as i32 * CELL * Q - mover.x).abs()
+            } else {
+                (cy + mover.dy as i32 * CELL * Q - mover.y).abs()
+            };
+            let take = left.min(next).max(1);
+            mover.x += mover.dx as i32 * take;
+            mover.y += mover.dy as i32 * take;
+            left -= take;
+        }
     }
 
     /// Where a ghost goes at a junction: towards Pac-Man, or away while
     /// frightened, and never straight back the way it came.
     fn steer_ghost(&mut self, index: usize, frightened: bool) {
         let ghost = self.ghosts[index];
-        if !ghost.centred() {
+        if !ghost.at_centre() {
             return;
         }
         let (gc, gr) = ghost.cell();
@@ -302,6 +349,11 @@ impl Pacman {
             return;
         }
         let dt = dt_ms.min(40) as i32;
+        // A stale request is forgotten rather than sprung later.
+        if self.want_until_ms != 0 && now_ms.wrapping_sub(self.want_until_ms) < u32::MAX / 2 {
+            self.pac.want = (0, 0);
+            self.want_until_ms = 0;
+        }
         let frightened = now_ms.wrapping_sub(self.fright_until_ms) > u32::MAX / 2;
 
         let mut pac = self.pac;
