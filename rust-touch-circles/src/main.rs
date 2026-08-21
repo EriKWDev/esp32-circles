@@ -32,6 +32,7 @@ mod invaders;
 mod match3;
 mod model;
 mod net;
+mod pacman;
 mod pomodoro;
 mod rain;
 mod pong;
@@ -759,6 +760,7 @@ fn main() -> ! {
                     ui::Screen::Chess => "chess",
                     ui::Screen::Tetris => "tetris",
                     ui::Screen::Stocks => "stocks",
+                    ui::Screen::Pacman => "pacman",
                 },
                 match touch.phase {
                     touch::Phase::Idle => "idle",

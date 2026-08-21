@@ -22,7 +22,9 @@ pub const H: usize = 480;
 pub const STRIPE_ROWS: usize = 32;
 pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 
-// Worst case is now Tetris: a well of alternating colours is five runs a row over
+// Worst case is now Pac-Man: fifty-eight wall runs and ninety pellets is 167
+// before the ghosts, the lives and the badge, and a scene that overflows drops
+// primitives silently - half a maze with no explanation. Tetris is the runner up: a well of alternating colours is five runs a row over
 // twenty rows, plus the piece, its landing guide, the next box and four controls -
 // about a hundred and thirty. The schedule editor is the runner up, with six entry
 // rows of six primitives each, the clock adjusters, the entry controls and a
@@ -30,7 +32,7 @@ pub const STRIPE_BYTES: usize = W * STRIPE_ROWS * 2;
 // headroom exists because anything past the cap is silently dropped, so a shortage
 // would present as a button that is simply not drawn. `prims=` in the heartbeat
 // reports the peak against this.
-pub const MAX_PRIMS: usize = 176;
+pub const MAX_PRIMS: usize = 208;
 /// Longest string any single text primitive can hold. Relay names are the only
 /// unbounded input and are truncated to this on the way in.
 pub const MAX_TEXT: usize = 28;
