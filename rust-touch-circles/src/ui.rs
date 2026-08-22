@@ -272,7 +272,9 @@ struct RowGeom {
 }
 
 fn geom(screen: Screen) -> RowGeom {
-    if screen == Screen::Extras || screen == Screen::Apps {
+    // Extras and both of its child menus share one row geometry; the settings
+    // pages have their own.
+    if matches!(screen, Screen::Extras | Screen::Apps | Screen::Games) {
         RowGeom {
             x0: l::EXTRA_X0,
             x1: l::EXTRA_X1,
@@ -3184,8 +3186,8 @@ impl Ui {
     const EXTRAS: &'static [(&'static str, u16, Screen)] = &[
         ("SETTINGS", C_CONFIG, Screen::Config),
         ("SENSORS", C_INFO, Screen::Info),
-        ("GAMES", C_GAMES, Screen::Games),
         ("APPS", C_APPS, Screen::Apps),
+        ("GAMES", C_GAMES, Screen::Games),
     ];
 
     /// Things to play with. Same table shape as EXTRAS, so one page draws all
@@ -3333,6 +3335,7 @@ impl Ui {
         match screen {
             Screen::Extras => Self::EXTRAS.len(),
             Screen::Apps => Self::APPS.len(),
+            Screen::Games => Self::GAMES.len(),
             Screen::Config => self.config_rows(),
             // The networks found, then "scan again", then "type it in".
             Screen::Wifi => self.networks.n + 2,
