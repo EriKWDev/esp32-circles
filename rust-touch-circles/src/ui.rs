@@ -3371,7 +3371,11 @@ impl Ui {
 
     fn menu_target(screen: Screen, row: usize) -> Target {
         match screen {
-            Screen::Extras | Screen::Apps => Target::Extra(row),
+            // A menu row on any of the three destination lists. Missing Games
+            // here sent its taps down the settings path, where row zero is Wi-Fi
+            // and row two adds a controller - which is what pressing Pacman and
+            // Masken did.
+            Screen::Extras | Screen::Apps | Screen::Games => Target::Extra(row),
             Screen::Wifi => Target::WifiRow(row),
             Screen::Controller => Target::CtlRow(row),
             _ => Target::ConfigRow(row),
