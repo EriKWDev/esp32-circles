@@ -542,6 +542,9 @@ impl Net {
 
         let config = ScanConfig::default()
             .with_max(MAX_NETWORKS)
+            // Hidden networks too. A phone hotspot is not hidden, but it costs
+            // nothing to ask and a network that cannot be seen cannot be chosen.
+            .with_show_hidden(true)
             .with_scan_type(ScanTypeConfig::Active {
                 min: esp_hal::time::Duration::from_millis(SCAN_DWELL_MIN_MS),
                 max: esp_hal::time::Duration::from_millis(SCAN_DWELL_MAX_MS),
