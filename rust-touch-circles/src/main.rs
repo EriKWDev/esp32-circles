@@ -645,7 +645,7 @@ fn main() -> ! {
                 ui.scan_busy = true;
                 ui.build(&mut scene, &state, t);
                 lcd.present(&scene);
-                n.scan(&mut ui.networks);
+                n.scan(&mut ui.networks, t);
                 ui.scan_busy = false;
                 esp_println::println!("wifi scan: {} networks", ui.networks.n);
                 // The blocking call consumed the loop's sense of time.

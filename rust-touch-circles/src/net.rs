@@ -255,6 +255,8 @@ pub struct Net {
     /// When the UI last took charge of connecting. While that is recent, `step`
     /// keeps its hands off - see MANUAL_HOLD_MS.
     manual_from_ms: u32,
+    /// When the last scan finished, for the cooldown.
+    last_scan_ms: u32,
     /// Association attempts since the last success, and which network is being
     /// tried.
     tries: u8,
@@ -278,6 +280,20 @@ const TRIES_BEFORE_FALLBACK: u8 = 2;
 /// given up on), so suppressing the automatic one for longer than the UI's own
 /// timeout removes the last way the two could overlap.
 const MANUAL_HOLD_MS: u32 = 25_000;
+
+/// Dwell per channel. The default is 10ms to 20ms, which sweeps the band in about
+/// two hundred milliseconds and misses any access point that does not answer a
+/// probe immediately - most of them, in practice. This is slower on purpose.
+const SCAN_DWELL_MIN_MS: u64 = 80;
+const SCAN_DWELL_MAX_MS: u64 = 150;
+/// Long enough for the whole sweep at that dwell. Abandoning a scan that is still
+/// running is what made the next one hang: the deadline gave up, the radio did not,
+/// and the following scan arrived on top of one already in flight.
+const SCAN_DEADLINE_MS: u32 = 8_000;
+/// Quiet time after a scan before another is accepted - the radio needs a moment
+/// to put itself away, and a second press inside that window is the other half of
+/// the same hang.
+const SCAN_COOLDOWN_MS: u32 = 1_200;
 
 #[derive(Clone, Copy)]
 enum HttpKind {
@@ -421,6 +437,7 @@ impl Net {
             job: Job::Idle,
             last_connect_attempt_ms: now_ms,
             manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
+            last_scan_ms: now_ms.wrapping_sub(SCAN_COOLDOWN_MS),
             tries: 0,
             on_fallback: false,
             cfg_ssid: settings.ssid,
@@ -504,8 +521,15 @@ impl Net {
     /// spreading it over UI iterations would mean holding a self-referential
     /// future across frames for no visible gain. The caller paints its "scanning"
     /// state first, and the deadline guarantees the loop resumes regardless.
-    pub fn scan(&mut self, out: &mut Networks) {
-        use esp_radio::wifi::scan::ScanConfig;
+    pub fn scan(&mut self, out: &mut Networks, now_ms: u32) {
+        use esp_radio::wifi::scan::{ScanConfig, ScanTypeConfig};
+
+        // Too soon after the last one: the previous results stay on screen rather
+        // than the radio being asked for two sweeps at once.
+        if now_ms.wrapping_sub(self.last_scan_ms) < SCAN_COOLDOWN_MS {
+            return;
+        }
+        self.last_scan_ms = now_ms;
 
         // Not on top of an association attempt. The driver rejects that, and the
         // rejection is a code esp-radio does not map - which it panics on rather
@@ -516,8 +540,14 @@ impl Net {
             let _ = block_on_deadline(self.controller.disconnect_async(), 600);
         }
 
-        let config = ScanConfig::default().with_max(MAX_NETWORKS);
-        let found = match block_on_deadline(self.controller.scan_async(&config), 4_000) {
+        let config = ScanConfig::default()
+            .with_max(MAX_NETWORKS)
+            .with_scan_type(ScanTypeConfig::Active {
+                min: esp_hal::time::Duration::from_millis(SCAN_DWELL_MIN_MS),
+                max: esp_hal::time::Duration::from_millis(SCAN_DWELL_MAX_MS),
+            });
+        let found =
+            match block_on_deadline(self.controller.scan_async(&config), SCAN_DEADLINE_MS) {
             Some(Ok(found)) => found,
             Some(Err(_)) => {
                 self.last_error = Some("wifi scan failed");
@@ -561,6 +591,12 @@ impl Net {
         // almost certainly mean.
         out.items[..out.n].sort_unstable_by(|a, b| b.rssi.cmp(&a.rssi));
         out.scanned = true;
+        // Stamped again from the same clock main uses, so the cooldown starts when
+        // the radio is actually free rather than when it was asked - the sweep
+        // itself takes a second or two.
+        self.last_scan_ms = (esp_hal::timer::systimer::SystemTimer::unit_value(
+            esp_hal::timer::systimer::Unit::Unit0,
+        ) / 16_000) as u32;
     }
 
     /// Anything in flight, so the caller knows whether it may sleep deeply.
