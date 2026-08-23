@@ -34,6 +34,9 @@ struct Flight {
     from: FixedStr<5>,
     to: FixedStr<5>,
     kind: FixedStr<6>,
+    /// The towns, as the controller spells them out.
+    from_town: FixedStr<18>,
+    to_town: FixedStr<18>,
     knots: u32,
     feet: u32,
     /// Tenths of a kilometre, as the controller sends it.
@@ -45,6 +48,8 @@ const NO_FLIGHT: Flight = Flight {
     from: FixedStr::EMPTY,
     to: FixedStr::EMPTY,
     kind: FixedStr::EMPTY,
+    from_town: FixedStr::EMPTY,
+    to_town: FixedStr::EMPTY,
     knots: 0,
     feet: 0,
     dkm: 0,
@@ -96,6 +101,27 @@ impl Flights {
         self.failed = false;
         self.n = 0;
         for line in text.lines() {
+            // Town names arrive as their own records, since a line can carry only
+            // one field of free text and this needs two.
+            if let Some(rest) = line.strip_prefix("n:") {
+                let mut fields = rest.split(':');
+                let (Some(index), Some(end), Some(town)) =
+                    (fields.next(), fields.next(), fields.next())
+                else {
+                    continue;
+                };
+                let Ok(index) = index.parse::<usize>() else {
+                    continue;
+                };
+                if index < self.n {
+                    if end == "0" {
+                        self.seen[index].from_town = FixedStr::new(town);
+                    } else {
+                        self.seen[index].to_town = FixedStr::new(town);
+                    }
+                }
+                continue;
+            }
             let Some(rest) = line.strip_prefix("f:") else {
                 continue;
             };
@@ -121,6 +147,8 @@ impl Flights {
                 from: FixedStr::new(from),
                 to: FixedStr::new(to),
                 kind: FixedStr::new(fields.next().unwrap_or("")),
+                from_town: FixedStr::EMPTY,
+                to_town: FixedStr::EMPTY,
                 knots: knots.parse().unwrap_or(0),
                 feet: feet.parse().unwrap_or(0),
                 dkm: whole.parse::<u32>().unwrap_or(0) * 10
@@ -150,16 +178,28 @@ impl Flights {
         sum
     }
 
-    pub fn draw(&self, scene: &mut Scene, alpha: u8) {
+    pub fn draw(&self, scene: &mut Scene, city: &str, alpha: u8) {
         scene.label(
             W as i32 / 2,
-            60,
+            56,
             FontId::Body,
             INK,
             alpha,
             Align::Center,
             "OVERHEAD",
         );
+        // Where "overhead" is, since the position is looked up rather than known.
+        if !city.is_empty() {
+            scene.label(
+                W as i32 / 2,
+                80,
+                FontId::Micro,
+                DIM,
+                alpha,
+                Align::Center,
+                city,
+            );
+        }
 
         if self.n == 0 {
             let message = if self.failed {
@@ -212,19 +252,39 @@ impl Flights {
             let _ = write!(route, "{} > {}", flight.from.as_str(), flight.to.as_str());
             scene.label(
                 42,
-                y0 + 92,
+                y0 + 86,
                 FontId::Caption,
                 INK,
                 alpha,
                 Align::Left,
                 route.as_str(),
             );
+            // The same route in words, small, under the codes - three letters are
+            // no help unless you already know them.
+            if !flight.from_town.is_empty() || !flight.to_town.is_empty() {
+                let mut towns = TextBuf::new();
+                let _ = write!(
+                    towns,
+                    "{} > {}",
+                    flight.from_town.as_str(),
+                    flight.to_town.as_str()
+                );
+                scene.label(
+                    42,
+                    y0 + 112,
+                    FontId::Micro,
+                    muted(INK),
+                    alpha,
+                    Align::Left,
+                    towns.as_str(),
+                );
+            }
 
             let mut distance = TextBuf::new();
             let _ = write!(distance, "{}.{} KM", flight.dkm / 10, flight.dkm % 10);
             scene.label(
                 W as i32 - 42,
-                y0 + 92,
+                y0 + 86,
                 FontId::Caption,
                 muted(ACCENT),
                 alpha,
@@ -236,7 +296,7 @@ impl Flights {
             let _ = write!(numbers, "{} KT  {} FT", flight.knots, flight.feet);
             scene.label(
                 42,
-                y0 + 134,
+                y0 + 142,
                 FontId::Micro,
                 DIM,
                 alpha,

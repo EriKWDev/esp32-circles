@@ -2712,7 +2712,8 @@ impl Ui {
             }
             Screen::Flights => {
                 Self::draw_ring_theme(scene, crate::flights::ACCENT, alpha);
-                self.flights.draw(scene, alpha);
+                let city = self.rain.city();
+                self.flights.draw(scene, city, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Stocks => {

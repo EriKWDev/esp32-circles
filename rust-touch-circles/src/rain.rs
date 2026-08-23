@@ -89,6 +89,9 @@ pub struct Rain {
     stage: Stage,
     lat: Buf<12>,
     lon: Buf<12>,
+    /// The town the lookup named. Discarded before, which meant two pages had to
+    /// ask for the same fact separately.
+    city: Buf<28>,
     /// Tomorrow, as of the last look.
     pub tomorrow_tenths: i32,
     pub tomorrow_code: u16,
@@ -117,6 +120,7 @@ impl Rain {
             stage: Stage::Idle,
             lat: Buf::new(),
             lon: Buf::new(),
+            city: Buf::new(),
             tomorrow_tenths: 0,
             tomorrow_code: 0,
             have_forecast: false,
@@ -141,6 +145,10 @@ impl Rain {
     /// flights page needs the same position and there is no reason to ask twice.
     pub fn location(&self) -> (&str, &str) {
         (self.lat.as_str(), self.lon.as_str())
+    }
+
+    pub fn city(&self) -> &str {
+        self.city.as_str()
     }
 
     pub fn saved(&self) -> (bool, u16, u8) {
@@ -214,9 +222,11 @@ impl Rain {
             Stage::Locating => {
                 let mut located = false;
                 if let Some(text) = net.fetch.take() {
-                    if let Some((_, lat, lon)) = parse_location(text) {
+                    if let Some((city, lat, lon)) = parse_location(text) {
                         self.lat = Buf::new();
                         self.lon = Buf::new();
+                        self.city = Buf::new();
+                        let _ = write!(self.city, "{city}");
                         let _ = write!(self.lat, "{lat}");
                         let _ = write!(self.lon, "{lon}");
                         located = true;
