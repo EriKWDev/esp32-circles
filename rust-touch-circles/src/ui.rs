@@ -388,6 +388,7 @@ pub enum Screen {
     Pacman,
     /// The games menu. Apps' twin, and drawn by the same page.
     Games,
+    Flights,
 }
 
 impl Screen {
@@ -431,7 +432,8 @@ impl Screen {
             | Screen::Chess
             | Screen::Tetris
             | Screen::Stocks
-            | Screen::Pacman => rgb(0, 0, 0),
+            | Screen::Pacman
+            | Screen::Flights => rgb(0, 0, 0),
             // Both menus are Extras' twins, so they share its palette.
             Screen::Apps | Screen::Games => BG_INFO,
             // Breakout's ground comes from the level, so `build` overrides this -
@@ -471,6 +473,7 @@ impl Screen {
             Screen::Chess => crate::chess::ACCENT,
             Screen::Tetris => crate::tetris::ACCENT,
             Screen::Stocks => crate::stocks::ACCENT,
+            Screen::Flights => crate::flights::ACCENT,
             Screen::Pacman => crate::pacman::ACCENT,
             Screen::Config
             | Screen::Wifi
@@ -856,6 +859,7 @@ pub struct Ui {
     chess: crate::chess::Chess,
     tetris: crate::tetris::Tetris,
     pub stocks: crate::stocks::Stocks,
+    flights: crate::flights::Flights,
     pacman: crate::pacman::Pacman,
     chess_bubble_ms: u32,
     /// Whether the stocks page is in editing mode.
@@ -997,6 +1001,7 @@ impl Ui {
             chess: crate::chess::Chess::new(),
             tetris: crate::tetris::Tetris::new(),
             stocks: crate::stocks::Stocks::new(),
+            flights: crate::flights::Flights::new(),
             pacman: crate::pacman::Pacman::new(),
             chess_bubble_ms: 0,
             stock_edit: false,
@@ -1160,6 +1165,23 @@ impl Ui {
                 let before = self.weather.fingerprint();
                 self.weather.step(net, now_ms);
                 self.weather.fingerprint() != before
+            }
+            Screen::Flights => {
+                if let Some(text) = net.take_quotes() {
+                    self.flights.absorb(text);
+                    return true;
+                }
+                if net.take_quote_failure() {
+                    self.flights.failed();
+                    return true;
+                }
+                // Position comes from the lookup the forecast already did at boot.
+                let (lat, lon) = self.rain.location();
+                if self.flights.due(now_ms) && !net.busy() && !lat.is_empty() {
+                    net.request_flights(0, lat, lon, now_ms);
+                    self.flights.asked(now_ms);
+                }
+                false
             }
             Screen::Stocks => {
                 if let Some(text) = net.take_quotes() {
@@ -2108,6 +2130,7 @@ impl Ui {
                     | Screen::Tetris
                     | Screen::Stocks
                     | Screen::Pacman
+                    | Screen::Flights
             )
         {
             self.draw_running_badge(scene, state, 255);
@@ -2411,6 +2434,7 @@ impl Ui {
             | Screen::Chess
             | Screen::Tetris
             | Screen::Pacman
+            | Screen::Flights
             | Screen::Bubbles => {
                 // Back first, so the corner it occupies belongs to it; the rest of
                 // the panel is the game's, which is how the demo behaves - a
@@ -2684,6 +2708,11 @@ impl Ui {
             Screen::Pacman => {
                 self.game.draw(scene, now_ms, alpha);
                 self.pacman.draw(scene, now_ms, alpha);
+                self.draw_back(scene, alpha);
+            }
+            Screen::Flights => {
+                Self::draw_ring_theme(scene, crate::flights::ACCENT, alpha);
+                self.flights.draw(scene, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Stocks => {
@@ -3214,6 +3243,7 @@ impl Ui {
     /// kitchen timer, whatever it is made of.
     const APPS: &'static [(&'static str, u16, Screen)] = &[
         ("WEATHER", C_WEATHER, Screen::Weather),
+        ("FLIGHTS", crate::flights::ACCENT, Screen::Flights),
         ("STOCKS", crate::stocks::ACCENT, Screen::Stocks),
         ("CURRENCY", C_CURRENCY, Screen::Currency),
         ("CALCULATOR", C_CALC, Screen::Calc),
@@ -3443,6 +3473,9 @@ impl Ui {
                     }
                     if *screen == Screen::Pacman {
                         self.pacman.restart(now_ms);
+                    }
+                    if *screen == Screen::Flights {
+                        self.flights.open(now_ms);
                     }
                     if *screen == Screen::Stocks {
                         let list = self.stocks.list;

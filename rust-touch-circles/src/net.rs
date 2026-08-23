@@ -307,6 +307,9 @@ enum HttpKind {
     /// Share prices, which the controller fetches upstream because this panel has
     /// no TLS and every quote feed is HTTPS-only.
     Quote,
+    /// Aircraft overhead, for the same reason - and because the reply upstream is
+    /// far larger than the part worth keeping.
+    Flights,
 }
 
 #[derive(Clone, Copy)]
@@ -939,7 +942,9 @@ impl Net {
                 }
                 self.job = Job::Poll { next: index + 1 };
             }
-            HttpKind::Quote => {
+            // Quotes and flights are both plain text for the page that asked, and
+            // only one such page can be open, so they share the slot.
+            HttpKind::Quote | HttpKind::Flights => {
                 let split = find_body(&self.body[..http.got]);
                 self.quote_body.clear();
                 if let Ok(text) = core::str::from_utf8(&self.body[split..http.got]) {
@@ -962,7 +967,7 @@ impl Net {
 
     fn finish_error(&mut self, http: Http, state: &mut State, error: &'static str) {
         self.last_error = Some(error);
-        if matches!(http.kind, HttpKind::Quote) {
+        if matches!(http.kind, HttpKind::Quote | HttpKind::Flights) {
             self.quote_failed = true;
         }
         match http.kind {
@@ -977,7 +982,7 @@ impl Net {
             }
             // Nothing to unwind for either: the request carried no model state,
             // and the failure is already recorded for the status line.
-            HttpKind::Trigger | HttpKind::Schedule | HttpKind::Quote => {}
+            HttpKind::Trigger | HttpKind::Schedule | HttpKind::Quote | HttpKind::Flights => {}
         }
     }
 
@@ -1126,6 +1131,26 @@ impl Net {
         let failed = self.quote_failed;
         self.quote_failed = false;
         failed
+    }
+
+    /// Ask the controller which aircraft are nearest a position.
+    pub fn request_flights(&mut self, controller: u8, lat: &str, lon: &str, now_ms: u32) {
+        if controller as usize >= self.n_hosts || lat.is_empty() || lon.is_empty() {
+            return;
+        }
+        let mut path = Buf::<96>::new();
+        let _ = write!(path, "/local/rainbird/app/api/flights?lat={lat}&lon={lon}");
+        self.sockets.get_mut::<tcp::Socket>(self.tcp).abort();
+        self.http = None;
+        self.job = Job::Idle;
+        self.quote_fresh = false;
+        self.quote_failed = false;
+        if let Err(e) =
+            self.start_http(HttpKind::Flights, controller as usize, false, path, 0, now_ms)
+        {
+            self.last_error = Some(e);
+            self.quote_failed = true;
+        }
     }
 
     /// Write one schedule back, as the s:/e: records the dump emits.

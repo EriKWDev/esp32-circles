@@ -25,6 +25,7 @@ mod bubbles;
 mod currency;
 mod display;
 mod fetch;
+mod flights;
 mod font;
 mod g2048;
 mod gfx;
@@ -761,6 +762,7 @@ fn main() -> ! {
                     ui::Screen::Chess => "chess",
                     ui::Screen::Tetris => "tetris",
                     ui::Screen::Stocks => "stocks",
+                    ui::Screen::Flights => "flights",
                     ui::Screen::Pacman => "pacman",
                 },
                 match touch.phase {

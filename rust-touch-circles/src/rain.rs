@@ -137,6 +137,12 @@ impl Rain {
         self.manual = Manual::from_code(manual);
     }
 
+    /// Where the panel thinks it is, looked up at boot for the forecast. The
+    /// flights page needs the same position and there is no reason to ask twice.
+    pub fn location(&self) -> (&str, &str) {
+        (self.lat.as_str(), self.lon.as_str())
+    }
+
     pub fn saved(&self) -> (bool, u16, u8) {
         (self.active, self.armed_mask, self.manual.code())
     }
