@@ -1175,8 +1175,11 @@ impl Ui {
                     self.flights.failed();
                     return true;
                 }
-                // Position comes from the lookup the forecast already did at boot.
-                let (lat, lon) = self.rain.location();
+                // The chosen place, or the lookup the forecast already did at boot.
+                let (mut lat, mut lon) = self.flights.chosen();
+                if lat.is_empty() {
+                    (lat, lon) = self.rain.location();
+                }
                 if self.flights.due(now_ms) && !net.busy() && !lat.is_empty() {
                     net.request_flights(0, lat, lon, now_ms);
                     self.flights.asked(now_ms);
@@ -1333,7 +1336,16 @@ impl Ui {
                     | Target::WifiRow(_)
                     | Target::CtlRow(_) => self.activate_row(target, x, y, now_ms),
                     Target::Bubble => {
-                        if self.interactive_screen() == Screen::Pacman {
+                        if self.interactive_screen() == Screen::Flights {
+                            // The heading is the place button; everywhere else is
+                            // the circle field, as on the other full-page apps.
+                            let (hx0, hy0, hx1, hy1) = crate::flights::HEADER;
+                            if x >= hx0 && x <= hx1 && y >= hy0 && y <= hy1 {
+                                self.flights.cycle_place(now_ms);
+                            } else {
+                                self.bubble(x, y, now_ms);
+                            }
+                        } else if self.interactive_screen() == Screen::Pacman {
                             self.pacman.tap(now_ms);
                             self.pacman.steer_at(x, y, now_ms);
                         } else if self.interactive_screen() == Screen::Tetris {
@@ -2713,7 +2725,8 @@ impl Ui {
             Screen::Flights => {
                 Self::draw_ring_theme(scene, crate::flights::ACCENT, alpha);
                 let city = self.rain.city();
-                self.flights.draw(scene, city, alpha);
+                let clock = state.clock_valid.then_some((state.hh, state.mm));
+                self.flights.draw(scene, city, clock, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Stocks => {

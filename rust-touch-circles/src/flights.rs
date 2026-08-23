@@ -24,6 +24,20 @@ const DIM: u16 = rgb(140, 152, 166);
 const PLATE: u16 = rgb(18, 22, 30);
 pub const ACCENT: u16 = rgb(120, 200, 255);
 
+/// The heading band, which is also the button that changes where "overhead" is.
+pub const HEADER: (i32, i32, i32, i32) = (0, 30, 480, 100);
+
+/// Places to look from, beyond wherever the panel thinks it is. Coordinates as
+/// text because that is the form they go back out in - the endpoint takes them
+/// straight into a URL.
+pub const PLACES: [(&str, &str, &str); 5] = [
+    ("HERE", "", ""),
+    ("MALMO", "55.605", "13.003"),
+    ("GOTHENBURG", "57.708", "11.974"),
+    ("STOCKHOLM", "59.329", "18.068"),
+    ("COPENHAGEN", "55.676", "12.568"),
+];
+
 const CARD_TOP: i32 = 108;
 const CARD_H: i32 = 168;
 const CARD_GAP: i32 = 14;
@@ -63,6 +77,8 @@ pub struct Flights {
     waiting: bool,
     failed: bool,
     next_ask_ms: u32,
+    /// Which of PLACES to look from. Zero is wherever the panel is.
+    pub place: usize,
 }
 
 impl Flights {
@@ -74,6 +90,7 @@ impl Flights {
             waiting: true,
             failed: false,
             next_ask_ms: 0,
+            place: 0,
         }
     }
 
@@ -84,6 +101,27 @@ impl Flights {
         self.waiting = self.n == 0;
         self.failed = false;
         self.next_ask_ms = now_ms;
+    }
+
+    /// Next place in the list, and ask again at once - the answer for one place
+    /// says nothing about another.
+    pub fn cycle_place(&mut self, now_ms: u32) {
+        self.place = (self.place + 1) % PLACES.len();
+        self.n = 0;
+        self.asking = false;
+        self.waiting = true;
+        self.next_ask_ms = now_ms;
+    }
+
+    /// Where to look from: the chosen place, or nothing when it is "here" and the
+    /// caller should use the panel's own position.
+    pub fn chosen(&self) -> (&'static str, &'static str) {
+        let (_, lat, lon) = PLACES[self.place.min(PLACES.len() - 1)];
+        (lat, lon)
+    }
+
+    pub fn place_name(&self) -> &'static str {
+        PLACES[self.place.min(PLACES.len() - 1)].0
     }
 
     pub fn due(&self, now_ms: u32) -> bool {
@@ -178,28 +216,46 @@ impl Flights {
         sum
     }
 
-    pub fn draw(&self, scene: &mut Scene, city: &str, alpha: u8) {
+    pub fn draw(&self, scene: &mut Scene, city: &str, clock: Option<(u8, u8)>, alpha: u8) {
         scene.label(
-            W as i32 / 2,
-            56,
+            42,
+            62,
             FontId::Body,
             INK,
             alpha,
-            Align::Center,
-            "OVERHEAD",
+            Align::Left,
+            "FLIGHTS",
         );
-        // Where "overhead" is, since the position is looked up rather than known.
-        if !city.is_empty() {
+        if let Some((hh, mm)) = clock {
+            let mut time = TextBuf::new();
+            let _ = write!(time, "{hh:02}:{mm:02}");
             scene.label(
-                W as i32 / 2,
-                80,
-                FontId::Micro,
+                W as i32 - 42,
+                62,
+                FontId::Body,
                 DIM,
                 alpha,
-                Align::Center,
-                city,
+                Align::Right,
+                time.as_str(),
             );
         }
+        // Where "overhead" is - a geo-IP guess unless a place was chosen, so it
+        // says which, and the heading is the button that changes it.
+        let mut where_ = TextBuf::new();
+        if self.place == 0 {
+            let _ = write!(where_, "{}", if city.is_empty() { "HERE" } else { city });
+        } else {
+            let _ = write!(where_, "{}", self.place_name());
+        }
+        scene.label(
+            42,
+            86,
+            FontId::Micro,
+            muted(ACCENT),
+            alpha,
+            Align::Left,
+            where_.as_str(),
+        );
 
         if self.n == 0 {
             let message = if self.failed {
