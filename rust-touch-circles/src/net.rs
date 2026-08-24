@@ -262,6 +262,7 @@ pub struct Net {
     /// When the current run of failures began, and whether it has been abandoned.
     first_fail_ms: u32,
     pub gave_up: bool,
+    rest_until_ms: u32,
     /// Association attempts since the last success, and which network is being
     /// tried.
     tries: u8,
@@ -309,6 +310,11 @@ const SCAN_COOLDOWN_MS: u32 = 1_200;
 /// of attempts has not worked, the network is not there and the next thousand will
 /// not work either.
 const GIVE_UP_MS: u32 = 100_000;
+/// How long it rests before trying the whole list again. Giving up was meant to
+/// stop the hammering, not to stop connecting: a panel carried between access
+/// points has to find the next one by itself, and permanent surrender means a
+/// reboot in a bad spot never recovers.
+const REST_MS: u32 = 120_000;
 
 #[derive(Clone, Copy)]
 enum HttpKind {
@@ -458,6 +464,7 @@ impl Net {
             last_scan_ms: now_ms.wrapping_sub(SCAN_COOLDOWN_MS),
             first_fail_ms: 0,
             gave_up: false,
+            rest_until_ms: 0,
             tries: 0,
             on_fallback: false,
             net_index: 0,
@@ -677,7 +684,17 @@ impl Net {
                 self.first_fail_ms = now_ms;
             } else if now_ms.wrapping_sub(self.first_fail_ms) > GIVE_UP_MS && !self.gave_up {
                 self.gave_up = true;
-                esp_println::println!("wifi: giving up, waiting to be asked");
+                self.rest_until_ms = now_ms + REST_MS;
+                esp_println::println!("wifi: resting, will try again");
+            } else if self.gave_up
+                && now_ms.wrapping_sub(self.rest_until_ms) < u32::MAX / 2
+            {
+                // Rested: start the whole list again from the top.
+                self.gave_up = false;
+                self.first_fail_ms = now_ms;
+                self.net_index = 0;
+                self.tries = 0;
+                esp_println::println!("wifi: trying again");
             }
         }
         if !self.controller.is_connected()
