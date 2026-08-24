@@ -210,12 +210,17 @@ mod l {
     /// destinations, like Home, and will grow to hold games and other toys.
     pub const EXTRA_X0: i32 = 84;
     pub const EXTRA_X1: i32 = 396;
-    pub const EXTRA_FIRST_CY: i32 = 200;
-    pub const EXTRA_PITCH: i32 = 94;
+    // Four rows, and no scrollbar for four: the first menu has exactly that many
+    // and they fit with the heading gone. Rows start clear of the Back button and
+    // the last one ends above the bottom edge.
+    pub const EXTRA_FIRST_CY: i32 = 144;
+    pub const EXTRA_PITCH: i32 = 88;
     pub const EXTRA_HALF_H: i32 = 36;
-    pub const EXTRA_MAX_ROWS: usize = 3;
-    pub const EXTRA_VIEW_TOP: i32 = 150;
-    pub const EXTRA_VIEW_BOTTOM: i32 = 448;
+    pub const EXTRA_MAX_ROWS: usize = 4;
+    pub const EXTRA_VIEW_TOP: i32 = 104;
+    pub const EXTRA_VIEW_BOTTOM: i32 = 452;
+    /// The child menus keep a heading, above the rows rather than in them.
+    pub const EXTRA_TITLE: i32 = 92;
     // Six rows fit the clipped viewport completely. A seventh row previously
     // looked like accidental clipping and never enabled the scrollbar.
     pub const ANALOG_MAX_ROWS: usize = 6;
@@ -3299,8 +3304,8 @@ impl Ui {
         if page != Screen::Extras {
             scene.label(
                 CX,
-                l::MENU_TITLE,
-                FontId::Body,
+                l::EXTRA_TITLE,
+                FontId::Caption,
                 INK,
                 alpha,
                 Align::Center,
