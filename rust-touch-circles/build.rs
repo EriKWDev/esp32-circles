@@ -23,7 +23,7 @@ const BODY: &str = "\
  !\"#%&'()*+,-./0123456789:;<=>?@\
 ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_\
 abcdefghijklmnopqrstuvwxyz{|}~\
-ÅÄÖåäöéÉ·°×÷√π";
+ÅÄÖåäöéÉ·°×÷√πáàâãíìîóòôõúùûüçñßÁÍÓÚÜÇÑ";
 
 struct FontSpec {
     ident: &'static str,

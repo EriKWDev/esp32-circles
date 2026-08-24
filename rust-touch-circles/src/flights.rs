@@ -30,12 +30,11 @@ pub const HEADER: (i32, i32, i32, i32) = (0, 30, 480, 100);
 /// Places to look from, beyond wherever the panel thinks it is. Coordinates as
 /// text because that is the form they go back out in - the endpoint takes them
 /// straight into a URL.
-pub const PLACES: [(&str, &str, &str); 5] = [
+pub const PLACES: [(&str, &str, &str); 4] = [
     ("HERE", "", ""),
-    ("MALMO", "55.605", "13.003"),
-    ("GOTHENBURG", "57.708", "11.974"),
-    ("STOCKHOLM", "59.329", "18.068"),
-    ("COPENHAGEN", "55.676", "12.568"),
+    ("BJÄRRED", "55.7183", "13.0264"),
+    ("LUND", "55.7047", "13.1910"),
+    ("LANDVETTER", "57.6628", "12.2798"),
 ];
 
 const CARD_TOP: i32 = 108;
