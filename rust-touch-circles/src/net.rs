@@ -257,6 +257,9 @@ pub struct Net {
     manual_from_ms: u32,
     /// When the last scan finished, for the cooldown.
     last_scan_ms: u32,
+    /// When the current run of failures began, and whether it has been abandoned.
+    first_fail_ms: u32,
+    pub gave_up: bool,
     /// Association attempts since the last success, and which network is being
     /// tried.
     tries: u8,
@@ -294,6 +297,12 @@ const SCAN_DEADLINE_MS: u32 = 8_000;
 /// to put itself away, and a second press inside that window is the other half of
 /// the same hang.
 const SCAN_COOLDOWN_MS: u32 = 1_200;
+/// How long the automatic reconnect keeps trying before it gives up and waits to
+/// be asked. Every attempt is another chance to hit the driver states that have
+/// crashed this panel repeatedly, so trying for ever is not free - and if a minute
+/// of attempts has not worked, the network is not there and the next thousand will
+/// not work either.
+const GIVE_UP_MS: u32 = 60_000;
 
 #[derive(Clone, Copy)]
 enum HttpKind {
@@ -441,6 +450,8 @@ impl Net {
             last_connect_attempt_ms: now_ms,
             manual_from_ms: now_ms.wrapping_sub(MANUAL_HOLD_MS),
             last_scan_ms: now_ms.wrapping_sub(SCAN_COOLDOWN_MS),
+            first_fail_ms: 0,
+            gave_up: false,
             tries: 0,
             on_fallback: false,
             cfg_ssid: settings.ssid,
@@ -513,6 +524,9 @@ impl Net {
         self.cfg_psk = settings.psk;
         self.tries = 0;
         self.on_fallback = false;
+        // Being asked by hand is what restarts a run that was abandoned.
+        self.first_fail_ms = 0;
+        self.gave_up = false;
         join(&mut self.controller, settings)
     }
 
@@ -533,6 +547,10 @@ impl Net {
             return;
         }
         self.last_scan_ms = now_ms;
+        // A scan is a request from the user, so the automatic reconnect gets
+        // another minute after it.
+        self.first_fail_ms = 0;
+        self.gave_up = false;
 
         // Not on top of an association attempt. The driver rejects that, and the
         // rejection is a code esp-radio does not map - which it panics on rather
@@ -643,7 +661,19 @@ impl Net {
         // ESP_ERR_WIFI_CONN, which esp-radio panics on. A wrong password takes
         // about ten seconds to be rejected.
         const RECONNECT_MS: u32 = 15_000;
+        // A run of failures is abandoned after a minute rather than retried for
+        // ever. Each attempt is a chance to hit the driver states that have crashed
+        // this panel, and a network that has not answered in a minute is not there.
+        if !self.controller.is_connected() {
+            if self.first_fail_ms == 0 {
+                self.first_fail_ms = now_ms;
+            } else if now_ms.wrapping_sub(self.first_fail_ms) > GIVE_UP_MS && !self.gave_up {
+                self.gave_up = true;
+                esp_println::println!("wifi: giving up, waiting to be asked");
+            }
+        }
         if !self.controller.is_connected()
+            && !self.gave_up
             && now_ms.wrapping_sub(self.last_connect_attempt_ms) >= RECONNECT_MS
             && now_ms.wrapping_sub(self.manual_from_ms) >= MANUAL_HOLD_MS
         {
@@ -680,6 +710,8 @@ impl Net {
         match event {
             Some(dhcpv4::Event::Configured(cfg)) => {
                 self.tries = 0;
+                self.first_fail_ms = 0;
+                self.gave_up = false;
                 self.ip = Some(cfg.address.address());
                 self.iface.update_ip_addrs(|addrs| {
                     addrs.clear();

@@ -463,6 +463,7 @@ fn main() -> ! {
         // comparatively rare dump requests.
         if let Some(n) = net.as_mut() {
             n.step(t);
+            ui.wifi_gave_up = n.gave_up;
             if n.service(&mut state, t) {
                 dirty = true;
             }

@@ -856,6 +856,9 @@ pub struct Ui {
     /// flash.
     pub sys: crate::about::Sys,
     pub rain: crate::rain::Rain,
+    /// Set by main from the network layer: the reconnect has stopped trying and is
+    /// waiting to be asked.
+    pub wifi_gave_up: bool,
     chess: crate::chess::Chess,
     tetris: crate::tetris::Tetris,
     pub stocks: crate::stocks::Stocks,
@@ -998,6 +1001,7 @@ impl Ui {
             snake: crate::snake::Snake::new(),
             sys: crate::about::Sys::EMPTY,
             rain: crate::rain::Rain::new(),
+            wifi_gave_up: false,
             chess: crate::chess::Chess::new(),
             tetris: crate::tetris::Tetris::new(),
             stocks: crate::stocks::Stocks::new(),
@@ -2727,6 +2731,7 @@ impl Ui {
                 let city = self.rain.city();
                 let clock = state.clock_valid.then_some((state.hh, state.mm));
                 self.flights.draw(scene, city, clock, alpha);
+                self.draw_wifi_badge(scene, state, alpha);
                 self.draw_back(scene, alpha);
             }
             Screen::Stocks => {
@@ -2945,7 +2950,9 @@ impl Ui {
         const X: i32 = 440;
         const Y: i32 = 52;
         let online = state.link == Link::Online;
-        let joining = state.link == Link::Connecting;
+        // Given up counts as offline rather than joining: the panel is not trying,
+        // and a symbol that looks busy while nothing is happening is a lie.
+        let joining = state.link == Link::Connecting && !self.wifi_gave_up;
         let lit = if online {
             C_RUN
         } else if joining {
