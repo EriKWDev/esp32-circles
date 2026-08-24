@@ -264,16 +264,20 @@ pub struct Net {
     /// tried.
     tries: u8,
     pub on_fallback: bool,
+    /// Which known network is being tried: the saved one, then the baked-in ones.
+    net_index: u8,
     /// The configured network, kept so `step` can alternate it with the fallback
     /// without being handed the settings again.
     cfg_ssid: crate::store::FixedStr<{ crate::store::MAX_SSID }>,
     cfg_psk: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
 }
 
-/// Attempts on one network before the other is tried. Alternating rather than
+/// Attempts on one network before the next is tried. One, so that three known
+/// networks are all tried inside the give-up window rather than the last one
+/// getting a single shot at the end of it. Alternating rather than
 /// sticking: a hotspot that is only sometimes there, and a home network that comes
 /// back, are the same problem from opposite ends.
-const TRIES_BEFORE_FALLBACK: u8 = 2;
+const TRIES_BEFORE_FALLBACK: u8 = 1;
 
 /// How long a user-driven join keeps the automatic reconnect out of the way.
 ///
@@ -302,7 +306,7 @@ const SCAN_COOLDOWN_MS: u32 = 1_200;
 /// crashed this panel repeatedly, so trying for ever is not free - and if a minute
 /// of attempts has not worked, the network is not there and the next thousand will
 /// not work either.
-const GIVE_UP_MS: u32 = 60_000;
+const GIVE_UP_MS: u32 = 100_000;
 
 #[derive(Clone, Copy)]
 enum HttpKind {
@@ -454,6 +458,7 @@ impl Net {
             gave_up: false,
             tries: 0,
             on_fallback: false,
+            net_index: 0,
             cfg_ssid: settings.ssid,
             cfg_psk: settings.psk,
         };
@@ -679,18 +684,42 @@ impl Net {
         {
             self.last_connect_attempt_ms = now_ms;
             self.tries = self.tries.wrapping_add(1);
-            if self.tries >= TRIES_BEFORE_FALLBACK && !WIFI_SSID2.is_empty() {
+            if self.tries >= TRIES_BEFORE_FALLBACK {
                 self.tries = 0;
-                self.on_fallback = !self.on_fallback;
-                let (ssid, password) = if self.on_fallback {
-                    (WIFI_SSID2, WIFI_PASS2)
-                } else {
-                    (self.cfg_ssid.as_str(), self.cfg_psk.as_str())
-                };
+                // Round the known networks in turn rather than toggling between
+                // two: the saved one is only the last that worked, and the panel
+                // moves between several. An empty slot is skipped.
+                let mut ssid = "";
+                let mut password = "";
+                for _ in 0..4 {
+                    self.net_index = (self.net_index + 1) % 3;
+                    let (s, p) = match self.net_index {
+                        0 => (self.cfg_ssid.as_str(), self.cfg_psk.as_str()),
+                        1 => (WIFI_SSID2, WIFI_PASS2),
+                        _ => (WIFI_SSID3, WIFI_PASS3),
+                    };
+                    if !s.is_empty() {
+                        (ssid, password) = (s, p);
+                        break;
+                    }
+                }
+                self.on_fallback = self.net_index != 0;
+                if ssid.is_empty() {
+                    return;
+                }
                 esp_println::println!("wifi: trying \"{ssid}\"");
+                // Finish the disconnect first, then let join_named issue the only
+                // connect this pass makes. Falling through to the connect below as
+                // well was two connects at once, which returns ESP_ERR_WIFI_CONN -
+                // a code esp-radio does not map and panics on. That is the crash
+                // that has been dogging this panel: "Unknown error code: 12295".
+                if self.controller.is_connected() {
+                    let _ = block_on_deadline(self.controller.disconnect_async(), 600);
+                }
                 if let Err(e) = join_named(&mut self.controller, ssid, password) {
                     self.last_error = Some(e);
                 }
+                return;
             }
             if let Poll::Ready(Err(_)) = embassy_futures::poll_once(self.controller.connect_async())
             {
