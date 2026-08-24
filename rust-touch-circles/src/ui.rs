@@ -2698,7 +2698,14 @@ impl Ui {
             Screen::Running => self.draw_running(scene, state, alpha),
             Screen::Detail => self.draw_detail(scene, state, alpha),
             Screen::Info => self.draw_info(scene, state, alpha),
-            Screen::Extras => self.draw_extras(scene, alpha, Screen::Extras),
+            Screen::Extras => {
+                self.draw_extras(scene, alpha, Screen::Extras);
+                // The status pair belongs here too: this is the page you land on
+                // from home, and whether the panel is on a network is the first
+                // thing worth knowing before choosing anything on it.
+                self.draw_link(scene, state, alpha);
+                self.draw_wifi_badge(scene, state, alpha);
+            }
             Screen::Apps => self.draw_extras(scene, alpha, Screen::Apps),
             Screen::Games => self.draw_extras(scene, alpha, Screen::Games),
             Screen::Config => {
@@ -3286,19 +3293,23 @@ impl Ui {
 
     fn draw_extras(&mut self, scene: &mut Scene, alpha: u8, page: Screen) {
         self.draw_back(scene, alpha);
-        scene.label(
-            CX,
-            l::MENU_TITLE,
-            FontId::Body,
-            INK,
-            alpha,
-            Align::Center,
-            match page {
-                Screen::Apps => "APPS",
-                Screen::Games => "GAMES",
-                _ => "EXTRAS",
-            },
-        );
+        // No heading on the first menu: "EXTRAS" told you nothing that the four
+        // rows underneath it do not. The child menus keep theirs, where it says
+        // which of them you are in.
+        if page != Screen::Extras {
+            scene.label(
+                CX,
+                l::MENU_TITLE,
+                FontId::Body,
+                INK,
+                alpha,
+                Align::Center,
+                match page {
+                    Screen::Apps => "APPS",
+                    _ => "GAMES",
+                },
+            );
+        }
 
         scene.clip(l::EXTRA_VIEW_TOP, l::EXTRA_VIEW_BOTTOM);
         self.menu_rows(page, |_, row, cy| {
