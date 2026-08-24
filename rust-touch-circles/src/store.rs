@@ -24,7 +24,7 @@ const MAGIC: u32 = 0x5242_4E31; // "RBN1"
 /// Bumped to 2 when controllers gained a name. Version 1 records are still read
 /// (see `decode`), because falling back to defaults would silently discard
 /// controllers someone had already added by hand.
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 
 pub const MAX_CONTROLLERS: usize = 6;
 pub const MAX_SSID: usize = 32;
@@ -86,6 +86,8 @@ impl<const N: usize> FixedStr<N> {
 #[derive(Clone, Copy)]
 pub struct Controller {
     pub ip: [u8; 4],
+    /// Where its web server listens. Eighty unless someone has moved it.
+    pub port: u16,
     /// What to call it - "greenhouse", "by the gate". Optional: an address is
     /// enough to identify one, but not to remember which is which once several
     /// are deployed.
@@ -97,6 +99,7 @@ pub struct Controller {
 impl Controller {
     pub const EMPTY: Self = Self {
         ip: [0; 4],
+        port: 80,
         name: FixedStr::EMPTY,
         user: FixedStr::EMPTY,
         pass: FixedStr::EMPTY,
@@ -197,6 +200,7 @@ impl Settings {
         if let Some(ip) = parse_ip(RB_HOST) {
             out.controllers[0] = Controller {
                 ip,
+                port: 80,
                 name: FixedStr::EMPTY,
                 // The credentials baked in at build time become the default for
                 // a controller added later too, which is what makes adding one
@@ -215,6 +219,7 @@ impl Settings {
         }
         self.controllers[self.n_controllers] = Controller {
             ip,
+            port: 80,
             name: FixedStr::EMPTY,
             user: FixedStr::new(RB_USER),
             pass: FixedStr::new(RB_PASS),
@@ -344,6 +349,11 @@ fn encode(settings: &Settings, out: &mut [u8; SECTOR]) -> usize {
         put(&controller.name.bytes, &mut at);
     }
 
+    // Ports, appended after the version 4 fields.
+    for controller in &settings.controllers {
+        put(&controller.port.to_le_bytes(), &mut at);
+    }
+
     // Watchlists, appended after the version 3 fields.
     for list in &settings.lists {
         put(&[list.name.len], &mut at);
@@ -380,11 +390,12 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
     let version = u16::from_le_bytes(raw[4..6].try_into().ok()?);
     // Each version only appends, so an older record is this layout minus its
     // tail and reads back with the new fields left at their defaults.
-    let (has_names, has_rain, has_lists) = match version {
-        1 => (false, false, false),
-        2 => (true, false, false),
-        3 => (true, true, false),
-        v if v == VERSION => (true, true, true),
+    let (has_names, has_rain, has_lists, has_ports) = match version {
+        1 => (false, false, false, false),
+        2 => (true, false, false, false),
+        3 => (true, true, false, false),
+        4 => (true, true, true, false),
+        v if v == VERSION => (true, true, true, true),
         _ => return None,
     };
     let payload_len = u16::from_le_bytes(raw[6..8].try_into().ok()?) as usize;
@@ -446,6 +457,14 @@ fn decode(raw: &[u8; SECTOR]) -> Option<Settings> {
         settings.controllers[index] = controller;
     }
     settings.n_controllers = count.min(MAX_CONTROLLERS);
+    // Before this version every controller was on eighty, which is what
+    // Controller::EMPTY already says.
+    if has_ports {
+        for index in 0..MAX_CONTROLLERS {
+            let port = u16::from_le_bytes(take(2, &mut at).try_into().ok()?);
+            settings.controllers[index].port = if port == 0 { 80 } else { port };
+        }
+    }
     if has_lists {
         for index in 0..MAX_LISTS {
             let mut list = StockList::EMPTY;

@@ -627,6 +627,7 @@ enum Edit {
     ControllerUser(usize),
     ControllerPass(usize),
     ControllerName(usize),
+    ControllerPort(usize),
     /// A currency code for the rates app. Not persisted: it is a look, not a
     /// setting.
     Symbol,
@@ -647,6 +648,7 @@ impl Edit {
             Edit::ControllerUser(_) => "USERNAME",
             Edit::ControllerPass(_) => "PASSWORD",
             Edit::ControllerName(_) => "NAME",
+            Edit::ControllerPort(_) => "PORT",
             Edit::Symbol => "CURRENCY",
             Edit::ListName(_) => "LIST NAME",
             Edit::AddSymbol(_) => "ADD SYMBOL",
@@ -656,7 +658,9 @@ impl Edit {
     /// Addresses get the keypad; everything else gets letters.
     fn mode(self) -> KeyMode {
         match self {
-            Edit::NewControllerIp | Edit::ControllerIp(_) => KeyMode::Numeric,
+            Edit::NewControllerIp | Edit::ControllerIp(_) | Edit::ControllerPort(_) => {
+                KeyMode::Numeric
+            }
             // Tickers and list names are both shouted, and a ticker has dots and
             // dashes in it that the letter layout carries.
             Edit::Symbol | Edit::ListName(_) | Edit::AddSymbol(_) => KeyMode::Upper,
@@ -3407,7 +3411,8 @@ impl Ui {
             // The networks found, then "scan again", then "type it in".
             Screen::Wifi => self.networks.n + 2,
             // Name, address, username, password, remove.
-            Screen::Controller => 5,
+            // Name, address, port, username, password, remove.
+            Screen::Controller => 6,
             _ => 0,
         }
     }
@@ -3599,14 +3604,25 @@ impl Ui {
                             now_ms,
                         );
                     }
-                    2 => self.open_keyboard(
+                    2 => {
+                        let mut current = Buf::<8>::new();
+                        let _ = write!(current, "{}", controller.port);
+                        self.open_keyboard(
+                            Edit::ControllerPort(index),
+                            current.as_str(),
+                            x,
+                            y,
+                            now_ms,
+                        );
+                    }
+                    3 => self.open_keyboard(
                         Edit::ControllerUser(index),
                         controller.user.as_str(),
                         x,
                         y,
                         now_ms,
                     ),
-                    3 => self.open_keyboard(
+                    4 => self.open_keyboard(
                         Edit::ControllerPass(index),
                         controller.pass.as_str(),
                         x,
@@ -3990,6 +4006,21 @@ impl Ui {
                 self.unwind_to(Screen::Controller, x, y, now_ms);
                 Action::SaveSettings
             }
+            Edit::ControllerPort(index) => {
+                // Anything outside a port number is refused rather than clamped:
+                // silently turning 0 into 80 would hide a typo.
+                let Ok(port) = value.as_str().parse::<u16>() else {
+                    self.edit_invalid = true;
+                    return Action::None;
+                };
+                if port == 0 || index >= self.settings.n_controllers {
+                    self.edit_invalid = true;
+                    return Action::None;
+                }
+                self.settings.controllers[index].port = port;
+                self.unwind_to(Screen::Controller, x, y, now_ms);
+                Action::SaveSettings
+            }
             Edit::ControllerName(index) => {
                 if index >= self.settings.n_controllers {
                     self.edit_invalid = true;
@@ -4282,13 +4313,17 @@ impl Ui {
             }
         );
 
+        let mut port = Buf::<8>::new();
+        let _ = write!(port, "{}", controller.port);
+
         scene.clip(l::MENU_VIEW_TOP, l::MENU_VIEW_BOTTOM);
         self.menu_rows(Screen::Controller, |ui, row, cy| {
             let (accent, label, value): (u16, &str, &str) = match row {
                 0 => (C_CONFIG, "NAME", name.as_str()),
                 1 => (C_CONFIG, "ADDRESS", address.as_str()),
-                2 => (C_CONFIG, "USERNAME", controller.user.as_str()),
-                3 => (C_CONFIG, "PASSWORD", masked.as_str()),
+                2 => (C_CONFIG, "PORT", port.as_str()),
+                3 => (C_CONFIG, "USERNAME", controller.user.as_str()),
+                4 => (C_CONFIG, "PASSWORD", masked.as_str()),
                 _ => (C_CANCEL, "REMOVE", ""),
             };
             ui.menu_row(scene, cy, accent, label, value, alpha, true);
@@ -4584,7 +4619,8 @@ impl Ui {
             Edit::ControllerIp(i)
             | Edit::ControllerUser(i)
             | Edit::ControllerPass(i)
-            | Edit::ControllerName(i) => {
+            | Edit::ControllerName(i)
+            | Edit::ControllerPort(i) => {
                 if let Some(controller) = self.settings.controllers.get(i) {
                     let _ = write!(context, "{}", Self::controller_label(controller).as_str());
                 }

@@ -152,7 +152,11 @@ pub fn draw(scene: &mut Scene, page: usize, facts: &Facts, alpha: u8) {
             for (index, controller) in facts.settings.controllers[..n].iter().enumerate() {
                 let ip = controller.ip;
                 let mut value = TextBuf::new();
-                let _ = write!(value, "{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                let _ = write!(
+                    value,
+                    "{}.{}.{}.{}:{}",
+                    ip[0], ip[1], ip[2], ip[3], controller.port
+                );
                 let label = if controller.name.is_empty() {
                     "CONTROLLER"
                 } else {

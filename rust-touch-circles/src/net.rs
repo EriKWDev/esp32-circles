@@ -109,6 +109,7 @@ impl Device for Phy {
 #[derive(Clone, Copy)]
 pub struct Host {
     pub ip: Ipv4Address,
+    pub port: u16,
     user: crate::store::FixedStr<{ crate::store::MAX_USER }>,
     pass: crate::store::FixedStr<{ crate::store::MAX_SECRET }>,
     /// Realm and nonce from this host's last challenge, reused until it rejects
@@ -120,6 +121,7 @@ pub struct Host {
 
 const EMPTY_HOST: Host = Host {
     ip: Ipv4Address::UNSPECIFIED,
+    port: 80,
     user: crate::store::FixedStr::EMPTY,
     pass: crate::store::FixedStr::EMPTY,
     realm: Buf::new(),
@@ -485,6 +487,7 @@ impl Net {
             let ip = controller.ip;
             self.hosts[self.n_hosts] = Host {
                 ip: Ipv4Address::new(ip[0], ip[1], ip[2], ip[3]),
+                port: if controller.port == 0 { 80 } else { controller.port },
                 user: controller.user,
                 pass: controller.pass,
                 ..EMPTY_HOST
@@ -946,9 +949,10 @@ impl Net {
         let mut head = Buf::<512>::new();
         let _ = write!(
             head,
-            "{method} {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n",
+            "{method} {} HTTP/1.0\r\nHost: {}:{}\r\nConnection: close\r\n",
             path.as_str(),
-            self.hosts[host].ip
+            self.hosts[host].ip,
+            self.hosts[host].port
         );
         if post {
             let _ = write!(head, "Content-Length: {}\r\n", self.post_body.len());
@@ -967,7 +971,7 @@ impl Net {
         socket
             .connect(
                 self.iface.context(),
-                (IpAddress::Ipv4(self.hosts[host].ip), 80),
+                (IpAddress::Ipv4(self.hosts[host].ip), self.hosts[host].port),
                 local_port,
             )
             .map_err(|_| "connect failed")?;
