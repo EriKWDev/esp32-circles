@@ -15,9 +15,10 @@ use crate::gfx::{Align, Scene, TextBuf, W, muted, rgb};
 use crate::store::FixedStr;
 
 pub const MAX_FLIGHTS: usize = 2;
-/// Aircraft at 250 knots cover a kilometre every fifteen seconds, so this is
-/// about as slow as a refresh can be while still describing where they are.
-const REFRESH_MS: u32 = 10_000;
+/// Half a minute. Ten seconds was tried and is more often than the picture
+/// changes usefully, given that only aircraft inside twenty kilometres are
+/// listed at all.
+const REFRESH_MS: u32 = 30_000;
 
 const INK: u16 = rgb(238, 245, 250);
 const DIM: u16 = rgb(140, 152, 166);
@@ -30,11 +31,13 @@ pub const HEADER: (i32, i32, i32, i32) = (0, 30, 480, 100);
 /// Places to look from, beyond wherever the panel thinks it is. Coordinates as
 /// text because that is the form they go back out in - the endpoint takes them
 /// straight into a URL.
+/// Bjärred first, because it is where the panel lives - the geo-IP guess is the
+/// fallback rather than the default now.
 pub const PLACES: [(&str, &str, &str); 4] = [
-    ("HERE", "", ""),
     ("BJÄRRED", "55.7183", "13.0264"),
     ("LUND", "55.7047", "13.1910"),
     ("LANDVETTER", "57.6628", "12.2798"),
+    ("HERE", "", ""),
 ];
 
 const CARD_TOP: i32 = 108;
@@ -47,6 +50,8 @@ struct Flight {
     from: FixedStr<5>,
     to: FixedStr<5>,
     kind: FixedStr<6>,
+    /// Which way to look: eight-point, from the place being looked from.
+    bearing: FixedStr<3>,
     /// The towns, as the controller spells them out.
     from_town: FixedStr<18>,
     to_town: FixedStr<18>,
@@ -61,6 +66,7 @@ const NO_FLIGHT: Flight = Flight {
     from: FixedStr::EMPTY,
     to: FixedStr::EMPTY,
     kind: FixedStr::EMPTY,
+    bearing: FixedStr::EMPTY,
     from_town: FixedStr::EMPTY,
     to_town: FixedStr::EMPTY,
     knots: 0,
@@ -178,11 +184,15 @@ impl Flights {
             ) else {
                 continue;
             };
+            // Bearing sits between the distance and the type: eight-point, from
+            // the place being looked from.
+            let bearing = fields.next().unwrap_or("");
             let (whole, tenth) = km.split_once('.').unwrap_or((km, "0"));
             self.seen[self.n] = Flight {
                 callsign: FixedStr::new(callsign),
                 from: FixedStr::new(from),
                 to: FixedStr::new(to),
+                bearing: FixedStr::new(bearing),
                 kind: FixedStr::new(fields.next().unwrap_or("")),
                 from_town: FixedStr::EMPTY,
                 to_town: FixedStr::EMPTY,
@@ -241,7 +251,7 @@ impl Flights {
         // Where "overhead" is - a geo-IP guess unless a place was chosen, so it
         // says which, and the heading is the button that changes it.
         let mut where_ = TextBuf::new();
-        if self.place == 0 {
+        if self.chosen().0.is_empty() {
             let _ = write!(where_, "{}", if city.is_empty() { "HERE" } else { city });
         } else {
             let _ = write!(where_, "{}", self.place_name());
@@ -336,7 +346,13 @@ impl Flights {
             }
 
             let mut distance = TextBuf::new();
-            let _ = write!(distance, "{}.{} KM", flight.dkm / 10, flight.dkm % 10);
+            let _ = write!(
+                distance,
+                "{} {}.{} KM",
+                flight.bearing.as_str(),
+                flight.dkm / 10,
+                flight.dkm % 10
+            );
             scene.label(
                 W as i32 - 42,
                 y0 + 86,
