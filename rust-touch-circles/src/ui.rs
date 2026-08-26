@@ -3000,14 +3000,22 @@ impl Ui {
     }
 
     fn draw_power(&self, scene: &mut Scene, screen: Screen, state: &State, alpha: u8) {
-        let Some(percent) = state.battery_percent.filter(|_| !state.external_power) else {
+        // Shown on mains as well as on battery: the same symbol and the same
+        // percentage, since "how full is it" is worth knowing while it fills. It
+        // used to hide itself whenever plugged in, which meant the one moment you
+        // might want to watch the number was the one moment it was absent.
+        let Some(percent) = state.battery_percent else {
             return;
         };
         const X0: i32 = CX - 32;
         const X1: i32 = CX + 28;
         const Y0: i32 = 28;
         const Y1: i32 = 55;
-        let color = if percent <= 15 {
+        // Charging is green whatever the level: a low battery on the charger is
+        // not a warning, it is a battery being dealt with.
+        let color = if state.external_power {
+            C_RUN
+        } else if percent <= 15 {
             C_CANCEL
         } else if percent <= 30 {
             C_FORCE
