@@ -711,12 +711,16 @@ impl Net {
                 // moves between several. An empty slot is skipped.
                 let mut ssid = "";
                 let mut password = "";
-                for _ in 0..4 {
-                    self.net_index = (self.net_index + 1) % 3;
+                for _ in 0..6 {
+                    self.net_index = (self.net_index + 1) % 5;
                     let (s, p) = match self.net_index {
+                        // The saved one first - it is whatever last worked - then
+                        // every network baked in from wifi.txt.
                         0 => (self.cfg_ssid.as_str(), self.cfg_psk.as_str()),
-                        1 => (WIFI_SSID2, WIFI_PASS2),
-                        _ => (WIFI_SSID3, WIFI_PASS3),
+                        1 => (WIFI_SSID, WIFI_PASS),
+                        2 => (WIFI_SSID2, WIFI_PASS2),
+                        3 => (WIFI_SSID3, WIFI_PASS3),
+                        _ => (WIFI_SSID4, WIFI_PASS4),
                     };
                     if !s.is_empty() {
                         (ssid, password) = (s, p);

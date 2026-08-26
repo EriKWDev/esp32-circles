@@ -223,6 +223,8 @@ fn emit_secrets(manifest: &Path, out_dir: &Path) {
         "WIFI_PASS2",
         "WIFI_SSID3",
         "WIFI_PASS3",
+        "WIFI_SSID4",
+        "WIFI_PASS4",
         "RB_HOST",
         "RB_USER",
         "RB_PASS",
@@ -253,6 +255,8 @@ fn emit_secrets(manifest: &Path, out_dir: &Path) {
     let pass2 = pick("WIFI_PASS2", "pass2", "");
     let ssid3 = pick("WIFI_SSID3", "ssid3", "");
     let pass3 = pick("WIFI_PASS3", "pass3", "");
+    let ssid4 = pick("WIFI_SSID4", "ssid4", "");
+    let pass4 = pick("WIFI_PASS4", "pass4", "");
     let host = pick("RB_HOST", "host", "192.168.4.200");
     let user = pick("RB_USER", "user", "root");
     let api_pass = pick("RB_PASS", "apipass", "");
@@ -272,6 +276,8 @@ fn emit_secrets(manifest: &Path, out_dir: &Path) {
     writeln!(out, "pub const WIFI_PASS2: &str = {pass2:?};").unwrap();
     writeln!(out, "pub const WIFI_SSID3: &str = {ssid3:?};").unwrap();
     writeln!(out, "pub const WIFI_PASS3: &str = {pass3:?};").unwrap();
+    writeln!(out, "pub const WIFI_SSID4: &str = {ssid4:?};").unwrap();
+    writeln!(out, "pub const WIFI_PASS4: &str = {pass4:?};").unwrap();
     writeln!(out, "pub const RB_HOST: &str = {host:?};").unwrap();
     writeln!(out, "pub const RB_USER: &str = {user:?};").unwrap();
     writeln!(out, "pub const RB_PASS: &str = {api_pass:?};").unwrap();
